@@ -1,0 +1,26 @@
+[project]
+name = "transitory-inflation-macro-research"
+version = "0.1.0"
+description = "Research scaffold for transitory inflation replication, real-time macro signals, and market linkage analysis."
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# app/ and scripts/ insert src/ into sys.path before importing the package,
+# so their package imports cannot sit at the top of the file.
+"app/*.py" = ["E402"]
+"scripts/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff.format]
+quote-style = "double"

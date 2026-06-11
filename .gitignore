@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Environments and secrets
+.venv/
+.env
+.env.*
+!.env.example
+
+# Local data / generated artifacts
+data/raw/*
+data/interim/*
+data/processed/*
+data/external/*
+!data/**/.gitkeep
+!data/sample/**
+reports/figures/*
+reports/tables/*
+reports/notes/*
+artifacts/exports/*
+artifacts/snapshots/*
+!reports/**/.gitkeep
+!artifacts/**/.gitkeep
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
