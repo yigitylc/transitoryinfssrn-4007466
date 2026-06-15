@@ -11,6 +11,7 @@ DEFAULT_EPSILON_THRESHOLD_PP = 0.50
 DEFAULT_FED_TARGET_THRESHOLD_PP = 0.50
 DEFAULT_FED_TARGET = 2.00
 DEFAULT_REGIME_MIN_PRIOR_OBS = 36
+DEFAULT_THRESHOLD_SENSITIVITY_LEVELS: tuple[float, ...] = (0.25, 0.50, 0.75, 1.00)
 
 REGIME_ORDER: tuple[str, ...] = (
     "elevated rising",
@@ -321,43 +322,53 @@ def build_historical_validation_frame(
     )
 
 
-def forward_outcome_summary(
+def _summary_required_columns(suffix: str) -> list[str]:
+    return [
+        f"cpi_yoy_fwd_{suffix}",
+        f"epsilon_fwd_{suffix}",
+        f"cpi_yoy_change_{suffix}",
+        f"epsilon_change_{suffix}",
+        f"baseline_normalized_{suffix}",
+        f"fed_target_normalized_{suffix}",
+        f"partial_decay_50_{suffix}",
+        f"partial_decay_80_{suffix}",
+        f"positive_shock_resolved_{suffix}",
+        f"positive_shock_downside_overshoot_{suffix}",
+        f"positive_shock_persistent_{suffix}",
+        f"absolute_gap_persistent_{suffix}",
+        f"persistent_{suffix}",
+        f"reaccelerated_{suffix}",
+    ]
+
+
+def _forward_outcome_summary_by_groups(
     df: pd.DataFrame,
-    group_col: str,
+    group_cols: Iterable[str],
     horizons: Iterable[int] = DEFAULT_LABEL_HORIZONS,
 ) -> pd.DataFrame:
-    """Summarize forward outcomes by a current-month grouping column."""
+    """Summarize forward outcomes by one or more current-month grouping columns."""
 
     horizons = _horizons(horizons)
-    _require_columns(df, [group_col])
+    group_cols = tuple(group_cols)
+    if not group_cols:
+        raise ValueError("At least one grouping column is required")
+    _require_columns(df, group_cols)
     rows: list[dict[str, object]] = []
 
     for horizon in horizons:
         suffix = _suffix(horizon)
-        required = [
-            f"cpi_yoy_fwd_{suffix}",
-            f"epsilon_fwd_{suffix}",
-            f"cpi_yoy_change_{suffix}",
-            f"epsilon_change_{suffix}",
-            f"baseline_normalized_{suffix}",
-            f"fed_target_normalized_{suffix}",
-            f"partial_decay_50_{suffix}",
-            f"partial_decay_80_{suffix}",
-            f"positive_shock_resolved_{suffix}",
-            f"positive_shock_downside_overshoot_{suffix}",
-            f"positive_shock_persistent_{suffix}",
-            f"absolute_gap_persistent_{suffix}",
-            f"persistent_{suffix}",
-            f"reaccelerated_{suffix}",
-        ]
+        required = _summary_required_columns(suffix)
         _require_columns(df, required)
-        valid = df[group_col].notna() & df[f"cpi_yoy_fwd_{suffix}"].notna()
+        valid_groups = df.loc[:, list(group_cols)].notna().all(axis=1)
+        valid = valid_groups & df[f"cpi_yoy_fwd_{suffix}"].notna()
         current = df.loc[valid].copy()
 
-        for group_value, group in current.groupby(group_col, dropna=True):
-            rows.append(
+        for group_values, group in current.groupby(list(group_cols), dropna=True):
+            if len(group_cols) == 1:
+                group_values = (group_values,)
+            row = dict(zip(group_cols, group_values, strict=True))
+            row.update(
                 {
-                    group_col: group_value,
                     "horizon_months": horizon,
                     "count": int(len(group)),
                     "avg_future_cpi_yoy_change": float(
@@ -397,8 +408,19 @@ def forward_outcome_summary(
                     "reacceleration_rate": _hit_rate(group[f"reaccelerated_{suffix}"]),
                 }
             )
+            rows.append(row)
 
-    return pd.DataFrame(rows, columns=(group_col, *SUMMARY_COLUMNS))
+    return pd.DataFrame(rows, columns=(*group_cols, *SUMMARY_COLUMNS))
+
+
+def forward_outcome_summary(
+    df: pd.DataFrame,
+    group_col: str,
+    horizons: Iterable[int] = DEFAULT_LABEL_HORIZONS,
+) -> pd.DataFrame:
+    """Summarize forward outcomes by a current-month grouping column."""
+
+    return _forward_outcome_summary_by_groups(df, group_cols=(group_col,), horizons=horizons)
 
 
 def forward_outcome_summary_by_regime(
@@ -416,6 +438,97 @@ def forward_outcome_summary_by_short_term_pressure(
 ) -> pd.DataFrame:
     out = add_short_term_pressure_labels(df, output_col=pressure_col)
     return forward_outcome_summary(out, group_col=pressure_col, horizons=horizons)
+
+
+def forward_outcome_summary_by_regime_and_pressure(
+    df: pd.DataFrame,
+    horizons: Iterable[int] = DEFAULT_LABEL_HORIZONS,
+    regime_col: str = "historical_regime",
+    pressure_col: str = "historical_short_term_pressure",
+) -> pd.DataFrame:
+    """Summarize forward outcomes by historical regime crossed with pressure."""
+
+    out = add_short_term_pressure_labels(df, output_col=pressure_col)
+    return _forward_outcome_summary_by_groups(
+        out,
+        group_cols=(regime_col, pressure_col),
+        horizons=horizons,
+    )
+
+
+def threshold_sensitivity_summary(
+    df: pd.DataFrame,
+    horizon: int,
+    thresholds: Iterable[float] = DEFAULT_THRESHOLD_SENSITIVITY_LEVELS,
+    fed_target: float = DEFAULT_FED_TARGET,
+) -> pd.DataFrame:
+    """Summarize outcome sensitivity across fixed mechanical thresholds.
+
+    This is a robustness table, not a threshold-optimization routine. Each row
+    rebuilds validation labels using the stated threshold and the selected
+    horizon, while keeping signal construction unchanged.
+    """
+
+    horizon = _horizons((horizon,))[0]
+    thresholds = tuple(float(value) for value in thresholds)
+    if not thresholds:
+        raise ValueError("At least one threshold is required")
+    invalid = [value for value in thresholds if value <= 0]
+    if invalid:
+        raise ValueError(f"Thresholds must be positive percentage-point values: {invalid}")
+
+    suffix = _suffix(horizon)
+    rows: list[dict[str, object]] = []
+    for threshold in thresholds:
+        validation_df = build_historical_validation_frame(
+            df,
+            forward_horizons=(horizon,),
+            label_horizons=(horizon,),
+            epsilon_threshold_pp=threshold,
+            fed_target_threshold_pp=threshold,
+            fed_target=fed_target,
+        )
+        _require_columns(validation_df, _summary_required_columns(suffix))
+        valid = validation_df[f"cpi_yoy_fwd_{suffix}"].notna()
+        current = validation_df.loc[valid]
+        rows.append(
+            {
+                "threshold_pp": threshold,
+                "horizon_months": horizon,
+                "count": int(len(current)),
+                "avg_future_cpi_yoy_change": float(
+                    current[f"cpi_yoy_change_{suffix}"].mean()
+                ),
+                "median_future_cpi_yoy_change": float(
+                    current[f"cpi_yoy_change_{suffix}"].median()
+                ),
+                "avg_future_epsilon_change": float(current[f"epsilon_change_{suffix}"].mean()),
+                "baseline_normalization_hit_rate": _hit_rate(
+                    current[f"baseline_normalized_{suffix}"]
+                ),
+                "fed_target_normalization_hit_rate": _hit_rate(
+                    current[f"fed_target_normalized_{suffix}"]
+                ),
+                "partial_decay_50_hit_rate": _hit_rate(current[f"partial_decay_50_{suffix}"]),
+                "partial_decay_80_hit_rate": _hit_rate(current[f"partial_decay_80_{suffix}"]),
+                "positive_shock_resolution_rate": _hit_rate(
+                    current[f"positive_shock_resolved_{suffix}"]
+                ),
+                "positive_shock_downside_overshoot_rate": _hit_rate(
+                    current[f"positive_shock_downside_overshoot_{suffix}"]
+                ),
+                "positive_shock_persistent_rate": _hit_rate(
+                    current[f"positive_shock_persistent_{suffix}"]
+                ),
+                "absolute_gap_persistent_rate": _hit_rate(
+                    current[f"absolute_gap_persistent_{suffix}"]
+                ),
+                "persistent_rate": _hit_rate(current[f"persistent_{suffix}"]),
+                "reacceleration_rate": _hit_rate(current[f"reaccelerated_{suffix}"]),
+            }
+        )
+
+    return pd.DataFrame(rows, columns=("threshold_pp", *SUMMARY_COLUMNS))
 
 
 def regime_transition_matrix(
@@ -462,6 +575,7 @@ def validation_examples(
         f"baseline_normalized_{suffix}",
         f"partial_decay_50_{suffix}",
         f"positive_shock_resolved_{suffix}",
+        f"positive_shock_downside_overshoot_{suffix}",
         f"positive_shock_persistent_{suffix}",
         f"persistent_{suffix}",
         f"cpi_yoy_fwd_{suffix}",
@@ -471,6 +585,9 @@ def validation_examples(
     transitory_signal = out[regime_col].isin(TRANSITORY_SIGNAL_REGIMES)
     persistent_signal = out[regime_col].isin(PERSISTENT_SIGNAL_REGIMES)
     positive_shock_resolved = out[f"positive_shock_resolved_{suffix}"].fillna(False).astype(bool)
+    downside_overshoot = (
+        out[f"positive_shock_downside_overshoot_{suffix}"].fillna(False).astype(bool)
+    )
     positive_shock_persistent = out[f"positive_shock_persistent_{suffix}"].fillna(False).astype(bool)
 
     example_cols = [
@@ -508,6 +625,11 @@ def validation_examples(
     return {
         "false_transitory": take(transitory_signal & positive_shock_persistent),
         "false_persistent": take(persistent_signal & positive_shock_resolved),
-        "successful_transitory": take(transitory_signal & positive_shock_resolved),
+        "successful_transitory": take(
+            transitory_signal & positive_shock_resolved & ~downside_overshoot
+        ),
+        "successful_transitory_downside_overshoot": take(
+            transitory_signal & downside_overshoot
+        ),
         "successful_persistent": take(persistent_signal & positive_shock_persistent),
     }

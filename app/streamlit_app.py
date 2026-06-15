@@ -14,6 +14,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from transitory_inflation import data as macro_data
+from transitory_inflation import validation as validation_mod
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
 from transitory_inflation.diagnostics import ljung_box_table, stationarity_diagnostics
 from transitory_inflation.features import (
@@ -35,16 +36,13 @@ from transitory_inflation.plots import (
     tinf_term_structure_figure,
 )
 from transitory_inflation.report import build_trader_report
-from transitory_inflation.validation import (
-    build_historical_validation_frame,
-    forward_outcome_summary_by_regime,
-    forward_outcome_summary_by_short_term_pressure,
-    regime_transition_matrix,
-    validation_examples,
-)
 
 if not hasattr(macro_data, "load_macro_data_for_mode_with_status"):
     macro_data = importlib.reload(macro_data)
+if not hasattr(validation_mod, "forward_outcome_summary_by_regime_and_pressure") or not hasattr(
+    validation_mod, "threshold_sensitivity_summary"
+):
+    validation_mod = importlib.reload(validation_mod)
 
 st.set_page_config(page_title="Transitory Inflation Macro Research", layout="wide")
 st.title("Transitory Inflation Macro Research")
@@ -386,22 +384,41 @@ with tab_validation:
         )
     st.caption(
         "Outcome threshold (pp) defines a material distance from baseline in percentage points. "
-        "Regime and short-term pressure are shown separately because regime captures signal level "
-        "and direction, while pressure captures the 4M/8M/12M TINF ordering; their combination is "
-        "more actionable, but combined tables are reserved for Phase 1 polish."
+        "Positive-shock labels ask whether above-baseline inflation pressure faded; absolute "
+        "baseline convergence asks whether inflation ended close to baseline regardless of "
+        "direction. Regime captures signal level and direction, while short-term pressure captures "
+        "the 4M/8M/12M TINF ordering. Their combination is usually more actionable than either "
+        "group alone."
     )
 
-    validation_df = build_historical_validation_frame(
+    validation_df = validation_mod.build_historical_validation_frame(
         df,
         epsilon_threshold_pp=float(outcome_threshold),
         fed_target_threshold_pp=float(outcome_threshold),
     )
-    regime_summary = forward_outcome_summary_by_regime(
+    combined_summary = validation_mod.forward_outcome_summary_by_regime_and_pressure(
         validation_df, horizons=(validation_horizon,)
     )
-    pressure_summary = forward_outcome_summary_by_short_term_pressure(
+    regime_summary = validation_mod.forward_outcome_summary_by_regime(
         validation_df, horizons=(validation_horizon,)
     )
+    pressure_summary = validation_mod.forward_outcome_summary_by_short_term_pressure(
+        validation_df, horizons=(validation_horizon,)
+    )
+    sensitivity_summary = validation_mod.threshold_sensitivity_summary(
+        df,
+        horizon=validation_horizon,
+        thresholds=(0.25, 0.50, 0.75, 1.00),
+    )
+
+    st.markdown("#### Combined regime x short-term pressure summary")
+    st.caption(
+        "This table crosses the historical regime with short-term pressure. It is often the "
+        "most useful Phase 1 cut because it separates elevated-and-rising inflation pressure "
+        "from elevated-but-cooling pressure. Counts matter: small groups can produce unstable "
+        "rates."
+    )
+    st.dataframe(combined_summary, use_container_width=True)
 
     st.markdown("#### Selected summary")
     if validation_group == "regime":
@@ -415,15 +432,25 @@ with tab_validation:
     st.markdown("#### Forward outcome summary by short-term pressure")
     st.dataframe(pressure_summary, use_container_width=True)
 
+    st.markdown(f"#### Threshold sensitivity ({validation_horizon} months)")
+    st.caption(
+        "This table recomputes outcome labels at fixed thresholds of 0.25, 0.50, 0.75, "
+        "and 1.00 pp. It is sensitivity analysis only, not threshold optimization. Phase 2 "
+        "benchmark comparison is still required before treating hit rates as forecast skill."
+    )
+    st.dataframe(sensitivity_summary, use_container_width=True)
+
     st.markdown(f"#### Regime transition matrix ({validation_horizon} months)")
-    transition = regime_transition_matrix(validation_df, horizon=validation_horizon)
+    transition = validation_mod.regime_transition_matrix(
+        validation_df, horizon=validation_horizon
+    )
     if transition.empty:
         st.info("No valid regime transitions are available for the selected horizon.")
     else:
         st.dataframe(transition, use_container_width=True)
 
     st.markdown("#### False positive / false negative examples")
-    examples = validation_examples(validation_df, horizon=validation_horizon)
+    examples = validation_mod.validation_examples(validation_df, horizon=validation_horizon)
     example_titles = {
         "false_transitory": (
             "False transitory: signal suggested fading pressure, but positive inflation shock persisted"
@@ -431,7 +458,12 @@ with tab_validation:
         "false_persistent": (
             "False persistent: signal suggested persistent pressure, but positive shock resolved"
         ),
-        "successful_transitory": "Successful transitory calls: positive shock resolved",
+        "successful_transitory": (
+            "Successful transitory calls: positive shock resolved without downside overshoot"
+        ),
+        "successful_transitory_downside_overshoot": (
+            "Successful transitory with downside overshoot: positive shock resolved below baseline"
+        ),
         "successful_persistent": "Successful persistent calls: positive shock stayed above threshold",
     }
     for key, title in example_titles.items():

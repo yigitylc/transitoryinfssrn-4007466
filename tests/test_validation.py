@@ -9,7 +9,9 @@ from transitory_inflation.validation import (
     add_outcome_labels,
     add_walk_forward_regime_labels,
     forward_outcome_summary_by_regime,
+    forward_outcome_summary_by_regime_and_pressure,
     regime_transition_matrix,
+    threshold_sensitivity_summary,
     validation_examples,
 )
 
@@ -181,28 +183,104 @@ def test_summary_excludes_rows_without_future_data_for_horizon() -> None:
     assert "absolute_gap_persistent_rate" in summary.columns
 
 
-def test_validation_examples_use_positive_shock_persistence_not_absolute_gap() -> None:
+def test_combined_regime_pressure_summary_uses_historical_columns() -> None:
     df = pd.DataFrame(
         {
-            "date": pd.date_range("2020-01-31", periods=4, freq="ME"),
-            "historical_regime": ["elevated falling", "elevated falling", "elevated rising", "neutral"],
-            "historical_short_term_pressure": ["cooling", "cooling", "firming", "mixed"],
-            "inflation_yoy": [4.0, 0.75, 4.5, 4.0],
-            "epsilon": [2.0, -1.25, 2.5, 2.0],
-            "tinf_4m": [2.0, -1.25, 2.5, 2.0],
+            "date": pd.date_range("2020-01-31", periods=5, freq="ME"),
+            "historical_regime": [
+                "elevated falling",
+                "elevated falling",
+                "elevated rising",
+                "neutral",
+                "neutral",
+            ],
+            "historical_short_term_pressure": ["cooling", "firming", "firming", "mixed", "mixed"],
+            "inflation_yoy": [4.0, 3.0, 4.5, 2.25, 2.0],
+            "epsilon": [2.0, 1.0, 2.5, 0.25, 0.0],
+            "tinf_4m": [2.0, 1.0, 2.5, 0.25, 0.0],
         }
     )
 
     out = add_forward_outcomes(df, horizons=(1,))
     out = add_outcome_labels(out, horizons=(1,), epsilon_threshold_pp=0.50)
-    examples = validation_examples(out, horizon=1)
+    summary = forward_outcome_summary_by_regime_and_pressure(out, horizons=(1,))
 
-    assert examples["false_transitory"].empty
+    assert "historical_regime" in summary.columns
+    assert "historical_short_term_pressure" in summary.columns
+    assert "regime" not in summary.columns
+    assert "short_term_pressure" not in summary.columns
+    assert summary["count"].sum() == 4
+    assert "positive_shock_resolution_rate" in summary.columns
+    assert "positive_shock_downside_overshoot_rate" in summary.columns
+
+
+def test_threshold_sensitivity_calculates_all_phase_one_thresholds() -> None:
+    df = _validation_frame(periods=8)
+
+    summary = threshold_sensitivity_summary(df, horizon=1)
+
+    assert summary["threshold_pp"].tolist() == [0.25, 0.50, 0.75, 1.00]
+    assert summary["count"].tolist() == [7, 7, 7, 7]
+    assert "positive_shock_resolution_rate" in summary.columns
+    phase_two_columns = {"mae", "rmse", "forecast", "confusion_matrix"}
+    assert summary.columns.intersection(phase_two_columns).empty
+
+
+def test_validation_examples_separate_downside_overshoot_from_false_transitory() -> None:
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2020-01-31", periods=10, freq="ME"),
+            "historical_regime": [
+                "elevated falling",
+                "neutral",
+                "elevated falling",
+                "neutral",
+                "elevated falling",
+                "neutral",
+                "elevated rising",
+                "neutral",
+                "elevated rising",
+                "neutral",
+            ],
+            "historical_short_term_pressure": [
+                "cooling",
+                "mixed",
+                "cooling",
+                "mixed",
+                "cooling",
+                "mixed",
+                "firming",
+                "mixed",
+                "firming",
+                "mixed",
+            ],
+            "epsilon": [2.0, -1.25, 2.0, 0.25, 2.0, 1.25, 2.0, 1.25, 2.0, 0.25],
+            "tinf_4m": [2.0, -1.25, 2.0, 0.25, 2.0, 1.25, 2.0, 1.25, 2.0, 0.25],
+        }
+    )
+    df["inflation_yoy"] = 2.0 + df["epsilon"]
+
+    out = add_forward_outcomes(df, horizons=(1,))
+    out = add_outcome_labels(out, horizons=(1,), epsilon_threshold_pp=0.50)
+    examples = validation_examples(out, horizon=1, max_examples=20)
+
+    assert len(examples["false_transitory"]) == 1
     assert len(examples["successful_transitory"]) == 1
-    row = examples["successful_transitory"].iloc[0]
-    assert row["positive_shock_resolved_1m"]
-    assert row["positive_shock_downside_overshoot_1m"]
-    assert row["absolute_gap_persistent_1m"]
+    assert len(examples["successful_transitory_downside_overshoot"]) == 1
+    assert len(examples["successful_persistent"]) == 1
+    assert len(examples["false_persistent"]) == 1
+
+    plain_success = examples["successful_transitory"].iloc[0]
+    downside_success = examples["successful_transitory_downside_overshoot"].iloc[0]
+    false_transitory = examples["false_transitory"].iloc[0]
+
+    assert plain_success["positive_shock_resolved_1m"]
+    assert not plain_success["positive_shock_downside_overshoot_1m"]
+    assert downside_success["positive_shock_resolved_1m"]
+    assert downside_success["positive_shock_downside_overshoot_1m"]
+    assert not false_transitory["positive_shock_downside_overshoot_1m"]
+    assert false_transitory["positive_shock_persistent_1m"]
+    assert false_transitory["persistent_1m"]
 
 
 def test_walk_forward_regime_thresholds_use_only_prior_tinf_history() -> None:
