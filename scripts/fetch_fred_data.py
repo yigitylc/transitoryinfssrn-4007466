@@ -10,7 +10,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from transitory_inflation.config import SAMPLE_MODES
-from transitory_inflation.data import load_macro_data_for_mode, save_dataset
+from transitory_inflation.data import load_macro_data_for_mode_with_status, save_dataset
 
 
 def main() -> None:
@@ -28,10 +28,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    df = load_macro_data_for_mode(args.mode)
+    result = load_macro_data_for_mode_with_status(args.mode)
+    if result.data_source_used == "demo":
+        raise RuntimeError("Refusing to save emergency demo data as a raw FRED cache.")
+
+    df = result.data
     out = save_dataset(df, PROJECT_ROOT / "data" / "raw" / f"fred_base_macro_{args.mode}.csv")
     span = f"{df['date'].min().date()} -> {df['date'].max().date()}"
-    print(f"Saved {len(df):,} rows ({args.mode}, {span}) to {out}")
+    print(
+        f"Saved {len(df):,} rows ({args.mode}, {span}, source={result.data_source_used}) to {out}"
+    )
+    print(f"Fetch status: {result.live_fetch_status}")
 
 
 if __name__ == "__main__":

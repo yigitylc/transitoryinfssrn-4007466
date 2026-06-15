@@ -32,7 +32,15 @@ The dashboard uses FRED data:
 * `CPIAUCSL` — Consumer Price Index for All Urban Consumers
 * `TB3MS` — 3-Month Treasury Bill, used as a short-rate proxy
 
-The current implementation uses public FRED CSV endpoints by default. A FRED API key is not required for the default workflow.
+Data source priority:
+
+1. Official FRED observations API using optional `FRED_API_KEY`
+2. Public FRED CSV endpoints when the key is missing or the API request fails
+3. Local cached raw FRED files under `data/raw/`
+4. Clearly labeled demo data only as an emergency fallback
+
+`FRED_API_KEY` is optional but recommended. Put real keys only in a local `.env`
+file; `.env` is ignored and must not be committed.
 
 ## Methodology
 

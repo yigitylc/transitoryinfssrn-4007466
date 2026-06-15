@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -12,8 +13,8 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+from transitory_inflation import data as macro_data
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
-from transitory_inflation.data import load_macro_data_for_mode
 from transitory_inflation.diagnostics import ljung_box_table, stationarity_diagnostics
 from transitory_inflation.features import (
     BASELINE_META,
@@ -34,6 +35,16 @@ from transitory_inflation.plots import (
     tinf_term_structure_figure,
 )
 from transitory_inflation.report import build_trader_report
+from transitory_inflation.validation import (
+    build_historical_validation_frame,
+    forward_outcome_summary_by_regime,
+    forward_outcome_summary_by_short_term_pressure,
+    regime_transition_matrix,
+    validation_examples,
+)
+
+if not hasattr(macro_data, "load_macro_data_for_mode_with_status"):
+    macro_data = importlib.reload(macro_data)
 
 st.set_page_config(page_title="Transitory Inflation Macro Research", layout="wide")
 st.title("Transitory Inflation Macro Research")
@@ -59,6 +70,27 @@ def pressure_label(term_structure: object) -> str:
         "mixed": "mixed",
     }
     return labels.get(str(term_structure), "mixed")
+
+
+def date_label(date: pd.Timestamp | None) -> str:
+    """Format optional dates for dashboard status text."""
+
+    if date is None:
+        return "unknown"
+    return str(pd.to_datetime(date).date())
+
+
+def latest_valid_date(
+    df: pd.DataFrame,
+    value_col: str = "inflation_yoy",
+    date_col: str = "date",
+) -> pd.Timestamp | None:
+    """Return the latest date where a value column is actually available."""
+
+    dates = pd.to_datetime(df.loc[df[value_col].notna(), date_col])
+    if dates.empty:
+        return None
+    return pd.Timestamp(dates.max())
 
 
 def signal_conclusion(snapshot: dict[str, object]) -> tuple[str, ...]:
@@ -158,31 +190,72 @@ meta = BASELINE_META[baseline_method]
 mode_meta = SAMPLE_MODES[sample_mode]
 
 @st.cache_data(show_spinner=True)
-def get_data(sample_mode: str) -> pd.DataFrame:
-    return load_macro_data_for_mode(sample_mode)
+def get_data(sample_mode: str):
+    return macro_data.load_macro_data_for_mode_with_status(sample_mode)
 
-try:
-    raw = get_data(sample_mode)
-except Exception as exc:
-    st.error(f"FRED data fetch failed: {exc}")
-    st.info("No fallback sample data is shown. Check network access or FRED availability and rerun.")
-    st.stop()
+load_result = get_data(sample_mode)
+raw = load_result.data
+
+raw_cache_end = pd.to_datetime(raw["date"].max()).date() if not raw.empty else "unknown"
+latest_cpi_yoy = latest_valid_date(raw, "inflation_yoy")
+if load_result.data_source_used == "fred_csv":
+    st.warning(
+        "Official FRED API was unavailable or not configured, so the dashboard is using "
+        "public FRED CSV data."
+    )
+elif load_result.data_source_used == "cached_fred":
+    st.warning(
+        f"Live FRED fetch failed, so the dashboard is using cached data from "
+        f"`{load_result.cache_file_used}` with CPI YoY through {date_label(latest_cpi_yoy)} "
+        f"(raw cache rows through {raw_cache_end}). Refresh the cache when network access returns."
+    )
+elif load_result.data_source_used == "demo":
+    st.error(
+        "Emergency demo data is being shown because official FRED API, public FRED CSV, "
+        "and local cached FRED data were all unavailable. Do not use these values for "
+        "research conclusions."
+    )
 
 if raw.empty:
     st.error("No data rows inside the selected sample mode window.")
     st.stop()
 
 span_start = pd.to_datetime(raw["date"].min()).date()
-span_end = pd.to_datetime(raw["date"].max()).date()
+span_end = date_label(latest_valid_date(raw, "inflation_yoy"))
+raw_span_end = pd.to_datetime(raw["date"].max()).date()
+span_text = f"{span_start} -> {span_end}"
+if str(raw_span_end) != span_end:
+    span_text += f"; raw rows through {raw_span_end}"
 baseline_description = BASELINE_DESCRIPTION_OVERRIDES.get(baseline_method, meta.description)
 st.info(
-    f"Sample: **{MODE_LABELS[sample_mode]}** ({span_start} → {span_end}) — {mode_meta.purpose}  \n"
+    f"Sample: **{MODE_LABELS[sample_mode]}** ({span_text}) — {mode_meta.purpose}  \n"
     f"Baseline: **{baseline_method}** — {baseline_description}"
 )
 if meta.warning:
     st.warning(meta.warning)
 
 df = add_transitory_inflation_features(raw, baseline_method=baseline_method)
+status_snapshot = latest_signal_snapshot(df)
+latest_signal_date = (
+    date_label(pd.to_datetime(status_snapshot["date"]))
+    if status_snapshot.get("available")
+    else "unavailable"
+)
+latest_cpi_observation = latest_valid_date(raw, "cpi_level")
+imputation_applied = bool(
+    "cpi_imputed" in raw.columns and raw["cpi_imputed"].fillna(False).astype(bool).any()
+)
+st.caption(
+    "Data status: "
+    f"data_source_used={load_result.data_source_used}; "
+    f"live_fetch_status={load_result.live_fetch_status}; "
+    f"cache_file_used={load_result.cache_file_used or 'n/a'}; "
+    f"raw_data_end={raw_span_end}; "
+    f"latest_cpi_observation_date={date_label(latest_cpi_observation)}; "
+    f"latest_valid_cpi_yoy_date={span_end}; "
+    f"latest_valid_signal_date={latest_signal_date}; "
+    f"cpi_imputation_applied={imputation_applied}."
+)
 
 if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
     imputed_months = ", ".join(
@@ -194,9 +267,10 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
         "YoY and TINF values touching them are partly estimates."
     )
 
-tab_signal, tab_framework, tab_decay, tab_robustness, tab_report = st.tabs(
+tab_signal, tab_validation, tab_framework, tab_decay, tab_robustness, tab_report = st.tabs(
     [
         "Current Macro Signal",
+        "Historical Signal Validation",
         "Paper Framework",
         "Decay / Convergence",
         "Robustness",
@@ -261,6 +335,112 @@ with tab_signal:
         "signal is how fast they separate and when they cross, which usually precedes a change in "
         "the regime label above.",
     )
+
+with tab_validation:
+    st.subheader("Historical Signal Validation")
+    st.markdown(
+        "This tab tests whether the current-month signal historically contained forward information. "
+        "Future CPI outcomes are used only for validation, not signal construction."
+    )
+    st.warning(
+        "Historical validation is live-like only under rolling_36_shifted or expanding_shifted baselines."
+    )
+    st.warning("full_sample is ex-post and should not be used to judge live signal success.")
+    st.markdown(
+        "Positive-shock resolution asks whether above-baseline inflation pressure faded. "
+        "If epsilon moves from positive to negative, the high-inflation shock resolved and "
+        "overshot lower."
+    )
+    st.markdown(
+        "Absolute baseline convergence asks whether inflation ended close to baseline, "
+        "regardless of direction. A negative overshoot may fail this test because inflation "
+        "is still far from baseline, but it is not persistent high inflation."
+    )
+    st.markdown(
+        "For trading interpretation, positive-shock resolution is usually more actionable. "
+        "For equilibrium or policy-stability interpretation, absolute baseline convergence "
+        "remains useful. Counts matter: small groups can produce unstable hit rates, and "
+        "Phase 2 benchmark comparison is still needed before treating hit rates as signal skill."
+    )
+
+    control_col1, control_col2, control_col3 = st.columns(3)
+    with control_col1:
+        validation_horizon = st.selectbox(
+            "Horizon",
+            options=[6, 12, 24, 36],
+            index=1,
+            format_func=lambda months: f"{months} months",
+        )
+    with control_col2:
+        outcome_threshold = st.number_input(
+            "Outcome threshold (pp)",
+            min_value=0.01,
+            value=0.50,
+            step=0.05,
+            format="%.2f",
+        )
+    with control_col3:
+        validation_group = st.selectbox(
+            "Group by",
+            options=["regime", "short-term pressure"],
+        )
+    st.caption(
+        "Outcome threshold (pp) defines a material distance from baseline in percentage points. "
+        "Regime and short-term pressure are shown separately because regime captures signal level "
+        "and direction, while pressure captures the 4M/8M/12M TINF ordering; their combination is "
+        "more actionable, but combined tables are reserved for Phase 1 polish."
+    )
+
+    validation_df = build_historical_validation_frame(
+        df,
+        epsilon_threshold_pp=float(outcome_threshold),
+        fed_target_threshold_pp=float(outcome_threshold),
+    )
+    regime_summary = forward_outcome_summary_by_regime(
+        validation_df, horizons=(validation_horizon,)
+    )
+    pressure_summary = forward_outcome_summary_by_short_term_pressure(
+        validation_df, horizons=(validation_horizon,)
+    )
+
+    st.markdown("#### Selected summary")
+    if validation_group == "regime":
+        st.dataframe(regime_summary, use_container_width=True)
+    else:
+        st.dataframe(pressure_summary, use_container_width=True)
+
+    st.markdown("#### Forward outcome summary by regime")
+    st.dataframe(regime_summary, use_container_width=True)
+
+    st.markdown("#### Forward outcome summary by short-term pressure")
+    st.dataframe(pressure_summary, use_container_width=True)
+
+    st.markdown(f"#### Regime transition matrix ({validation_horizon} months)")
+    transition = regime_transition_matrix(validation_df, horizon=validation_horizon)
+    if transition.empty:
+        st.info("No valid regime transitions are available for the selected horizon.")
+    else:
+        st.dataframe(transition, use_container_width=True)
+
+    st.markdown("#### False positive / false negative examples")
+    examples = validation_examples(validation_df, horizon=validation_horizon)
+    example_titles = {
+        "false_transitory": (
+            "False transitory: signal suggested fading pressure, but positive inflation shock persisted"
+        ),
+        "false_persistent": (
+            "False persistent: signal suggested persistent pressure, but positive shock resolved"
+        ),
+        "successful_transitory": "Successful transitory calls: positive shock resolved",
+        "successful_persistent": "Successful persistent calls: positive shock stayed above threshold",
+    }
+    for key, title in example_titles.items():
+        st.markdown(f"##### {title}")
+        table = examples[key]
+        if table.empty:
+            st.info("No examples found under the current settings.")
+        else:
+            st.dataframe(table, use_container_width=True)
 
 with tab_report:
     st.subheader("Report")

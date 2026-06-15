@@ -25,6 +25,7 @@ artifacts/exports/*
 artifacts/snapshots/*
 !reports/**/.gitkeep
 !artifacts/**/.gitkeep
+references/*.pdf
 
 # OS / IDE
 .DS_Store

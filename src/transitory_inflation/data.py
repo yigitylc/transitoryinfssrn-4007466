@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from io import StringIO
@@ -8,10 +9,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
+from dotenv import load_dotenv
 
-from .config import DEFAULT_SAMPLE_MODE, SampleMode, resolve_sample_mode
+from .config import DEFAULT_SAMPLE_MODE, PROJECT_ROOT, RAW_DATA_DIR, SampleMode, resolve_sample_mode
 
+FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+CACHED_BASE_MACRO_STEM = "fred_base_macro"
+BASE_MACRO_COLUMNS = ("date", "cpi_level", "tbill_3m", "inflation_yoy")
+CACHED_INPUT_COLUMN_SETS = (
+    ("date", "CPIAUCSL", "TB3MS"),
+    ("date", "cpi_level", "tbill_3m"),
+)
+BASE_FRED_SERIES = ("CPIAUCSL", "TB3MS")
 
 # Months fetched before a sample's start_date so 12-month YoY inflation is
 # defined from the first sample row instead of 12 months later.
@@ -25,7 +35,109 @@ class FredSeries:
     frequency: str = "monthly"
 
 
-def fetch_fred_series(
+@dataclass(frozen=True)
+class MacroDataLoadResult:
+    """Macro data plus source metadata for dashboard disclosure."""
+
+    data: pd.DataFrame
+    data_source_used: str
+    live_fetch_status: str
+    cache_file_used: str | None = None
+    api_key_configured: bool = False
+
+
+def fred_api_key() -> str | None:
+    """Load the optional FRED API key from the environment or project .env."""
+
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+    value = os.getenv("FRED_API_KEY", "").strip()
+    return value or None
+
+
+def _safe_error(exc: Exception, secret: str | None = None) -> str:
+    """Return a diagnostic string that cannot leak configured secrets."""
+
+    message = str(exc)
+    if secret:
+        message = message.replace(secret, "[redacted]")
+    return f"{exc.__class__.__name__}: {message}"
+
+
+def _fred_observations_to_frame(payload: dict[str, object], series_id: str) -> pd.DataFrame:
+    observations = payload.get("observations")
+    if not isinstance(observations, list):
+        raise ValueError(f"Unexpected FRED API response for {series_id}")
+
+    rows = [
+        {
+            "date": item.get("date"),
+            series_id: item.get("value"),
+        }
+        for item in observations
+        if isinstance(item, dict)
+    ]
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame({"date": pd.Series(dtype="datetime64[ns]"), series_id: []})
+
+    df["date"] = pd.to_datetime(df["date"])
+    df[series_id] = pd.to_numeric(df[series_id].replace(".", np.nan), errors="coerce")
+    return df[["date", series_id]].dropna().reset_index(drop=True)
+
+
+def _merge_series_frames(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
+    merged: pd.DataFrame | None = None
+    for current in frames:
+        merged = current if merged is None else merged.merge(current, on="date", how="outer")
+
+    if merged is None:
+        raise ValueError("No series IDs provided")
+
+    return merged.sort_values("date").reset_index(drop=True)
+
+
+def fetch_fred_series_api(
+    series_id: str,
+    api_key: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Fetch one series from the official FRED observations API."""
+
+    params = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+    }
+    if start_date is not None:
+        params["observation_start"] = start_date
+    if end_date is not None:
+        params["observation_end"] = end_date
+
+    response = requests.get(FRED_API_URL, params=params, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    if isinstance(payload, dict) and "error_code" in payload:
+        raise ValueError(f"FRED API error for {series_id}: {payload.get('error_code')}")
+
+    return _fred_observations_to_frame(payload, series_id)
+
+
+def merge_fred_series_api(
+    series_ids: Iterable[str],
+    api_key: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Fetch and outer-join official FRED API series by date."""
+
+    return _merge_series_frames(
+        fetch_fred_series_api(series_id, api_key, start_date=start_date, end_date=end_date)
+        for series_id in series_ids
+    )
+
+
+def fetch_fred_series_csv(
     series_id: str,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -53,6 +165,16 @@ def fetch_fred_series(
     return df[["date", series_id]].dropna().reset_index(drop=True)
 
 
+def fetch_fred_series(
+    series_id: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Backward-compatible alias for the public FRED CSV fetcher."""
+
+    return fetch_fred_series_csv(series_id, start_date=start_date, end_date=end_date)
+
+
 def merge_fred_series(
     series_ids: Iterable[str],
     start_date: str | None = None,
@@ -60,15 +182,10 @@ def merge_fred_series(
 ) -> pd.DataFrame:
     """Fetch and outer-join multiple FRED series by date."""
 
-    merged: pd.DataFrame | None = None
-    for series_id in series_ids:
-        current = fetch_fred_series(series_id, start_date=start_date, end_date=end_date)
-        merged = current if merged is None else merged.merge(current, on="date", how="outer")
-
-    if merged is None:
-        raise ValueError("No series IDs provided")
-
-    return merged.sort_values("date").reset_index(drop=True)
+    return _merge_series_frames(
+        fetch_fred_series_csv(series_id, start_date=start_date, end_date=end_date)
+        for series_id in series_ids
+    )
 
 
 def slice_date_range(
@@ -97,6 +214,23 @@ def apply_sample_mode(df: pd.DataFrame, mode: SampleMode | str, date_col: str = 
 
     resolved = resolve_sample_mode(mode)
     return slice_date_range(df, start_date=resolved.start_date, end_date=resolved.end_date, date_col=date_col)
+
+
+def latest_valid_observation_date(
+    df: pd.DataFrame,
+    value_col: str = "inflation_yoy",
+    date_col: str = "date",
+) -> pd.Timestamp | None:
+    """Return the latest date where a value column is actually available."""
+
+    missing = [column for column in (date_col, value_col) if column not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required columns: {missing}")
+
+    dates = pd.to_datetime(df.loc[df[value_col].notna(), date_col])
+    if dates.empty:
+        return None
+    return pd.Timestamp(dates.max())
 
 
 def monthly_last(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
@@ -150,6 +284,36 @@ def _fetch_start(start_date: str | None, warmup_months: int = YOY_WARMUP_MONTHS)
     return (pd.to_datetime(start_date) - pd.DateOffset(months=warmup_months)).strftime("%Y-%m-%d")
 
 
+def load_base_macro_data_from_api(
+    api_key: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Load core macro data through the official FRED API."""
+
+    raw = merge_fred_series_api(
+        BASE_FRED_SERIES,
+        api_key=api_key,
+        start_date=_fetch_start(start_date),
+        end_date=end_date,
+    )
+    return build_base_frame(raw, start_date=start_date, end_date=end_date)
+
+
+def load_base_macro_data_from_csv(
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Load core macro data through public FRED CSV endpoints."""
+
+    raw = merge_fred_series(
+        BASE_FRED_SERIES,
+        start_date=_fetch_start(start_date),
+        end_date=end_date,
+    )
+    return build_base_frame(raw, start_date=start_date, end_date=end_date)
+
+
 def load_base_macro_data(start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
     """Load core macro data for an explicit inclusive date range.
 
@@ -163,19 +327,152 @@ def load_base_macro_data(start_date: str | None = None, end_date: str | None = N
       2001-07; TB3MS covers the full paper sample (history starts 1934).
     """
 
-    raw = merge_fred_series(
-        ["CPIAUCSL", "TB3MS"],
-        start_date=_fetch_start(start_date),
-        end_date=end_date,
-    )
-    return build_base_frame(raw, start_date=start_date, end_date=end_date)
+    return load_base_macro_data_from_csv(start_date=start_date, end_date=end_date)
 
 
-def load_macro_data_for_mode(mode: SampleMode | str = DEFAULT_SAMPLE_MODE) -> pd.DataFrame:
+def load_macro_data_for_mode(
+    mode: SampleMode | str = DEFAULT_SAMPLE_MODE,
+    allow_demo: bool = False,
+) -> pd.DataFrame:
     """Load core macro data for a named sample mode (see ``config.SAMPLE_MODES``)."""
 
+    result = load_macro_data_for_mode_with_status(mode)
+    if result.data_source_used == "demo" and not allow_demo:
+        raise RuntimeError(
+            "Only emergency demo data is available. Use "
+            "load_macro_data_for_mode_with_status() to disclose this explicitly."
+        )
+    return result.data
+
+
+def load_macro_data_for_mode_with_status(
+    mode: SampleMode | str = DEFAULT_SAMPLE_MODE,
+) -> MacroDataLoadResult:
+    """Load macro data with API -> CSV -> cache -> demo fallback order."""
+
     resolved = resolve_sample_mode(mode)
-    return load_base_macro_data(start_date=resolved.start_date, end_date=resolved.end_date)
+    status_parts: list[str] = []
+    key = fred_api_key()
+
+    if key:
+        try:
+            data = load_base_macro_data_from_api(
+                key,
+                start_date=resolved.start_date,
+                end_date=resolved.end_date,
+            )
+            status_parts.append("fred_api: ok")
+            return MacroDataLoadResult(
+                data=data,
+                data_source_used="fred_api",
+                live_fetch_status="; ".join(status_parts),
+                api_key_configured=True,
+            )
+        except Exception as exc:
+            status_parts.append(f"fred_api: failed ({_safe_error(exc, key)})")
+    else:
+        status_parts.append("fred_api: skipped (FRED_API_KEY not configured)")
+
+    try:
+        data = load_base_macro_data_from_csv(
+            start_date=resolved.start_date,
+            end_date=resolved.end_date,
+        )
+        status_parts.append("fred_csv: ok")
+        return MacroDataLoadResult(
+            data=data,
+            data_source_used="fred_csv",
+            live_fetch_status="; ".join(status_parts),
+            api_key_configured=key is not None,
+        )
+    except Exception as exc:
+        status_parts.append(f"fred_csv: failed ({_safe_error(exc)})")
+
+    try:
+        cache_path = find_cached_macro_data_file(resolved)
+        data = load_cached_macro_data_for_mode(resolved)
+        status_parts.append("cached_fred: ok")
+        return MacroDataLoadResult(
+            data=data,
+            data_source_used="cached_fred",
+            live_fetch_status="; ".join(status_parts),
+            cache_file_used=cache_path.name,
+            api_key_configured=key is not None,
+        )
+    except Exception as exc:
+        status_parts.append(f"cached_fred: failed ({_safe_error(exc)})")
+
+    data = apply_sample_mode(make_demo_data(), resolved)
+    if data.empty:
+        data = make_demo_data()
+    status_parts.append("demo: emergency fallback")
+    return MacroDataLoadResult(
+        data=data,
+        data_source_used="demo",
+        live_fetch_status="; ".join(status_parts),
+        api_key_configured=key is not None,
+    )
+
+
+def cached_macro_data_path(mode: SampleMode | str = DEFAULT_SAMPLE_MODE) -> Path:
+    """Return the preferred cached raw macro path for a sample mode."""
+
+    resolved = resolve_sample_mode(mode)
+    return RAW_DATA_DIR / f"{CACHED_BASE_MACRO_STEM}_{resolved.name}.csv"
+
+
+def find_cached_macro_data_file(mode: SampleMode | str = DEFAULT_SAMPLE_MODE) -> Path:
+    """Find a cached macro dataset usable for the requested sample mode.
+
+    An exact mode-specific cache is preferred. If it is absent, the max-history
+    cache is used as a superset and sliced to the requested sample window.
+    """
+
+    exact = cached_macro_data_path(mode)
+    if exact.exists():
+        return exact
+
+    max_history = cached_macro_data_path("max_history")
+    if max_history.exists():
+        return max_history
+
+    raise FileNotFoundError(
+        f"No cached macro data found. Expected {exact} or {max_history}."
+    )
+
+
+def load_cached_macro_data_for_mode(mode: SampleMode | str = DEFAULT_SAMPLE_MODE) -> pd.DataFrame:
+    """Load cached raw macro data for a named sample mode.
+
+    This is an offline fallback for dashboards/tests when FRED cannot be
+    reached. Cached CPI levels and rates are treated as raw inputs and rebuilt
+    through the same monthly, imputation, YoY, and sample-slicing path as live
+    FRED data. Derived cached columns such as ``inflation_yoy`` or
+    ``cpi_imputed`` are never trusted.
+    """
+
+    path = find_cached_macro_data_file(mode)
+    cached = pd.read_csv(path)
+    if {"date", "CPIAUCSL", "TB3MS"}.issubset(cached.columns):
+        merged = cached[["date", "CPIAUCSL", "TB3MS"]].copy()
+    elif {"date", "cpi_level", "tbill_3m"}.issubset(cached.columns):
+        merged = cached[["date", "cpi_level", "tbill_3m"]].rename(
+            columns={"cpi_level": "CPIAUCSL", "tbill_3m": "TB3MS"}
+        )
+    else:
+        expected = " or ".join(str(columns) for columns in CACHED_INPUT_COLUMN_SETS)
+        raise ValueError(f"Cached macro data {path} must include one of: {expected}")
+
+    merged["date"] = pd.to_datetime(merged["date"])
+    merged["CPIAUCSL"] = pd.to_numeric(merged["CPIAUCSL"], errors="coerce")
+    merged["TB3MS"] = pd.to_numeric(merged["TB3MS"], errors="coerce")
+
+    resolved = resolve_sample_mode(mode)
+    return build_base_frame(
+        merged,
+        start_date=resolved.start_date,
+        end_date=resolved.end_date,
+    )
 
 
 def save_dataset(df: pd.DataFrame, path: str | Path) -> Path:
@@ -209,6 +506,7 @@ def make_demo_data(periods: int = 260, seed: int = 7) -> pd.DataFrame:
         {
             "date": dates,
             "cpi_level": cpi_level,
+            "cpi_imputed": False,
             "tbill_3m": 0.25 + np.maximum(inflation_yoy - 2.0, 0) * 0.25,
             "inflation_yoy": inflation_yoy,
             "is_demo_data": True,
