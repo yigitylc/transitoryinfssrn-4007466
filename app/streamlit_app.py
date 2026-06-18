@@ -13,6 +13,7 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+from transitory_inflation import benchmarks as benchmark_mod
 from transitory_inflation import data as macro_data
 from transitory_inflation import validation as validation_mod
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
@@ -39,6 +40,8 @@ from transitory_inflation.report import build_trader_report
 
 if not hasattr(macro_data, "load_macro_data_for_mode_with_status"):
     macro_data = importlib.reload(macro_data)
+if not hasattr(benchmark_mod, "benchmark_comparison_tables"):
+    benchmark_mod = importlib.reload(benchmark_mod)
 if not hasattr(validation_mod, "forward_outcome_summary_by_regime_and_pressure") or not hasattr(
     validation_mod, "threshold_sensitivity_summary"
 ):
@@ -265,10 +268,19 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
         "YoY and TINF values touching them are partly estimates."
     )
 
-tab_signal, tab_validation, tab_framework, tab_decay, tab_robustness, tab_report = st.tabs(
+(
+    tab_signal,
+    tab_validation,
+    tab_benchmarks,
+    tab_framework,
+    tab_decay,
+    tab_robustness,
+    tab_report,
+) = st.tabs(
     [
         "Current Macro Signal",
         "Historical Signal Validation",
+        "Benchmark Comparison",
         "Paper Framework",
         "Decay / Convergence",
         "Robustness",
@@ -473,6 +485,120 @@ with tab_validation:
             st.info("No examples found under the current settings.")
         else:
             st.dataframe(table, use_container_width=True)
+
+with tab_benchmarks:
+    st.subheader("Phase 2 Benchmark Comparison")
+    st.markdown(
+        "This tab tests whether the TINF/regime signal adds useful forward inflation "
+        "information beyond simple baselines. Phase 1 hit rates are not enough unless "
+        "they beat naive alternatives."
+    )
+    st.markdown(
+        "Forecasts use only information available at month t. Future CPI outcomes are "
+        "used only for evaluation. Results are historical validation, not a guaranteed "
+        "trading signal."
+    )
+    st.warning("No market variables are included here. Market linkage remains out of scope.")
+    if not meta.live_safe:
+        st.warning(
+            "The selected baseline is not live-safe. Benchmark results under this baseline are "
+            "descriptive, not live-like."
+        )
+
+    bench_col1, bench_col2 = st.columns(2)
+    with bench_col1:
+        benchmark_horizon = st.selectbox(
+            "Benchmark horizon",
+            options=[6, 12, 24, 36],
+            index=1,
+            format_func=lambda months: f"{months} months",
+        )
+    with bench_col2:
+        benchmark_threshold = st.number_input(
+            "Benchmark outcome threshold (pp)",
+            min_value=0.01,
+            value=0.50,
+            step=0.05,
+            format="%.2f",
+        )
+
+    forecasts, benchmark_metrics, benchmark_improvements, benchmark_confusion = (
+        benchmark_mod.benchmark_comparison_tables(
+            df,
+            horizon=benchmark_horizon,
+            threshold_pp=float(benchmark_threshold),
+        )
+    )
+
+    if benchmark_metrics.empty:
+        st.info("No benchmark comparison is available for the selected horizon and sample.")
+    else:
+        tinf_rows = benchmark_metrics.loc[benchmark_metrics["model"] == "tinf_regime_bucket"]
+        if not tinf_rows.empty:
+            tinf_row = tinf_rows.iloc[0]
+            beats_no_change = (
+                tinf_row["mae_improvement_vs_no_change_pct"] > 0
+                or tinf_row["rmse_improvement_vs_no_change_pct"] > 0
+            )
+            beats_mean_reversion = (
+                tinf_row["mae_improvement_vs_mean_reversion_pct"] > 0
+                or tinf_row["rmse_improvement_vs_mean_reversion_pct"] > 0
+            )
+            st.info(
+                "TINF/regime bucket improvement: "
+                f"{tinf_row['mae_improvement_vs_no_change_pct']:.1f}% MAE vs no-change, "
+                f"{tinf_row['rmse_improvement_vs_no_change_pct']:.1f}% RMSE vs no-change; "
+                f"{tinf_row['mae_improvement_vs_mean_reversion_pct']:.1f}% MAE vs mean "
+                f"reversion, {tinf_row['rmse_improvement_vs_mean_reversion_pct']:.1f}% "
+                "RMSE vs mean reversion."
+            )
+            if not beats_no_change and not beats_mean_reversion:
+                st.warning(
+                    "Under the current settings, the TINF/regime bucket does not improve on "
+                    "the simple no-change or mean-reversion baselines by MAE/RMSE."
+                )
+
+        st.markdown("#### Benchmark metric summary")
+        st.caption(
+            "MAE and RMSE score CPI YoY forecast errors. Directional accuracy scores whether "
+            "the forecast got the direction of the CPI YoY change right. Hit, false-positive, "
+            "and false-negative rates classify persistent high-inflation outcomes for current "
+            "positive-shock rows."
+        )
+        st.dataframe(benchmark_metrics, use_container_width=True)
+
+        st.markdown("#### Benchmark-relative improvement")
+        st.caption(
+            "Positive values mean the model reduced MAE or RMSE versus the comparison baseline. "
+            "These are historical validation statistics, not optimized thresholds."
+        )
+        st.dataframe(benchmark_improvements, use_container_width=True)
+
+        st.markdown("#### Classification summary")
+        st.caption(
+            "Positive class: persistent high inflation after a current positive inflation shock. "
+            "Forecast classifications compare each model forecast with the current-month baseline "
+            "and the selected threshold."
+        )
+        st.dataframe(benchmark_confusion, use_container_width=True)
+
+        st.markdown("#### Forecast audit sample")
+        sample_cols = [
+            "date",
+            "horizon_months",
+            "model",
+            "historical_regime",
+            "current_cpi_yoy",
+            "forecast_cpi_yoy",
+            "actual_cpi_yoy",
+            "forecast_error",
+            "forecast_persistent_high_inflation",
+            "actual_persistent_high_inflation",
+        ]
+        st.dataframe(
+            forecasts.loc[:, sample_cols].sort_values("date", ascending=False).head(50),
+            use_container_width=True,
+        )
 
 with tab_report:
     st.subheader("Report")
