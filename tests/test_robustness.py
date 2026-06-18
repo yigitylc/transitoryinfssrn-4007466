@@ -5,8 +5,10 @@ import pandas as pd
 
 from transitory_inflation.robustness import (
     DEFAULT_ROBUSTNESS_HORIZONS,
+    DEFAULT_ROBUSTNESS_INFLATION_MEASURES,
     DEFAULT_ROBUSTNESS_THRESHOLDS,
     build_robustness_scorecard,
+    inflation_measure_availability,
     robustness_tables,
     tinf_regime_verdict,
 )
@@ -25,6 +27,15 @@ def _raw_cpi_frame(periods: int = 180) -> pd.DataFrame:
     )
 
 
+def _raw_multi_measure_frame(periods: int = 180) -> pd.DataFrame:
+    months = np.arange(periods, dtype=float)
+    base = _raw_cpi_frame(periods)
+    base["core_cpi_yoy"] = 2.0 + 0.30 * np.sin(months / 6.0) + 0.004 * months
+    base["pce_yoy"] = 1.8 + 0.25 * np.cos(months / 7.0) + 0.003 * months
+    base["core_pce_yoy"] = 1.9 + 0.20 * np.sin(months / 8.0) + 0.002 * months
+    return base
+
+
 def test_robustness_scorecard_contains_expected_horizons_thresholds_and_models() -> None:
     scorecard = build_robustness_scorecard(
         {"unit_sample": _raw_cpi_frame()},
@@ -39,6 +50,52 @@ def test_robustness_scorecard_contains_expected_horizons_thresholds_and_models()
         set(scorecard["model"])
     )
     assert {"rank_by_mae", "rank_by_rmse"}.issubset(scorecard.columns)
+    assert set(scorecard["inflation_measure"]) == set(DEFAULT_ROBUSTNESS_INFLATION_MEASURES)
+
+
+def test_robustness_scorecard_includes_requested_inflation_measure_labels() -> None:
+    scorecard = build_robustness_scorecard(
+        {"unit_sample": _raw_multi_measure_frame()},
+        horizons=(3,),
+        thresholds=(0.50,),
+        baseline_methods=("rolling_36_shifted",),
+        inflation_measures=("headline_cpi", "core_cpi", "pce", "core_pce"),
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+
+    assert set(scorecard["inflation_measure"]) == {
+        "headline_cpi",
+        "core_cpi",
+        "pce",
+        "core_pce",
+    }
+    assert set(scorecard["inflation_measure_label"]) == {
+        "Headline CPI",
+        "Core CPI",
+        "PCE",
+        "Core PCE",
+    }
+    assert (
+        set(scorecard.loc[scorecard["inflation_measure"] == "headline_cpi", "paper_exact"])
+        == {True}
+    )
+    assert (
+        set(scorecard.loc[scorecard["inflation_measure"] != "headline_cpi", "paper_exact"])
+        == {False}
+    )
+
+
+def test_inflation_measure_availability_discloses_missing_measures() -> None:
+    availability = inflation_measure_availability(
+        {"unit_sample": _raw_cpi_frame()},
+        inflation_measures=("headline_cpi", "core_cpi"),
+    )
+
+    by_measure = availability.set_index("inflation_measure")
+    assert bool(by_measure.loc["headline_cpi", "available"])
+    assert not bool(by_measure.loc["core_cpi", "available"])
+    assert by_measure.loc["core_cpi", "valid_observations"] == 0
 
 
 def test_full_sample_is_labeled_ex_post_when_included() -> None:
@@ -47,6 +104,7 @@ def test_full_sample_is_labeled_ex_post_when_included() -> None:
         horizons=(3,),
         thresholds=(0.50,),
         baseline_methods=("full_sample",),
+        inflation_measures=("headline_cpi",),
         ar_min_observations=8,
         bucket_min_observations=1,
     )
@@ -63,6 +121,7 @@ def test_tinf_regime_verdict_has_benchmark_beat_flags() -> None:
         horizons=(3,),
         thresholds=(0.50,),
         baseline_methods=("rolling_36_shifted",),
+        inflation_measures=("headline_cpi",),
         ar_min_observations=8,
         bucket_min_observations=1,
     )
@@ -82,16 +141,21 @@ def test_tinf_regime_verdict_has_benchmark_beat_flags() -> None:
 
 def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
     scorecard, verdict, win_rates = robustness_tables(
-        {"unit_sample": _raw_cpi_frame()},
+        {"unit_sample": _raw_multi_measure_frame()},
         horizons=(3,),
         thresholds=(0.50,),
         baseline_methods=("rolling_36_shifted", "full_sample"),
+        inflation_measures=("headline_cpi", "core_cpi"),
         ar_min_observations=8,
         bucket_min_observations=1,
     )
 
     expected_scorecard_columns = {
         "sample_mode",
+        "inflation_measure",
+        "inflation_measure_label",
+        "fred_series_id",
+        "paper_exact",
         "baseline_method",
         "baseline_live_safe",
         "baseline_label",
@@ -119,6 +183,10 @@ def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
     }
     expected_verdict_columns = {
         "sample_mode",
+        "inflation_measure",
+        "inflation_measure_label",
+        "fred_series_id",
+        "paper_exact",
         "baseline_method",
         "baseline_live_safe",
         "baseline_label",
@@ -145,6 +213,10 @@ def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
     }
     expected_win_rate_columns = {
         "sample_mode",
+        "inflation_measure",
+        "inflation_measure_label",
+        "fred_series_id",
+        "paper_exact",
         "baseline_method",
         "baseline_live_safe",
         "baseline_label",

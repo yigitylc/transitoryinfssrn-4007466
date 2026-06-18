@@ -303,6 +303,7 @@ def build_historical_validation_frame(
     epsilon_threshold_pp: float = DEFAULT_EPSILON_THRESHOLD_PP,
     fed_target_threshold_pp: float = DEFAULT_FED_TARGET_THRESHOLD_PP,
     fed_target: float = DEFAULT_FED_TARGET,
+    inflation_col: str = "inflation_yoy",
 ) -> pd.DataFrame:
     """Build the full validation frame from an already-computed signal frame."""
 
@@ -311,6 +312,7 @@ def build_historical_validation_frame(
     out = add_forward_outcomes(
         out,
         horizons=forward_horizons,
+        inflation_col=inflation_col,
         min_initial_gap_pp=epsilon_threshold_pp,
     )
     return add_outcome_labels(
@@ -319,6 +321,7 @@ def build_historical_validation_frame(
         epsilon_threshold_pp=epsilon_threshold_pp,
         fed_target_threshold_pp=fed_target_threshold_pp,
         fed_target=fed_target,
+        inflation_col=inflation_col,
     )
 
 

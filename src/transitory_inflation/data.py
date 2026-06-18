@@ -17,11 +17,6 @@ FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 CACHED_BASE_MACRO_STEM = "fred_base_macro"
 BASE_MACRO_COLUMNS = ("date", "cpi_level", "tbill_3m", "inflation_yoy")
-CACHED_INPUT_COLUMN_SETS = (
-    ("date", "CPIAUCSL", "TB3MS"),
-    ("date", "cpi_level", "tbill_3m"),
-)
-BASE_FRED_SERIES = ("CPIAUCSL", "TB3MS")
 
 # Months fetched before a sample's start_date so 12-month YoY inflation is
 # defined from the first sample row instead of 12 months later.
@@ -33,6 +28,67 @@ class FredSeries:
     series_id: str
     name: str
     frequency: str = "monthly"
+
+
+@dataclass(frozen=True)
+class InflationMeasure:
+    """Inflation index metadata for headline defaults and robustness checks."""
+
+    key: str
+    label: str
+    series_id: str
+    level_col: str
+    yoy_col: str
+    imputed_col: str
+    paper_exact: bool = False
+
+
+HEADLINE_INFLATION_MEASURE = "headline_cpi"
+INFLATION_MEASURES: dict[str, InflationMeasure] = {
+    HEADLINE_INFLATION_MEASURE: InflationMeasure(
+        key=HEADLINE_INFLATION_MEASURE,
+        label="Headline CPI",
+        series_id="CPIAUCSL",
+        level_col="cpi_level",
+        yoy_col="inflation_yoy",
+        imputed_col="cpi_imputed",
+        paper_exact=True,
+    ),
+    "core_cpi": InflationMeasure(
+        key="core_cpi",
+        label="Core CPI",
+        series_id="CPILFESL",
+        level_col="core_cpi_level",
+        yoy_col="core_cpi_yoy",
+        imputed_col="core_cpi_imputed",
+    ),
+    "pce": InflationMeasure(
+        key="pce",
+        label="PCE",
+        series_id="PCEPI",
+        level_col="pce_level",
+        yoy_col="pce_yoy",
+        imputed_col="pce_imputed",
+    ),
+    "core_pce": InflationMeasure(
+        key="core_pce",
+        label="Core PCE",
+        series_id="PCEPILFE",
+        level_col="core_pce_level",
+        yoy_col="core_pce_yoy",
+        imputed_col="core_pce_imputed",
+    ),
+}
+INFLATION_MEASURE_ORDER: tuple[str, ...] = tuple(INFLATION_MEASURES)
+BASE_FRED_SERIES = tuple(
+    dict.fromkeys(
+        [measure.series_id for measure in INFLATION_MEASURES.values()] + ["TB3MS"]
+    )
+)
+CACHED_INPUT_COLUMN_SETS = (
+    ("date", "CPIAUCSL", "TB3MS"),
+    ("date", "cpi_level", "tbill_3m"),
+)
 
 
 @dataclass(frozen=True)
@@ -233,6 +289,16 @@ def latest_valid_observation_date(
     return pd.Timestamp(dates.max())
 
 
+def available_inflation_measures(df: pd.DataFrame) -> tuple[str, ...]:
+    """Return inflation measure keys with at least one usable YoY observation."""
+
+    available: list[str] = []
+    for key, measure in INFLATION_MEASURES.items():
+        if measure.yoy_col in df.columns and df[measure.yoy_col].notna().any():
+            available.append(key)
+    return tuple(available)
+
+
 def monthly_last(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
     """Convert daily/mixed-frequency data to monthly last observations."""
 
@@ -255,24 +321,45 @@ def build_base_frame(
     ``[start_date, end_date]`` trim. Rows before ``start_date`` (the warm-up
     buffer) feed the 12-month YoY change but never appear in the output.
 
-    CPI gap bridging: a single missing interior month (e.g. 2025-10, whose
-    CPI release was canceled during the government shutdown) is filled by
-    log-linear interpolation and flagged in ``cpi_imputed``; otherwise one
-    missing month makes every strict rolling window that contains it NaN and
-    freezes the live signal for years. Multi-month gaps and missing tail
-    months are never imputed.
+    Inflation-index gap bridging: a single missing interior month is filled by
+    log-linear interpolation and flagged in the measure-specific imputation
+    column; otherwise one missing month makes every strict rolling window that
+    contains it NaN and can freeze the live signal for years. Multi-month gaps
+    and missing tail months are never imputed.
     """
 
     out = monthly_last(merged)
-    out = out.rename(columns={"CPIAUCSL": "cpi_level", "TB3MS": "tbill_3m"})
+    out = out.rename(columns={"TB3MS": "tbill_3m"})
 
-    log_interp = np.exp(np.log(out["cpi_level"]).interpolate(limit_area="inside"))
-    isna = out["cpi_level"].isna()
-    single_gap = isna & ~isna.shift(1, fill_value=False) & ~isna.shift(-1, fill_value=False)
-    out["cpi_imputed"] = single_gap & log_interp.notna()
-    out["cpi_level"] = out["cpi_level"].where(~out["cpi_imputed"], log_interp)
+    for measure in INFLATION_MEASURES.values():
+        if measure.series_id in out.columns:
+            out[measure.level_col] = pd.to_numeric(out[measure.series_id], errors="coerce")
+        elif measure.level_col in out.columns:
+            out[measure.level_col] = pd.to_numeric(out[measure.level_col], errors="coerce")
+        else:
+            continue
 
-    out["inflation_yoy"] = out["cpi_level"].pct_change(12) * 100
+        log_interp = np.exp(np.log(out[measure.level_col]).interpolate(limit_area="inside"))
+        isna = out[measure.level_col].isna()
+        single_gap = (
+            isna
+            & ~isna.shift(1, fill_value=False)
+            & ~isna.shift(-1, fill_value=False)
+        )
+        out[measure.imputed_col] = single_gap & log_interp.notna()
+        out[measure.level_col] = out[measure.level_col].where(
+            ~out[measure.imputed_col],
+            log_interp,
+        )
+        out[measure.yoy_col] = out[measure.level_col].pct_change(12) * 100
+
+    raw_series_cols = [
+        measure.series_id
+        for measure in INFLATION_MEASURES.values()
+        if measure.series_id in out.columns and measure.series_id != measure.level_col
+    ]
+    if raw_series_cols:
+        out = out.drop(columns=raw_series_cols)
     return slice_date_range(out, start_date=start_date, end_date=end_date)
 
 
@@ -454,9 +541,19 @@ def load_cached_macro_data_for_mode(mode: SampleMode | str = DEFAULT_SAMPLE_MODE
     path = find_cached_macro_data_file(mode)
     cached = pd.read_csv(path)
     if {"date", "CPIAUCSL", "TB3MS"}.issubset(cached.columns):
-        merged = cached[["date", "CPIAUCSL", "TB3MS"]].copy()
+        optional_raw_series = [
+            measure.series_id
+            for measure in INFLATION_MEASURES.values()
+            if measure.series_id in cached.columns and measure.series_id != "CPIAUCSL"
+        ]
+        merged = cached[["date", "CPIAUCSL", "TB3MS", *optional_raw_series]].copy()
     elif {"date", "cpi_level", "tbill_3m"}.issubset(cached.columns):
-        merged = cached[["date", "cpi_level", "tbill_3m"]].rename(
+        optional_level_cols = [
+            measure.level_col
+            for measure in INFLATION_MEASURES.values()
+            if measure.level_col in cached.columns and measure.level_col != "cpi_level"
+        ]
+        merged = cached[["date", "cpi_level", "tbill_3m", *optional_level_cols]].rename(
             columns={"cpi_level": "CPIAUCSL", "tbill_3m": "TB3MS"}
         )
     else:
@@ -464,8 +561,9 @@ def load_cached_macro_data_for_mode(mode: SampleMode | str = DEFAULT_SAMPLE_MODE
         raise ValueError(f"Cached macro data {path} must include one of: {expected}")
 
     merged["date"] = pd.to_datetime(merged["date"])
-    merged["CPIAUCSL"] = pd.to_numeric(merged["CPIAUCSL"], errors="coerce")
-    merged["TB3MS"] = pd.to_numeric(merged["TB3MS"], errors="coerce")
+    for column in merged.columns:
+        if column != "date":
+            merged[column] = pd.to_numeric(merged[column], errors="coerce")
 
     resolved = resolve_sample_mode(mode)
     return build_base_frame(

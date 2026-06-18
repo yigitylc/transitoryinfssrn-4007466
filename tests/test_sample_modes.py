@@ -9,7 +9,9 @@ import pytest
 
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES, resolve_sample_mode
 from transitory_inflation.data import (
+    BASE_FRED_SERIES,
     FRED_API_URL,
+    INFLATION_MEASURES,
     apply_sample_mode,
     build_base_frame,
     find_cached_macro_data_file,
@@ -126,6 +128,70 @@ def test_build_base_frame_never_imputes_multi_month_or_tail_gaps() -> None:
     assert int(out["cpi_level"].isna().sum()) == 3
 
 
+def test_build_base_frame_adds_alternative_inflation_measure_columns() -> None:
+    dates = pd.date_range("1981-01-01", "1983-12-01", freq="MS")
+    trend = np.arange(len(dates), dtype=float)
+    merged = pd.DataFrame(
+        {
+            "date": dates,
+            "CPIAUCSL": 100.0 * (1.005**trend),
+            "CPILFESL": 95.0 * (1.004**trend),
+            "PCEPI": 90.0 * (1.003**trend),
+            "PCEPILFE": 92.0 * (1.002**trend),
+            "TB3MS": 5.0,
+        }
+    )
+
+    out = build_base_frame(merged, start_date="1982-01-01", end_date=None)
+
+    expected_columns = {
+        "cpi_level",
+        "inflation_yoy",
+        "cpi_imputed",
+        "core_cpi_level",
+        "core_cpi_yoy",
+        "core_cpi_imputed",
+        "pce_level",
+        "pce_yoy",
+        "pce_imputed",
+        "core_pce_level",
+        "core_pce_yoy",
+        "core_pce_imputed",
+    }
+    assert expected_columns.issubset(out.columns)
+    assert out["inflation_yoy"].notna().all()
+    assert out["core_cpi_yoy"].notna().all()
+    assert out["pce_yoy"].notna().all()
+    assert out["core_pce_yoy"].notna().all()
+
+
+def test_build_base_frame_imputes_alternative_measure_single_gap_not_tail() -> None:
+    dates = pd.date_range("1981-01-01", "1983-12-01", freq="MS")
+    trend = np.arange(len(dates), dtype=float)
+    core_cpi = 95.0 * (1.004**trend)
+    pce = 90.0 * (1.003**trend)
+    core_cpi[22] = np.nan
+    pce[-1] = np.nan
+    merged = pd.DataFrame(
+        {
+            "date": dates,
+            "CPIAUCSL": 100.0 * (1.005**trend),
+            "CPILFESL": core_cpi,
+            "PCEPI": pce,
+            "TB3MS": 5.0,
+        }
+    )
+
+    out = build_base_frame(merged, start_date="1982-01-01", end_date=None)
+
+    core_gap_row = out.loc[out["date"] == pd.Timestamp("1982-11-30")].iloc[0]
+    pce_tail_row = out.loc[out["date"] == pd.Timestamp("1983-12-31")].iloc[0]
+    assert core_gap_row["core_cpi_imputed"]
+    assert pd.notna(core_gap_row["core_cpi_level"])
+    assert not pce_tail_row["pce_imputed"]
+    assert pd.isna(pce_tail_row["pce_level"])
+
+
 def test_latest_valid_observation_date_ignores_trailing_missing_values() -> None:
     df = pd.DataFrame(
         {
@@ -149,7 +215,7 @@ def _fred_observations(series_id: str, periods: int = 15, missing_index: int | N
     for index, date in enumerate(dates):
         if missing_index is not None and index == missing_index:
             value = "."
-        elif series_id == "CPIAUCSL":
+        elif series_id in {"CPIAUCSL", "CPILFESL", "PCEPI", "PCEPILFE"}:
             value = f"{100 + index:.3f}"
         else:
             value = f"{1 + index / 10:.3f}"
@@ -161,7 +227,11 @@ def _fred_csv(series_id: str, periods: int = 15) -> str:
     dates = pd.date_range("2020-01-01", periods=periods, freq="MS")
     rows = ["observation_date," + series_id]
     for index, date in enumerate(dates):
-        value = 100 + index if series_id == "CPIAUCSL" else 1 + index / 10
+        value = (
+            100 + index
+            if series_id in {"CPIAUCSL", "CPILFESL", "PCEPI", "PCEPILFE"}
+            else 1 + index / 10
+        )
         rows.append(f"{date:%Y-%m-%d},{value:.3f}")
     return "\n".join(rows)
 
@@ -312,12 +382,13 @@ def test_api_key_present_uses_official_api_path(
 
     assert result.data_source_used == "fred_api"
     assert result.api_key_configured
-    assert len(calls) == 2
+    assert len(calls) == len(BASE_FRED_SERIES)
     assert "secret-test-key" not in result.live_fetch_status
     assert "secret-test-key" not in capsys.readouterr().out
     assert {"date", "cpi_level", "tbill_3m", "inflation_yoy", "cpi_imputed"}.issubset(
         result.data.columns
     )
+    assert {"core_cpi_yoy", "pce_yoy", "core_pce_yoy"}.issubset(result.data.columns)
 
 
 def test_missing_api_key_falls_back_to_public_csv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -337,7 +408,7 @@ def test_missing_api_key_falls_back_to_public_csv(monkeypatch: pytest.MonkeyPatc
     assert result.data_source_used == "fred_csv"
     assert not result.api_key_configured
     assert result.live_fetch_status.startswith("fred_api: skipped")
-    assert len(calls) == 2
+    assert len(calls) == len(BASE_FRED_SERIES)
 
 
 def test_api_failure_falls_back_to_csv_without_exposing_key(
@@ -379,6 +450,57 @@ def test_api_loaded_data_still_applies_cpi_imputation(monkeypatch: pytest.Monkey
 
     assert result.data_source_used == "fred_api"
     assert result.data["cpi_imputed"].any()
+
+
+def test_api_loaded_data_applies_alternative_measure_imputation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FRED_API_KEY", "secret-test-key")
+
+    def fake_get(url: str, **kwargs: object) -> _FakeResponse:
+        assert url == FRED_API_URL
+        params = kwargs["params"]
+        assert isinstance(params, dict)
+        series_id = str(params["series_id"])
+        missing_index = 6 if series_id == "CPILFESL" else None
+        return _FakeResponse(
+            payload={"observations": _fred_observations(series_id, missing_index=missing_index)}
+        )
+
+    monkeypatch.setattr("transitory_inflation.data.requests.get", fake_get)
+
+    result = load_macro_data_for_mode_with_status("max_history")
+
+    assert result.data_source_used == "fred_api"
+    assert result.data["core_cpi_imputed"].any()
+    assert not result.data["cpi_imputed"].any()
+
+
+def test_cached_macro_loader_preserves_optional_raw_alternative_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _workspace_temp_dir() as cache_dir:
+        cache_path = Path(cache_dir)
+        monkeypatch.setattr("transitory_inflation.data.RAW_DATA_DIR", cache_path)
+        dates = pd.date_range("2020-01-31", periods=15, freq="ME")
+        cache = pd.DataFrame(
+            {
+                "date": dates,
+                "CPIAUCSL": np.arange(15, dtype=float) + 100,
+                "CPILFESL": np.arange(15, dtype=float) + 95,
+                "PCEPI": np.arange(15, dtype=float) + 90,
+                "PCEPILFE": np.arange(15, dtype=float) + 92,
+                "TB3MS": 4.0,
+            }
+        )
+        cache.to_csv(cache_path / "fred_base_macro_max_history.csv", index=False)
+
+        out = load_cached_macro_data_for_mode("max_history")
+
+        for measure in INFLATION_MEASURES.values():
+            assert measure.level_col in out.columns
+            assert measure.yoy_col in out.columns
+            assert measure.imputed_col in out.columns
 
 
 def test_cache_fallback_still_works_when_api_and_csv_fail(

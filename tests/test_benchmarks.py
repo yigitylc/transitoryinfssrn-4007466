@@ -135,3 +135,58 @@ def test_forecasts_do_not_change_when_future_rows_after_t_are_perturbed() -> Non
     assert changed_forecasts.index.tolist() == base_forecasts.index.tolist()
     assert changed_forecasts.to_numpy() == pytest.approx(base_forecasts.to_numpy())
 
+
+def test_alternative_measure_forecasts_do_not_use_future_outcomes() -> None:
+    periods = 100
+    months = np.arange(periods, dtype=float)
+    raw = pd.DataFrame(
+        {
+            "date": pd.date_range("2015-01-31", periods=periods, freq="ME"),
+            "inflation_yoy": 2.0 + 0.1 * np.sin(months / 3.0),
+            "core_cpi_yoy": 2.0 + 0.35 * np.sin(months / 4.0) + 0.01 * months,
+        }
+    )
+    target_date = raw.loc[60, "date"]
+    featured = add_transitory_inflation_features(
+        raw,
+        inflation_col="core_cpi_yoy",
+        baseline_method="fed_target",
+    )
+
+    base = build_benchmark_forecasts(
+        featured,
+        horizon=3,
+        inflation_col="core_cpi_yoy",
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+
+    raw_perturbed = raw.copy()
+    raw_perturbed.loc[raw_perturbed.index > 60, "core_cpi_yoy"] += 100.0
+    perturbed = add_transitory_inflation_features(
+        raw_perturbed,
+        inflation_col="core_cpi_yoy",
+        baseline_method="fed_target",
+    )
+    changed = build_benchmark_forecasts(
+        perturbed,
+        horizon=3,
+        inflation_col="core_cpi_yoy",
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+
+    base_forecasts = (
+        base.loc[base["date"] == target_date]
+        .set_index("model")["forecast_cpi_yoy"]
+        .sort_index()
+    )
+    changed_forecasts = (
+        changed.loc[changed["date"] == target_date]
+        .set_index("model")["forecast_cpi_yoy"]
+        .sort_index()
+    )
+
+    assert set(base_forecasts.index) == set(BENCHMARK_MODELS)
+    assert changed_forecasts.index.tolist() == base_forecasts.index.tolist()
+    assert changed_forecasts.to_numpy() == pytest.approx(base_forecasts.to_numpy())

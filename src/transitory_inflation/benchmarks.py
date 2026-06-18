@@ -147,6 +147,7 @@ def build_benchmark_forecasts(
         label_horizons=(horizon,),
         epsilon_threshold_pp=threshold_pp,
         fed_target_threshold_pp=threshold_pp,
+        inflation_col=inflation_col,
     )
     suffix = _suffix(horizon)
     actual_col = f"cpi_yoy_fwd_{suffix}"
@@ -394,6 +395,7 @@ def benchmark_comparison_tables(
     df: pd.DataFrame,
     horizon: int,
     threshold_pp: float = DEFAULT_EPSILON_THRESHOLD_PP,
+    inflation_col: str = "inflation_yoy",
     ar_min_observations: int = 24,
     bucket_min_observations: int = 8,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -403,6 +405,7 @@ def benchmark_comparison_tables(
         df,
         horizon=horizon,
         threshold_pp=threshold_pp,
+        inflation_col=inflation_col,
         ar_min_observations=ar_min_observations,
         bucket_min_observations=bucket_min_observations,
     )

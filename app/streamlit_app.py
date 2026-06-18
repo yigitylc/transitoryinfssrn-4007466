@@ -39,11 +39,17 @@ from transitory_inflation.plots import (
 )
 from transitory_inflation.report import build_trader_report
 
-if not hasattr(macro_data, "load_macro_data_for_mode_with_status"):
+if not hasattr(macro_data, "load_macro_data_for_mode_with_status") or not hasattr(
+    macro_data,
+    "INFLATION_MEASURES",
+):
     macro_data = importlib.reload(macro_data)
 if not hasattr(benchmark_mod, "benchmark_comparison_tables"):
     benchmark_mod = importlib.reload(benchmark_mod)
-if not hasattr(robustness_mod, "robustness_tables"):
+if not hasattr(robustness_mod, "robustness_tables") or not hasattr(
+    robustness_mod,
+    "inflation_measure_availability",
+):
     robustness_mod = importlib.reload(robustness_mod)
 if not hasattr(validation_mod, "forward_outcome_summary_by_regime_and_pressure") or not hasattr(
     validation_mod, "threshold_sensitivity_summary"
@@ -167,6 +173,10 @@ MODE_LABELS = {
 
 BASELINE_DESCRIPTION_OVERRIDES = {
     "full_sample": "Full-sample historical mean. Useful for ex-post paper-framework implementation.",
+}
+
+INFLATION_MEASURE_LABELS = {
+    key: measure.label for key, measure in macro_data.INFLATION_MEASURES.items()
 }
 
 with st.sidebar:
@@ -761,20 +771,21 @@ with tab_decay:
             st.warning("No valid decay curve available for selected windows.")
 
 with tab_robustness:
-    st.subheader("Phase 3A Benchmark Robustness")
+    st.subheader("Phase 3 Benchmark Robustness")
     st.markdown(
         "Robustness asks whether the benchmark conclusion survives reasonable choices. "
         "A signal that only works under one horizon or threshold is weaker than one that "
         "works across settings."
     )
     st.markdown(
-        "This section uses the existing CPI dataset only. Future CPI outcomes are evaluation "
-        "only, thresholds are reported rather than optimized, and no market variables or new "
-        "inflation series are included."
+        "Phase 3B adds headline CPI, core CPI, PCE, and core PCE comparisons. Headline CPI "
+        "remains the paper/default measure; core and PCE measures are robustness checks, not "
+        "paper-exact replication. Future inflation outcomes are evaluation only, thresholds "
+        "are reported rather than optimized, and no market variables are included."
     )
     st.warning("`full_sample` is ex-post / paper-style only and is not a live-safe baseline.")
 
-    robustness_col1, robustness_col2 = st.columns(2)
+    robustness_col1, robustness_col2, robustness_col3 = st.columns(3)
     with robustness_col1:
         robustness_sample_modes = st.multiselect(
             "Robustness sample modes",
@@ -788,16 +799,27 @@ with tab_robustness:
             options=list(BASELINE_META),
             default=list(robustness_mod.DEFAULT_ROBUSTNESS_BASELINES),
         )
+    with robustness_col3:
+        robustness_inflation_measures = st.multiselect(
+            "Inflation measures",
+            options=list(macro_data.INFLATION_MEASURES),
+            default=list(robustness_mod.DEFAULT_ROBUSTNESS_INFLATION_MEASURES),
+            format_func=lambda key: INFLATION_MEASURE_LABELS[key],
+        )
 
     st.caption(
-        "Fixed Phase 3A grid: horizons 3M, 6M, 12M, 24M, and 36M; thresholds "
+        "Fixed Phase 3 grid: horizons 3M, 6M, 12M, 24M, and 36M; thresholds "
         "0.25, 0.50, 0.75, and 1.00 pp. These settings are shown together; the "
         "dashboard does not choose a best threshold. Select additional sample modes "
-        "above to compare paper, live, and max-history samples."
+        "or inflation measures above to compare paper, live, max-history, headline, "
+        "core, and PCE robustness settings."
     )
 
-    if not robustness_sample_modes or not robustness_baselines:
-        st.info("Select at least one sample mode and one baseline to run robustness tables.")
+    if not robustness_sample_modes or not robustness_baselines or not robustness_inflation_measures:
+        st.info(
+            "Select at least one sample mode, one baseline, and one inflation measure "
+            "to run robustness tables."
+        )
     else:
         robustness_raw = {}
         status_rows = []
@@ -810,16 +832,32 @@ with tab_robustness:
                     "data_source_used": mode_result.data_source_used,
                     "live_fetch_status": mode_result.live_fetch_status,
                     "rows": len(mode_result.data),
+                    "available_measures": ", ".join(
+                        INFLATION_MEASURE_LABELS[key]
+                        for key in macro_data.available_inflation_measures(mode_result.data)
+                    ),
                 }
             )
 
         scorecard, verdict, win_rates = robustness_mod.robustness_tables(
             robustness_raw,
             baseline_methods=tuple(robustness_baselines),
+            inflation_measures=tuple(robustness_inflation_measures),
+        )
+        availability = robustness_mod.inflation_measure_availability(
+            robustness_raw,
+            inflation_measures=tuple(robustness_inflation_measures),
         )
 
         st.markdown("#### Robustness data status")
         st.dataframe(pd.DataFrame(status_rows), use_container_width=True)
+        st.markdown("#### Inflation measure availability")
+        st.caption(
+            "Unavailable measures are skipped rather than filled with demo data. If live FRED "
+            "and cache files lack a selected core/PCE series, the headline CPI rows still run "
+            "and the missing measure is disclosed here."
+        )
+        st.dataframe(availability, use_container_width=True)
 
         if scorecard.empty:
             st.info("No robustness scorecard is available for the selected settings.")
@@ -827,6 +865,9 @@ with tab_robustness:
             st.markdown("#### Robustness scorecard")
             scorecard_cols = [
                 "sample_mode",
+                "inflation_measure_label",
+                "fred_series_id",
+                "paper_exact",
                 "baseline_method",
                 "baseline_live_safe",
                 "baseline_label",
@@ -849,6 +890,9 @@ with tab_robustness:
             st.markdown("#### TINF/regime verdict across settings")
             verdict_cols = [
                 "sample_mode",
+                "inflation_measure_label",
+                "fred_series_id",
+                "paper_exact",
                 "baseline_method",
                 "baseline_live_safe",
                 "baseline_label",

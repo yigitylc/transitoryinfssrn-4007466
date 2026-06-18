@@ -5,6 +5,11 @@ from collections.abc import Mapping
 import pandas as pd
 
 from transitory_inflation.benchmarks import benchmark_comparison_tables
+from transitory_inflation.data import (
+    HEADLINE_INFLATION_MEASURE,
+    INFLATION_MEASURES,
+    InflationMeasure,
+)
 from transitory_inflation.features import BASELINE_META, add_transitory_inflation_features
 
 DEFAULT_ROBUSTNESS_HORIZONS: tuple[int, ...] = (3, 6, 12, 24, 36)
@@ -14,6 +19,8 @@ DEFAULT_ROBUSTNESS_BASELINES: tuple[str, ...] = (
     "expanding_shifted",
     "full_sample",
 )
+DEFAULT_ROBUSTNESS_INFLATION_MEASURES: tuple[str, ...] = (HEADLINE_INFLATION_MEASURE,)
+
 
 def _baseline_label(baseline_method: str) -> str:
     if baseline_method == "full_sample":
@@ -36,15 +43,63 @@ def _nonempty_tuple(values, label: str) -> tuple:
     return out
 
 
+def _inflation_measure_configs(values) -> tuple[InflationMeasure, ...]:
+    measure_keys = tuple(str(value) for value in _nonempty_tuple(values, "inflation measure"))
+    unknown = [key for key in measure_keys if key not in INFLATION_MEASURES]
+    if unknown:
+        raise ValueError(
+            f"Unknown inflation measures: {unknown}. Expected one of {list(INFLATION_MEASURES)}"
+        )
+    return tuple(INFLATION_MEASURES[key] for key in measure_keys)
+
+
+def inflation_measure_availability(
+    raw_frames_by_sample_mode: Mapping[str, pd.DataFrame],
+    inflation_measures: tuple[str, ...] = tuple(INFLATION_MEASURES),
+) -> pd.DataFrame:
+    """Return measure availability by loaded sample frame."""
+
+    measure_configs = _inflation_measure_configs(inflation_measures)
+    rows: list[dict[str, object]] = []
+    for sample_mode, raw in raw_frames_by_sample_mode.items():
+        for measure in measure_configs:
+            has_yoy = measure.yoy_col in raw.columns
+            valid = raw[measure.yoy_col].notna() if has_yoy else pd.Series(dtype=bool)
+            if has_yoy and valid.any() and "date" in raw.columns:
+                latest_date = pd.Timestamp(pd.to_datetime(raw.loc[valid, "date"]).max())
+            else:
+                latest_date = pd.NaT
+            imputation_applied = (
+                bool(raw[measure.imputed_col].fillna(False).astype(bool).any())
+                if measure.imputed_col in raw.columns
+                else False
+            )
+            rows.append(
+                {
+                    "sample_mode": sample_mode,
+                    "inflation_measure": measure.key,
+                    "inflation_measure_label": measure.label,
+                    "fred_series_id": measure.series_id,
+                    "paper_exact": measure.paper_exact,
+                    "available": bool(has_yoy and valid.any()),
+                    "latest_valid_yoy_date": latest_date,
+                    "valid_observations": int(valid.sum()) if has_yoy else 0,
+                    "imputation_applied": imputation_applied,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def build_robustness_scorecard(
     raw_frames_by_sample_mode: Mapping[str, pd.DataFrame],
     horizons: tuple[int, ...] = DEFAULT_ROBUSTNESS_HORIZONS,
     thresholds: tuple[float, ...] = DEFAULT_ROBUSTNESS_THRESHOLDS,
     baseline_methods: tuple[str, ...] = DEFAULT_ROBUSTNESS_BASELINES,
+    inflation_measures: tuple[str, ...] = DEFAULT_ROBUSTNESS_INFLATION_MEASURES,
     ar_min_observations: int = 24,
     bucket_min_observations: int = 8,
 ) -> pd.DataFrame:
-    """Run Phase 3A CPI-only robustness benchmarks across reasonable settings."""
+    """Run robustness benchmarks across reasonable settings and inflation measures."""
 
     sample_items = tuple(raw_frames_by_sample_mode.items())
     if not sample_items:
@@ -52,37 +107,56 @@ def build_robustness_scorecard(
     horizons = tuple(int(value) for value in _nonempty_tuple(horizons, "horizon"))
     thresholds = tuple(float(value) for value in _nonempty_tuple(thresholds, "threshold"))
     baseline_methods = tuple(str(value) for value in _nonempty_tuple(baseline_methods, "baseline"))
+    measure_configs = _inflation_measure_configs(inflation_measures)
 
     rows: list[pd.DataFrame] = []
     for sample_mode, raw in sample_items:
         if raw.empty:
             continue
-        for baseline_method in baseline_methods:
-            featured = add_transitory_inflation_features(raw, baseline_method=baseline_method)
-            for horizon in horizons:
-                for threshold in thresholds:
-                    _, metrics, _, _ = benchmark_comparison_tables(
-                        featured,
-                        horizon=horizon,
-                        threshold_pp=threshold,
-                        ar_min_observations=ar_min_observations,
-                        bucket_min_observations=bucket_min_observations,
-                    )
-                    if metrics.empty:
-                        continue
-                    current = metrics.copy()
-                    current.insert(0, "sample_mode", sample_mode)
-                    current.insert(1, "baseline_method", baseline_method)
-                    current.insert(2, "baseline_live_safe", _baseline_live_safe(baseline_method))
-                    current.insert(3, "baseline_label", _baseline_label(baseline_method))
-                    current.insert(4, "threshold_pp", threshold)
-                    rows.append(current)
+        for measure in measure_configs:
+            if measure.yoy_col not in raw.columns or raw[measure.yoy_col].dropna().empty:
+                continue
+            for baseline_method in baseline_methods:
+                featured = add_transitory_inflation_features(
+                    raw,
+                    inflation_col=measure.yoy_col,
+                    baseline_method=baseline_method,
+                )
+                for horizon in horizons:
+                    for threshold in thresholds:
+                        _, metrics, _, _ = benchmark_comparison_tables(
+                            featured,
+                            horizon=horizon,
+                            threshold_pp=threshold,
+                            inflation_col=measure.yoy_col,
+                            ar_min_observations=ar_min_observations,
+                            bucket_min_observations=bucket_min_observations,
+                        )
+                        if metrics.empty:
+                            continue
+                        current = metrics.copy()
+                        current.insert(0, "sample_mode", sample_mode)
+                        current.insert(1, "inflation_measure", measure.key)
+                        current.insert(2, "inflation_measure_label", measure.label)
+                        current.insert(3, "fred_series_id", measure.series_id)
+                        current.insert(4, "paper_exact", measure.paper_exact)
+                        current.insert(5, "baseline_method", baseline_method)
+                        current.insert(6, "baseline_live_safe", _baseline_live_safe(baseline_method))
+                        current.insert(7, "baseline_label", _baseline_label(baseline_method))
+                        current.insert(8, "threshold_pp", threshold)
+                        rows.append(current)
 
     if not rows:
         return pd.DataFrame()
 
     scorecard = pd.concat(rows, ignore_index=True)
-    setting_cols = ["sample_mode", "baseline_method", "horizon_months", "threshold_pp"]
+    setting_cols = [
+        "sample_mode",
+        "inflation_measure",
+        "baseline_method",
+        "horizon_months",
+        "threshold_pp",
+    ]
     scorecard["rank_by_mae"] = (
         scorecard.groupby(setting_cols)["mae"].rank(method="min", ascending=True).astype("Int64")
     )
@@ -100,6 +174,10 @@ def tinf_regime_verdict(scorecard: pd.DataFrame) -> pd.DataFrame:
 
     setting_cols = [
         "sample_mode",
+        "inflation_measure",
+        "inflation_measure_label",
+        "fred_series_id",
+        "paper_exact",
         "baseline_method",
         "baseline_live_safe",
         "baseline_label",
@@ -157,7 +235,16 @@ def robustness_win_rate_summary(verdict: pd.DataFrame) -> pd.DataFrame:
     if verdict.empty:
         return pd.DataFrame()
 
-    group_cols = ["sample_mode", "baseline_method", "baseline_live_safe", "baseline_label"]
+    group_cols = [
+        "sample_mode",
+        "inflation_measure",
+        "inflation_measure_label",
+        "fred_series_id",
+        "paper_exact",
+        "baseline_method",
+        "baseline_live_safe",
+        "baseline_label",
+    ]
     rate_cols = [
         "tinf_best_by_mae",
         "tinf_best_by_rmse",
@@ -183,6 +270,7 @@ def robustness_tables(
     horizons: tuple[int, ...] = DEFAULT_ROBUSTNESS_HORIZONS,
     thresholds: tuple[float, ...] = DEFAULT_ROBUSTNESS_THRESHOLDS,
     baseline_methods: tuple[str, ...] = DEFAULT_ROBUSTNESS_BASELINES,
+    inflation_measures: tuple[str, ...] = DEFAULT_ROBUSTNESS_INFLATION_MEASURES,
     ar_min_observations: int = 24,
     bucket_min_observations: int = 8,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -193,6 +281,7 @@ def robustness_tables(
         horizons=horizons,
         thresholds=thresholds,
         baseline_methods=baseline_methods,
+        inflation_measures=inflation_measures,
         ar_min_observations=ar_min_observations,
         bucket_min_observations=bucket_min_observations,
     )
