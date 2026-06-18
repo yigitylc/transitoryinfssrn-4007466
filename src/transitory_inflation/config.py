@@ -81,10 +81,6 @@ class SeriesConfig:
     core_cpi: str = "CPILFESL"  # Core CPI level
     pce: str = "PCEPI"  # PCE price index
     core_pce: str = "PCEPILFE"  # Core PCE price index
-    breakeven_10y: str = "T10YIE"  # 10-Year Breakeven Inflation Rate, daily
-    real_yield_10y: str = "DFII10"  # 10-Year TIPS real yield, daily
-    nominal_yield_10y: str = "DGS10"  # 10-Year Treasury constant maturity, daily
-    fed_funds: str = "FEDFUNDS"  # Effective fed funds rate, monthly
 
 
 @dataclass(frozen=True)

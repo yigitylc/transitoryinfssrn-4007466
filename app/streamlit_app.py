@@ -15,6 +15,8 @@ if str(SRC_PATH) not in sys.path:
 
 from transitory_inflation import benchmarks as benchmark_mod
 from transitory_inflation import data as macro_data
+from transitory_inflation import market_data as market_data_mod
+from transitory_inflation import market_linkage as market_linkage_mod
 from transitory_inflation import robustness as robustness_mod
 from transitory_inflation import validation as validation_mod
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
@@ -46,6 +48,13 @@ if not hasattr(macro_data, "load_macro_data_for_mode_with_status") or not hasatt
     macro_data = importlib.reload(macro_data)
 if not hasattr(benchmark_mod, "benchmark_comparison_tables"):
     benchmark_mod = importlib.reload(benchmark_mod)
+if not hasattr(market_data_mod, "load_market_data_for_mode_with_status") or not hasattr(
+    market_data_mod,
+    "MARKET_FRED_SERIES",
+):
+    market_data_mod = importlib.reload(market_data_mod)
+if not hasattr(market_linkage_mod, "build_market_linkage_tables"):
+    market_linkage_mod = importlib.reload(market_linkage_mod)
 if not hasattr(robustness_mod, "robustness_tables") or not hasattr(
     robustness_mod,
     "inflation_measure_availability",
@@ -85,7 +94,7 @@ def pressure_label(term_structure: object) -> str:
 def date_label(date: pd.Timestamp | None) -> str:
     """Format optional dates for dashboard status text."""
 
-    if date is None:
+    if date is None or pd.isna(date):
         return "unknown"
     return str(pd.to_datetime(date).date())
 
@@ -207,6 +216,12 @@ mode_meta = SAMPLE_MODES[sample_mode]
 def get_data(sample_mode: str):
     return macro_data.load_macro_data_for_mode_with_status(sample_mode)
 
+
+@st.cache_data(show_spinner=True)
+def get_market_data(sample_mode: str):
+    return market_data_mod.load_market_data_for_mode_with_status(sample_mode)
+
+
 load_result = get_data(sample_mode)
 raw = load_result.data
 
@@ -284,6 +299,7 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
 (
     tab_signal,
     tab_validation,
+    tab_market_linkage,
     tab_benchmarks,
     tab_framework,
     tab_decay,
@@ -293,6 +309,7 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
     [
         "Current Macro Signal",
         "Historical Signal Validation",
+        "Market Linkage",
         "Benchmark Comparison",
         "Paper Framework",
         "Decay / Convergence",
@@ -499,6 +516,110 @@ with tab_validation:
         else:
             st.dataframe(table, use_container_width=True)
 
+with tab_market_linkage:
+    st.subheader("Phase 4A Market Linkage")
+    st.markdown(
+        "This tab links the already-built inflation signal to FRED Treasury yield, "
+        "breakeven, and real-yield history. It is descriptive historical evidence only."
+    )
+    st.warning(
+        "This is not a trading signal, not a forecast model, and not a model-generated "
+        "trade recommendation. It summarizes how selected FRED rates changed after past "
+        "TINF/regime states."
+    )
+
+    market_result = get_market_data(sample_mode)
+    latest_market_dates = market_result.latest_valid_date_by_variable or {}
+    latest_market_dates_text = "; ".join(
+        f"{variable}={date_label(date)}"
+        for variable, date in latest_market_dates.items()
+        if variable in market_result.available_market_variables
+    )
+    if not latest_market_dates_text:
+        latest_market_dates_text = "none"
+    available_market_variables = ", ".join(market_result.available_market_variables) or "none"
+
+    if market_result.market_data_source_used == "fred_csv":
+        st.warning(
+            "Official FRED API market fetch was unavailable or not configured, so this tab is "
+            "using public FRED CSV market data."
+        )
+    elif market_result.market_data_source_used == "cached_fred_market":
+        st.warning(
+            f"Live FRED market fetch failed, so this tab is using cached market data from "
+            f"`{market_result.market_cache_file_used}`."
+        )
+    elif market_result.market_data_source_used == "unavailable":
+        st.warning(
+            "Market linkage is unavailable because official FRED API, public FRED CSV, and "
+            "local cached market data all failed. No demo market data are used."
+        )
+
+    st.caption(
+        "Market data status: "
+        f"market_data_source_used={market_result.market_data_source_used}; "
+        f"market_live_fetch_status={market_result.market_live_fetch_status}; "
+        f"market_cache_file_used={market_result.market_cache_file_used or 'n/a'}; "
+        f"available_market_variables={available_market_variables}; "
+        f"latest_valid_date_by_variable={latest_market_dates_text}."
+    )
+
+    availability = market_data_mod.market_data_availability(market_result.data)
+    st.markdown("#### Market data availability")
+    st.caption(
+        "FRED real-yield and breakeven histories start later than CPI history. Counts are "
+        "reported by variable rather than forced to match the inflation sample."
+    )
+    st.dataframe(availability, use_container_width=True)
+
+    if not market_result.available_market_variables:
+        st.info("No approved market variables are available for the selected sample.")
+    else:
+        market_tables = market_linkage_mod.build_market_linkage_tables(
+            df,
+            market_result.data,
+        )
+
+        st.markdown("#### Current market snapshot")
+        st.caption("Latest available FRED observation by approved market variable.")
+        st.dataframe(market_tables.current_snapshot, use_container_width=True)
+
+        st.markdown("#### Forward market-change summary by historical regime")
+        st.caption(
+            "Changes are t to t+h in basis points. Rows without full future market data "
+            "for that variable and horizon are excluded."
+        )
+        if market_tables.summary_by_regime.empty:
+            st.info("No regime summary is available with the current market data.")
+        else:
+            st.dataframe(market_tables.summary_by_regime, use_container_width=True)
+
+        st.markdown("#### Forward market-change summary by short-term pressure")
+        if market_tables.summary_by_pressure.empty:
+            st.info("No short-term pressure summary is available with the current market data.")
+        else:
+            st.dataframe(market_tables.summary_by_pressure, use_container_width=True)
+
+        st.markdown("#### Combined regime x short-term pressure")
+        if market_tables.summary_by_regime_and_pressure.empty:
+            st.info("No combined regime x pressure summary is available.")
+        else:
+            st.dataframe(
+                market_tables.summary_by_regime_and_pressure,
+                use_container_width=True,
+            )
+
+        st.markdown("#### Signal-to-future-market-change correlations")
+        st.caption(
+            "Simple Pearson correlations between current epsilon/TINF readings and future "
+            "FRED market changes. These are descriptive associations, not a trading model."
+        )
+        if market_tables.correlations.empty:
+            st.info("No correlations are available with the current market data.")
+        else:
+            st.dataframe(market_tables.correlations, use_container_width=True)
+
+
 with tab_benchmarks:
     st.subheader("Phase 2 Benchmark Comparison")
     st.markdown(
@@ -511,7 +632,10 @@ with tab_benchmarks:
         "used only for evaluation. Results are historical validation, not a guaranteed "
         "trading signal."
     )
-    st.warning("No market variables are included here. Market linkage remains out of scope.")
+    st.warning(
+        "No market variables are used by these benchmark forecasts. Market linkage is reported "
+        "only in its separate descriptive tab."
+    )
     if not meta.live_safe:
         st.warning(
             "The selected baseline is not live-safe. Benchmark results under this baseline are "
