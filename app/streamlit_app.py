@@ -15,6 +15,7 @@ if str(SRC_PATH) not in sys.path:
 
 from transitory_inflation import benchmarks as benchmark_mod
 from transitory_inflation import data as macro_data
+from transitory_inflation import robustness as robustness_mod
 from transitory_inflation import validation as validation_mod
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
 from transitory_inflation.diagnostics import ljung_box_table, stationarity_diagnostics
@@ -42,6 +43,8 @@ if not hasattr(macro_data, "load_macro_data_for_mode_with_status"):
     macro_data = importlib.reload(macro_data)
 if not hasattr(benchmark_mod, "benchmark_comparison_tables"):
     benchmark_mod = importlib.reload(benchmark_mod)
+if not hasattr(robustness_mod, "robustness_tables"):
+    robustness_mod = importlib.reload(robustness_mod)
 if not hasattr(validation_mod, "forward_outcome_summary_by_regime_and_pressure") or not hasattr(
     validation_mod, "threshold_sensitivity_summary"
 ):
@@ -758,6 +761,122 @@ with tab_decay:
             st.warning("No valid decay curve available for selected windows.")
 
 with tab_robustness:
+    st.subheader("Phase 3A Benchmark Robustness")
+    st.markdown(
+        "Robustness asks whether the benchmark conclusion survives reasonable choices. "
+        "A signal that only works under one horizon or threshold is weaker than one that "
+        "works across settings."
+    )
+    st.markdown(
+        "This section uses the existing CPI dataset only. Future CPI outcomes are evaluation "
+        "only, thresholds are reported rather than optimized, and no market variables or new "
+        "inflation series are included."
+    )
+    st.warning("`full_sample` is ex-post / paper-style only and is not a live-safe baseline.")
+
+    robustness_col1, robustness_col2 = st.columns(2)
+    with robustness_col1:
+        robustness_sample_modes = st.multiselect(
+            "Robustness sample modes",
+            options=list(SAMPLE_MODES),
+            default=[sample_mode],
+            format_func=lambda name: MODE_LABELS[name],
+        )
+    with robustness_col2:
+        robustness_baselines = st.multiselect(
+            "Robustness baselines",
+            options=list(BASELINE_META),
+            default=list(robustness_mod.DEFAULT_ROBUSTNESS_BASELINES),
+        )
+
+    st.caption(
+        "Fixed Phase 3A grid: horizons 3M, 6M, 12M, 24M, and 36M; thresholds "
+        "0.25, 0.50, 0.75, and 1.00 pp. These settings are shown together; the "
+        "dashboard does not choose a best threshold. Select additional sample modes "
+        "above to compare paper, live, and max-history samples."
+    )
+
+    if not robustness_sample_modes or not robustness_baselines:
+        st.info("Select at least one sample mode and one baseline to run robustness tables.")
+    else:
+        robustness_raw = {}
+        status_rows = []
+        for mode_name in robustness_sample_modes:
+            mode_result = get_data(mode_name)
+            robustness_raw[mode_name] = mode_result.data
+            status_rows.append(
+                {
+                    "sample_mode": mode_name,
+                    "data_source_used": mode_result.data_source_used,
+                    "live_fetch_status": mode_result.live_fetch_status,
+                    "rows": len(mode_result.data),
+                }
+            )
+
+        scorecard, verdict, win_rates = robustness_mod.robustness_tables(
+            robustness_raw,
+            baseline_methods=tuple(robustness_baselines),
+        )
+
+        st.markdown("#### Robustness data status")
+        st.dataframe(pd.DataFrame(status_rows), use_container_width=True)
+
+        if scorecard.empty:
+            st.info("No robustness scorecard is available for the selected settings.")
+        else:
+            st.markdown("#### Robustness scorecard")
+            scorecard_cols = [
+                "sample_mode",
+                "baseline_method",
+                "baseline_live_safe",
+                "baseline_label",
+                "model",
+                "horizon_months",
+                "threshold_pp",
+                "count",
+                "mae",
+                "rmse",
+                "directional_accuracy",
+                "mae_improvement_vs_no_change_pct",
+                "rmse_improvement_vs_no_change_pct",
+                "mae_improvement_vs_mean_reversion_pct",
+                "rmse_improvement_vs_mean_reversion_pct",
+                "rank_by_mae",
+                "rank_by_rmse",
+            ]
+            st.dataframe(scorecard.loc[:, scorecard_cols], use_container_width=True)
+
+            st.markdown("#### TINF/regime verdict across settings")
+            verdict_cols = [
+                "sample_mode",
+                "baseline_method",
+                "baseline_live_safe",
+                "baseline_label",
+                "horizon_months",
+                "threshold_pp",
+                "count",
+                "tinf_mae",
+                "tinf_rmse",
+                "tinf_directional_accuracy",
+                "tinf_rank_by_mae",
+                "tinf_rank_by_rmse",
+                "beats_no_change_mae",
+                "beats_no_change_rmse",
+                "beats_mean_reversion_mae",
+                "beats_mean_reversion_rmse",
+                "beats_ar1_mae",
+                "beats_ar1_rmse",
+            ]
+            st.dataframe(verdict.loc[:, verdict_cols], use_container_width=True)
+
+            st.markdown("#### Aggregate TINF/regime win rates")
+            st.caption(
+                "Win rates summarize how often TINF/regime beats each benchmark across the "
+                "visible horizon and threshold grid. They are diagnostics, not a setting "
+                "selection rule."
+            )
+            st.dataframe(win_rates, use_container_width=True)
+
     st.subheader("Baseline robustness quick comparison")
     rows = []
     for method in BASELINE_META:
