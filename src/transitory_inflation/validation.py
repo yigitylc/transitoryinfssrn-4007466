@@ -26,6 +26,15 @@ PRESSURE_LABELS: dict[str, str] = {
     "mixed": "mixed",
 }
 
+
+def pressure_label(term_structure: object) -> str:
+    """Map the internal TINF term-structure ordering to UI wording.
+
+    accelerating -> firming, decelerating -> cooling, anything else -> mixed.
+    """
+
+    return PRESSURE_LABELS.get(str(term_structure), "mixed")
+
 TRANSITORY_SIGNAL_REGIMES: tuple[str, ...] = ("elevated falling",)
 PERSISTENT_SIGNAL_REGIMES: tuple[str, ...] = ("elevated rising",)
 

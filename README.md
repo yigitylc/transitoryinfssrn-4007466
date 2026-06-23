@@ -23,14 +23,34 @@ The app computes:
 * Short-term pressure across TINF horizons
 * Rolling AR(1) persistence
 * Paper-style decay/convergence estimates
-* Robustness views across baseline definitions and sample windows
+* Historical forward-outcome validation of the regime signal
+* Benchmark comparison against no-change, CPI persistence, mean reversion, and AR(1)
+* Robustness views across baselines, sample windows, inflation measures, horizons, and thresholds
+* Descriptive market linkage to Treasury yields, breakevens, and real yields
+* A synthesized macro research report
 
 ## Data
 
-The dashboard uses FRED data:
+The dashboard uses FRED data.
 
-* `CPIAUCSL` — Consumer Price Index for All Urban Consumers
-* `TB3MS` — 3-Month Treasury Bill, used as a short-rate proxy
+Inflation measures (headline CPI is the paper/default measure; core CPI, PCE, and
+core PCE are robustness checks, not paper-exact replication):
+
+* `CPIAUCSL` — Headline CPI (Consumer Price Index for All Urban Consumers)
+* `CPILFESL` — Core CPI (ex food and energy)
+* `PCEPI` — PCE price index
+* `PCEPILFE` — Core PCE price index
+
+Short-rate control:
+
+* `TB3MS` — 3-Month Treasury Bill secondary-market rate, used as a short-rate proxy
+
+Market-linkage series (approved rates-only set, used only for the descriptive
+Phase 4 market-linkage layer — never as a trading signal):
+
+* `DGS2`, `DGS10` — 2Y and 10Y Treasury yields
+* `T5YIE`, `T10YIE` — 5Y and 10Y breakeven inflation
+* `DFII5`, `DFII10` — 5Y and 10Y real yields
 
 Data source priority:
 
@@ -69,7 +89,7 @@ The dashboard supports several baseline choices:
 
 The app separates historical implementation windows from live monitoring:
 
-* `paper_window` — fixed historical window aligned with the reference study
+* `paper_replication` — fixed 1982-01 to 2021-07 window aligned with the reference study
 * `live_dashboard` — 1982 onward through latest available FRED data
 * `max_history` — maximum available FRED history
 
@@ -90,6 +110,21 @@ The dashboard is designed to fetch live FRED data. The app should distinguish be
 These dates may differ when CPI has a trailing unpublished or incomplete observation.
 
 
+
+## Dashboard tabs and research phases
+
+The app is organized into tabs that map to the project's research phases. All
+layers are decision-support/research only — not a trading system, PnL backtest,
+or buy/sell recommender.
+
+* **Current Macro Signal** — latest live regime snapshot under the selected mode and baseline.
+* **Historical Signal Validation** (Phase 1) — forward-outcome tables by regime and short-term pressure, threshold sensitivity, and worked examples.
+* **Benchmark Comparison** (Phase 2) — TINF/regime vs no-change, CPI persistence, mean reversion, and AR(1) on MAE/RMSE/directional/hit-rate metrics.
+* **Market Linkage** (Phase 4) — descriptive history of how Treasury yields, breakevens, and real yields moved after past TINF/regime states.
+* **Paper Framework** — paper-style descriptive moments, correlations, and robust OLS regressions.
+* **Decay / Convergence** — rolling AR(1) persistence and the paper-style decay curve.
+* **Robustness** (Phase 3) — scorecard across baselines, sample modes, inflation measures, horizons, and thresholds.
+* **Macro Research Report** (Phase 5) — a synthesized report combining current regime, signal confidence, robustness, historical analogs, market linkage, caveats, and a watchlist.
 
 ## Status
 This is a research implementation of a published inflation framework. It is intended for macro/inflation analysis, model inspection, and dashboard-based monitoring.

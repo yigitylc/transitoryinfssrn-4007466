@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import sys
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from transitory_inflation import report as report_mod
 from transitory_inflation import robustness as robustness_mod
 from transitory_inflation import validation as validation_mod
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
+from transitory_inflation.data import date_label, latest_valid_observation_date
 from transitory_inflation.diagnostics import ljung_box_table, stationarity_diagnostics
 from transitory_inflation.features import (
     BASELINE_META,
@@ -40,42 +40,7 @@ from transitory_inflation.plots import (
     rolling_rho_figure,
     tinf_term_structure_figure,
 )
-
-if not hasattr(macro_data, "load_macro_data_for_mode_with_status") or not hasattr(
-    macro_data,
-    "INFLATION_MEASURES",
-):
-    macro_data = importlib.reload(macro_data)
-if not hasattr(benchmark_mod, "benchmark_comparison_tables") or not hasattr(
-    benchmark_mod,
-    "BENCHMARK_VALIDATION_SIGNATURE_GUARD",
-):
-    benchmark_mod = importlib.reload(benchmark_mod)
-if not hasattr(market_data_mod, "load_market_data_for_mode_with_status") or not hasattr(
-    market_data_mod,
-    "MARKET_FRED_SERIES",
-):
-    market_data_mod = importlib.reload(market_data_mod)
-if not hasattr(market_linkage_mod, "build_market_linkage_tables") or not hasattr(
-    market_linkage_mod,
-    "channel_regime_summary",
-):
-    market_linkage_mod = importlib.reload(market_linkage_mod)
-if not hasattr(report_mod, "build_macro_research_report") or not hasattr(
-    report_mod,
-    "MacroResearchReport",
-):
-    report_mod = importlib.reload(report_mod)
-if (
-    not hasattr(robustness_mod, "robustness_tables")
-    or not hasattr(robustness_mod, "inflation_measure_availability")
-    or not hasattr(robustness_mod, "ROBUSTNESS_BENCHMARK_SIGNATURE_GUARD")
-):
-    robustness_mod = importlib.reload(robustness_mod)
-if not hasattr(validation_mod, "forward_outcome_summary_by_regime_and_pressure") or not hasattr(
-    validation_mod, "threshold_sensitivity_summary"
-):
-    validation_mod = importlib.reload(validation_mod)
+from transitory_inflation.validation import pressure_label
 
 st.set_page_config(page_title="Transitory Inflation Macro Research", layout="wide")
 st.title("Transitory Inflation Macro Research")
@@ -90,38 +55,6 @@ def section_notes(answers: str, interpretation: str) -> None:
 
     st.markdown(f"**➜** {answers}")
     st.markdown(f"**↳** {interpretation}")
-
-
-def pressure_label(term_structure: object) -> str:
-    """Map internal TINF horizon ordering to clearer UI wording."""
-
-    labels = {
-        "accelerating": "firming",
-        "decelerating": "cooling",
-        "mixed": "mixed",
-    }
-    return labels.get(str(term_structure), "mixed")
-
-
-def date_label(date: pd.Timestamp | None) -> str:
-    """Format optional dates for dashboard status text."""
-
-    if date is None or pd.isna(date):
-        return "unknown"
-    return str(pd.to_datetime(date).date())
-
-
-def latest_valid_date(
-    df: pd.DataFrame,
-    value_col: str = "inflation_yoy",
-    date_col: str = "date",
-) -> pd.Timestamp | None:
-    """Return the latest date where a value column is actually available."""
-
-    dates = pd.to_datetime(df.loc[df[value_col].notna(), date_col])
-    if dates.empty:
-        return None
-    return pd.Timestamp(dates.max())
 
 
 def signal_conclusion(snapshot: dict[str, object]) -> tuple[str, ...]:
@@ -200,7 +133,7 @@ INFLATION_MEASURE_LABELS = {
     key: measure.label for key, measure in macro_data.INFLATION_MEASURES.items()
 }
 
-MARKET_LINKAGE_HORIZON_OPTIONS = {"3M": 3, "6M": 6, "12M": 12, "24M": 24}
+MARKET_LINKAGE_HORIZON_OPTIONS = {"3M": 3, "6M": 6, "12M": 12, "24M": 24, "36M": 36}
 MARKET_CHANNEL_LABELS = {
     "nominal_rates": "Nominal rates",
     "breakevens": "Breakevens",
@@ -263,11 +196,90 @@ def get_market_data(sample_mode: str):
     return market_data_mod.load_market_data_for_mode_with_status(sample_mode)
 
 
+# Heavy table builders are wrapped in @st.cache_data so they recompute only when
+# their inputs change, not on every Streamlit rerun. DataFrame/scalar/tuple args
+# hash by value; the non-hashable status dataclasses are excluded from the hash
+# via Streamlit's leading-underscore parameter convention (they are derived from
+# the already-hashed sample_mode/data, so excluding them is safe).
+@st.cache_data(show_spinner=False)
+def get_benchmark_tables(featured: pd.DataFrame, horizon: int, threshold_pp: float):
+    return benchmark_mod.benchmark_comparison_tables(
+        featured, horizon=horizon, threshold_pp=threshold_pp
+    )
+
+
+@st.cache_data(show_spinner=False)
+def get_validation_frame(
+    featured: pd.DataFrame,
+    forward_horizons: tuple[int, ...],
+    label_horizons: tuple[int, ...],
+    threshold_pp: float,
+):
+    return validation_mod.build_historical_validation_frame(
+        featured,
+        forward_horizons=forward_horizons,
+        label_horizons=label_horizons,
+        epsilon_threshold_pp=threshold_pp,
+        fed_target_threshold_pp=threshold_pp,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def get_threshold_sensitivity(featured: pd.DataFrame, horizon: int):
+    return validation_mod.threshold_sensitivity_summary(
+        featured, horizon=horizon, thresholds=(0.25, 0.50, 0.75, 1.00)
+    )
+
+
+@st.cache_data(show_spinner=False)
+def get_market_linkage_tables(featured: pd.DataFrame, market_monthly: pd.DataFrame):
+    return market_linkage_mod.build_market_linkage_tables(featured, market_monthly)
+
+
+@st.cache_data(show_spinner=True)
+def get_robustness_tables(
+    robustness_raw: dict[str, pd.DataFrame],
+    baseline_methods: tuple[str, ...],
+    inflation_measures: tuple[str, ...],
+):
+    scorecard, verdict, win_rates = robustness_mod.robustness_tables(
+        robustness_raw,
+        baseline_methods=baseline_methods,
+        inflation_measures=inflation_measures,
+    )
+    availability = robustness_mod.inflation_measure_availability(
+        robustness_raw,
+        inflation_measures=inflation_measures,
+    )
+    return scorecard, verdict, win_rates, availability
+
+
+@st.cache_data(show_spinner=True)
+def get_macro_research_report(
+    raw: pd.DataFrame,
+    featured: pd.DataFrame,
+    baseline_method: str,
+    sample_mode: str,
+    market_monthly: pd.DataFrame | None,
+    _macro_status: object,
+    _market_status: object,
+):
+    return report_mod.build_macro_research_report(
+        raw,
+        featured,
+        baseline_method=baseline_method,
+        sample_mode=sample_mode,
+        macro_status=_macro_status,
+        market_monthly=market_monthly,
+        market_status=_market_status,
+    )
+
+
 load_result = get_data(sample_mode)
 raw = load_result.data
 
 raw_cache_end = pd.to_datetime(raw["date"].max()).date() if not raw.empty else "unknown"
-latest_cpi_yoy = latest_valid_date(raw, "inflation_yoy")
+latest_cpi_yoy = latest_valid_observation_date(raw, "inflation_yoy")
 if load_result.data_source_used == "fred_csv":
     st.warning(
         "Official FRED API was unavailable or not configured, so the dashboard is using "
@@ -291,7 +303,7 @@ if raw.empty:
     st.stop()
 
 span_start = pd.to_datetime(raw["date"].min()).date()
-span_end = date_label(latest_valid_date(raw, "inflation_yoy"))
+span_end = date_label(latest_valid_observation_date(raw, "inflation_yoy"))
 raw_span_end = pd.to_datetime(raw["date"].max()).date()
 span_text = f"{span_start} -> {span_end}"
 if str(raw_span_end) != span_end:
@@ -311,7 +323,7 @@ latest_signal_date = (
     if status_snapshot.get("available")
     else "unavailable"
 )
-latest_cpi_observation = latest_valid_date(raw, "cpi_level")
+latest_cpi_observation = latest_valid_observation_date(raw, "cpi_level")
 imputation_applied = bool(
     "cpi_imputed" in raw.columns and raw["cpi_imputed"].fillna(False).astype(bool).any()
 )
@@ -337,11 +349,14 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
         "YoY and TINF values touching them are partly estimates."
     )
 
+# Benchmarks (Phase 2) precede Market Linkage (Phase 4) to match the roadmap's
+# "no linkage until Phase 2 confirms usefulness" narrative. The `with tab_*:`
+# content blocks below are routed by handle name, so their source order can differ.
 (
     tab_signal,
     tab_validation,
-    tab_market_linkage,
     tab_benchmarks,
+    tab_market_linkage,
     tab_framework,
     tab_decay,
     tab_robustness,
@@ -350,8 +365,8 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
     [
         "Current Macro Signal",
         "Historical Signal Validation",
-        "Market Linkage",
         "Benchmark Comparison",
+        "Market Linkage",
         "Paper Framework",
         "Decay / Convergence",
         "Robustness",
@@ -448,8 +463,8 @@ with tab_validation:
     with control_col1:
         validation_horizon = st.selectbox(
             "Horizon",
-            options=[6, 12, 24, 36],
-            index=1,
+            options=[3, 6, 12, 24, 36],
+            index=2,
             format_func=lambda months: f"{months} months",
         )
     with control_col2:
@@ -474,10 +489,19 @@ with tab_validation:
         "group alone."
     )
 
-    validation_df = validation_mod.build_historical_validation_frame(
+    # Ensure forward + label columns exist for whatever horizon is selected
+    # (DEFAULT_LABEL_HORIZONS omits 3M), so a 3-month selection is not empty.
+    validation_forward_horizons = tuple(
+        sorted(set(validation_mod.DEFAULT_FORWARD_HORIZONS) | {validation_horizon})
+    )
+    validation_label_horizons = tuple(
+        sorted(set(validation_mod.DEFAULT_LABEL_HORIZONS) | {validation_horizon})
+    )
+    validation_df = get_validation_frame(
         df,
-        epsilon_threshold_pp=float(outcome_threshold),
-        fed_target_threshold_pp=float(outcome_threshold),
+        validation_forward_horizons,
+        validation_label_horizons,
+        float(outcome_threshold),
     )
     combined_summary = validation_mod.forward_outcome_summary_by_regime_and_pressure(
         validation_df, horizons=(validation_horizon,)
@@ -488,11 +512,7 @@ with tab_validation:
     pressure_summary = validation_mod.forward_outcome_summary_by_short_term_pressure(
         validation_df, horizons=(validation_horizon,)
     )
-    sensitivity_summary = validation_mod.threshold_sensitivity_summary(
-        df,
-        horizon=validation_horizon,
-        thresholds=(0.25, 0.50, 0.75, 1.00),
-    )
+    sensitivity_summary = get_threshold_sensitivity(df, validation_horizon)
 
     st.markdown("#### Combined regime x short-term pressure summary")
     st.caption(
@@ -628,10 +648,7 @@ with tab_market_linkage:
     if not market_result.available_market_variables:
         st.info("No approved market variables are available for the selected sample.")
     else:
-        market_tables = market_linkage_mod.build_market_linkage_tables(
-            df,
-            market_result.data,
-        )
+        market_tables = get_market_linkage_tables(df, market_result.data)
 
         st.markdown("#### Current market snapshot")
         st.caption("Latest available FRED observation by approved market variable.")
@@ -819,8 +836,8 @@ with tab_benchmarks:
     with bench_col1:
         benchmark_horizon = st.selectbox(
             "Benchmark horizon",
-            options=[6, 12, 24, 36],
-            index=1,
+            options=[3, 6, 12, 24, 36],
+            index=2,
             format_func=lambda months: f"{months} months",
         )
     with bench_col2:
@@ -833,11 +850,7 @@ with tab_benchmarks:
         )
 
     forecasts, benchmark_metrics, benchmark_improvements, benchmark_confusion = (
-        benchmark_mod.benchmark_comparison_tables(
-            df,
-            horizon=benchmark_horizon,
-            threshold_pp=float(benchmark_threshold),
-        )
+        get_benchmark_tables(df, benchmark_horizon, float(benchmark_threshold))
     )
 
     if benchmark_metrics.empty:
@@ -916,14 +929,14 @@ with tab_benchmarks:
 with tab_report:
     st.subheader("Phase 5 Macro Research Report")
     report_market_result = get_market_data(sample_mode)
-    report = report_mod.build_macro_research_report(
+    report = get_macro_research_report(
         raw,
         df,
-        baseline_method=baseline_method,
-        sample_mode=sample_mode,
-        macro_status=load_result,
-        market_monthly=report_market_result.data,
-        market_status=report_market_result,
+        baseline_method,
+        sample_mode,
+        report_market_result.data,
+        load_result,
+        report_market_result,
     )
     if not report.available:
         st.warning(report.reason or "Report unavailable.")
@@ -1074,8 +1087,10 @@ with tab_decay:
         st.dataframe(decay_df, use_container_width=True)
         section_notes(
             "The paper's convergence arithmetic for each selected window: the latest rho (rho_T), "
-            "an AR(1) fit of the rolling-rho series itself (mu and c), the implied share of a "
-            "current deviation gone after 6 and 12 months, the time to 95% convergence (t* in "
+            "an AR(1) fit of the rolling-rho series itself (mu and c). The published paper decay "
+            "formula uses rho_T and mu only — the intercept c is estimated but intentionally "
+            "unused, a disclosed deviation from the paper. The table also shows the implied share "
+            "of a current deviation gone after 6 and 12 months, the time to 95% convergence (t* in "
             "months and years), and whether the formula's validity conditions hold.",
             "Only read decay_6m_pct, decay_12m_pct, and t* when valid_formula is True (requires "
             "rho_T > 0 and 0 < mu < 1). rho_T above 1 with a valid mu describes persistence that "
@@ -1173,14 +1188,10 @@ with tab_robustness:
                 }
             )
 
-        scorecard, verdict, win_rates = robustness_mod.robustness_tables(
+        scorecard, verdict, win_rates, availability = get_robustness_tables(
             robustness_raw,
-            baseline_methods=tuple(robustness_baselines),
-            inflation_measures=tuple(robustness_inflation_measures),
-        )
-        availability = robustness_mod.inflation_measure_availability(
-            robustness_raw,
-            inflation_measures=tuple(robustness_inflation_measures),
+            tuple(robustness_baselines),
+            tuple(robustness_inflation_measures),
         )
 
         st.markdown("#### Robustness data status")

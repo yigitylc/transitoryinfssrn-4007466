@@ -9,7 +9,12 @@ from . import benchmarks as benchmark_mod
 from . import market_linkage as market_linkage_mod
 from . import robustness as robustness_mod
 from . import validation as validation_mod
-from .data import HEADLINE_INFLATION_MEASURE, INFLATION_MEASURES
+from .data import (
+    HEADLINE_INFLATION_MEASURE,
+    INFLATION_MEASURES,
+    date_label,
+    latest_valid_observation_date,
+)
 from .features import BASELINE_META, add_transitory_inflation_features, latest_signal_snapshot
 from .market_data import available_market_variables
 from .models import decay_summaries_for_windows
@@ -158,16 +163,6 @@ def _ordinal(n: float) -> str:
     return f"{n}{suffix}"
 
 
-def _pressure_label(term_structure: str) -> str:
-    """Convert internal TINF ordering labels to clearer report wording."""
-
-    return {
-        "accelerating": "firming",
-        "decelerating": "cooling",
-        "mixed": "mixed",
-    }.get(term_structure, "mixed")
-
-
 @dataclass(frozen=True)
 class TraderReport:
     """Structured macro-trader briefing built from computed signals."""
@@ -215,25 +210,6 @@ def _status_get(status: object | None, key: str, default: object = None) -> obje
     if isinstance(status, Mapping):
         return status.get(key, default)
     return getattr(status, key, default)
-
-
-def _date_label(date: object) -> str:
-    if date is None or pd.isna(date):
-        return "unknown"
-    return str(pd.to_datetime(date).date())
-
-
-def _latest_valid_date(
-    df: pd.DataFrame,
-    value_col: str = "inflation_yoy",
-    date_col: str = "date",
-) -> pd.Timestamp | None:
-    if value_col not in df.columns or date_col not in df.columns:
-        return None
-    valid = df[value_col].notna()
-    if not valid.any():
-        return None
-    return pd.Timestamp(pd.to_datetime(df.loc[valid, date_col]).max())
 
 
 def _tinf_state(value: object, near_zero_threshold: float = 0.05) -> str:
@@ -425,7 +401,7 @@ def _historical_analog_table(
     validation_df["historical_tinf_state"] = validation_df["tinf_4m"].map(_tinf_state)
 
     current_regime = str(snapshot["regime"])
-    current_pressure = _pressure_label(str(snapshot.get("term_structure", "mixed")))
+    current_pressure = validation_mod.pressure_label(str(snapshot.get("term_structure", "mixed")))
     current_tinf_state = _tinf_state(snapshot["tinf_4m"])
     analog_group = f"{current_regime} / {current_pressure} / {current_tinf_state} TINF"
     analog_mask = (
@@ -577,20 +553,20 @@ def _current_regime_section(
     if not snapshot.get("available"):
         return (snapshot.get("reason", "No complete current signal is available."),), pd.DataFrame()
 
-    latest_cpi_observation = _latest_valid_date(raw, "cpi_level")
-    latest_cpi_yoy = _latest_valid_date(raw, "inflation_yoy")
+    latest_cpi_observation = latest_valid_observation_date(raw, "cpi_level")
+    latest_cpi_yoy = latest_valid_observation_date(raw, "inflation_yoy")
     raw_end = pd.to_datetime(raw["date"].max()).date() if "date" in raw.columns and not raw.empty else "unknown"
     imputation_applied = (
         bool(raw["cpi_imputed"].fillna(False).astype(bool).any())
         if "cpi_imputed" in raw.columns
         else False
     )
-    pressure = _pressure_label(str(snapshot.get("term_structure", "mixed")))
+    pressure = validation_mod.pressure_label(str(snapshot.get("term_structure", "mixed")))
     measure = INFLATION_MEASURES[HEADLINE_INFLATION_MEASURE]
     table = pd.DataFrame(
         [
             {
-                "latest_valid_signal_date": _date_label(snapshot["date"]),
+                "latest_valid_signal_date": date_label(snapshot["date"]),
                 "data_source_used": _status_get(macro_status, "data_source_used", "unknown"),
                 "inflation_measure": measure.label,
                 "fred_series_id": measure.series_id,
@@ -605,14 +581,14 @@ def _current_regime_section(
                 "current_regime": snapshot["regime"],
                 "current_short_term_pressure": pressure,
                 "raw_data_end": raw_end,
-                "latest_cpi_observation_date": _date_label(latest_cpi_observation),
-                "latest_valid_cpi_yoy_date": _date_label(latest_cpi_yoy),
+                "latest_cpi_observation_date": date_label(latest_cpi_observation),
+                "latest_valid_cpi_yoy_date": date_label(latest_cpi_yoy),
                 "cpi_imputation_applied": imputation_applied,
             }
         ]
     )
     lines = (
-        f"As of {_date_label(snapshot['date'])}, headline CPI YoY is "
+        f"As of {date_label(snapshot['date'])}, headline CPI YoY is "
         f"{float(snapshot['inflation_yoy']):.2f}% versus a "
         f"{float(snapshot['baseline']):.2f}% {baseline_method} baseline.",
         f"TINF 4M is {float(snapshot['tinf_4m']):+.2f}pp, with TINF 8M "
@@ -620,20 +596,20 @@ def _current_regime_section(
         f"{float(snapshot['tinf_12m']):+.2f}pp.",
         f"Current regime is '{snapshot['regime']}' and short-term pressure is '{pressure}'.",
         f"Data freshness: source={_status_get(macro_status, 'data_source_used', 'unknown')}; "
-        f"raw data through {raw_end}; latest CPI observation {_date_label(latest_cpi_observation)}; "
-        f"latest CPI YoY {_date_label(latest_cpi_yoy)}; imputation applied={imputation_applied}.",
+        f"raw data through {raw_end}; latest CPI observation {date_label(latest_cpi_observation)}; "
+        f"latest CPI YoY {date_label(latest_cpi_yoy)}; imputation applied={imputation_applied}.",
     )
     return lines, table
 
 
 def _watchlist(raw: pd.DataFrame, featured: pd.DataFrame, baseline_method: str) -> tuple[str, ...]:
     snapshot = latest_signal_snapshot(featured)
-    latest_cpi = _latest_valid_date(raw, "inflation_yoy")
-    latest_pce = _latest_valid_date(raw, "pce_yoy")
+    latest_cpi = latest_valid_observation_date(raw, "inflation_yoy")
+    latest_pce = latest_valid_observation_date(raw, "pce_yoy")
     threshold = next_print_flip_threshold(featured, baseline_method)
 
     lines = [
-        f"Next CPI update: confirm whether FRED CPI YoY advances beyond {_date_label(latest_cpi)}.",
+        f"Next CPI update: confirm whether FRED CPI YoY advances beyond {date_label(latest_cpi)}.",
         "Monitor whether TINF 4M rises or falls versus TINF 8M and TINF 12M.",
         "Monitor whether elevated positive inflation pressure is resolving, persisting, or overshooting below baseline.",
         "Watch 2Y and 10Y Treasury yield reactions around new inflation data.",
@@ -643,7 +619,7 @@ def _watchlist(raw: pd.DataFrame, featured: pd.DataFrame, baseline_method: str) 
     if latest_pce is not None:
         lines.insert(
             1,
-            f"Next PCE update: confirm whether FRED PCE inflation advances beyond {_date_label(latest_pce)}.",
+            f"Next PCE update: confirm whether FRED PCE inflation advances beyond {date_label(latest_pce)}.",
         )
     else:
         lines.insert(1, "Next PCE update: monitor availability; selected data do not currently expose PCE YoY.")
@@ -760,10 +736,10 @@ def build_macro_research_report(
         if "cpi_imputed" in raw.columns
         else False
     )
-    as_of = _date_label(snapshot["date"])
+    as_of = date_label(snapshot["date"])
     headline = (
         f"As of {as_of}: {snapshot['regime']} inflation regime, "
-        f"short-term pressure {_pressure_label(str(snapshot.get('term_structure', 'mixed')))}, "
+        f"short-term pressure {validation_mod.pressure_label(str(snapshot.get('term_structure', 'mixed')))}, "
         f"TINF 4M {float(snapshot['tinf_4m']):+.2f}pp."
     )
 
@@ -863,7 +839,7 @@ def build_trader_report(
     pct = float(snapshot["tinf_4m_percentile"])
     regime = str(snapshot["regime"])
     term = str(snapshot["term_structure"])
-    pressure = _pressure_label(term)
+    pressure = validation_mod.pressure_label(term)
     meta = BASELINE_META[baseline_method]
 
     # --- 1. Where the tape is -------------------------------------------------

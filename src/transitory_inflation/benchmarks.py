@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib
-import inspect
 from collections.abc import Iterable
 
 import numpy as np
@@ -10,7 +8,6 @@ import pandas as pd
 from transitory_inflation import validation as validation_mod
 
 DEFAULT_EPSILON_THRESHOLD_PP = validation_mod.DEFAULT_EPSILON_THRESHOLD_PP
-BENCHMARK_VALIDATION_SIGNATURE_GUARD = True
 
 BENCHMARK_MODELS: tuple[str, ...] = (
     "no_change",
@@ -50,16 +47,9 @@ def _historical_validation_frame(
     threshold_pp: float,
     inflation_col: str,
 ) -> pd.DataFrame:
-    """Call validation through the module so Streamlit stale imports can recover."""
+    """Build the single-horizon validation frame used to score benchmarks."""
 
-    global validation_mod
-
-    validation_func = validation_mod.build_historical_validation_frame
-    if "inflation_col" not in inspect.signature(validation_func).parameters:
-        validation_mod = importlib.reload(validation_mod)
-        validation_func = validation_mod.build_historical_validation_frame
-
-    return validation_func(
+    return validation_mod.build_historical_validation_frame(
         df,
         forward_horizons=(horizon,),
         label_horizons=(horizon,),

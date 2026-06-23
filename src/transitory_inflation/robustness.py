@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib
-import inspect
 from collections.abc import Mapping
 
 import pandas as pd
@@ -22,7 +20,6 @@ DEFAULT_ROBUSTNESS_BASELINES: tuple[str, ...] = (
     "full_sample",
 )
 DEFAULT_ROBUSTNESS_INFLATION_MEASURES: tuple[str, ...] = (HEADLINE_INFLATION_MEASURE,)
-ROBUSTNESS_BENCHMARK_SIGNATURE_GUARD = True
 
 
 def _baseline_label(baseline_method: str) -> str:
@@ -64,16 +61,9 @@ def _benchmark_comparison_tables(
     ar_min_observations: int,
     bucket_min_observations: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Call benchmark tables through the module so Streamlit stale imports can recover."""
+    """Compute the benchmark tables for one robustness cell."""
 
-    global benchmark_mod
-
-    benchmark_func = benchmark_mod.benchmark_comparison_tables
-    if "inflation_col" not in inspect.signature(benchmark_func).parameters:
-        benchmark_mod = importlib.reload(benchmark_mod)
-        benchmark_func = benchmark_mod.benchmark_comparison_tables
-
-    return benchmark_func(
+    return benchmark_mod.benchmark_comparison_tables(
         featured,
         horizon=horizon,
         threshold_pp=threshold,

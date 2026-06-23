@@ -3,7 +3,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-import transitory_inflation.robustness as robustness_mod
 from transitory_inflation.robustness import (
     DEFAULT_ROBUSTNESS_HORIZONS,
     DEFAULT_ROBUSTNESS_INFLATION_MEASURES,
@@ -85,38 +84,6 @@ def test_robustness_scorecard_includes_requested_inflation_measure_labels() -> N
         set(scorecard.loc[scorecard["inflation_measure"] != "headline_cpi", "paper_exact"])
         == {False}
     )
-
-
-def test_robustness_scorecard_recovers_from_stale_benchmark_signature(
-    monkeypatch,
-) -> None:
-    def stale_benchmark_comparison_tables(
-        df,
-        horizon: int,
-        threshold_pp: float = 0.50,
-        ar_min_observations: int = 24,
-        bucket_min_observations: int = 8,
-    ):
-        raise AssertionError("stale benchmark function should be reloaded before use")
-
-    monkeypatch.setattr(
-        robustness_mod.benchmark_mod,
-        "benchmark_comparison_tables",
-        stale_benchmark_comparison_tables,
-    )
-
-    scorecard = robustness_mod.build_robustness_scorecard(
-        {"unit_sample": _raw_multi_measure_frame()},
-        horizons=(3,),
-        thresholds=(0.50,),
-        baseline_methods=("rolling_36_shifted",),
-        inflation_measures=("headline_cpi", "core_cpi"),
-        ar_min_observations=8,
-        bucket_min_observations=1,
-    )
-
-    assert not scorecard.empty
-    assert {"headline_cpi", "core_cpi"} == set(scorecard["inflation_measure"])
 
 
 def test_inflation_measure_availability_discloses_missing_measures() -> None:

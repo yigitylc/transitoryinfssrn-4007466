@@ -277,16 +277,28 @@ def latest_valid_observation_date(
     value_col: str = "inflation_yoy",
     date_col: str = "date",
 ) -> pd.Timestamp | None:
-    """Return the latest date where a value column is actually available."""
+    """Return the latest date where a value column is actually available.
 
-    missing = [column for column in (date_col, value_col) if column not in df.columns]
-    if missing:
-        raise KeyError(f"Missing required columns: {missing}")
+    Returns None when the requested columns are absent (for example an optional
+    inflation measure that was not loaded) rather than raising, so callers can
+    probe possibly-missing series safely.
+    """
+
+    if value_col not in df.columns or date_col not in df.columns:
+        return None
 
     dates = pd.to_datetime(df.loc[df[value_col].notna(), date_col])
     if dates.empty:
         return None
     return pd.Timestamp(dates.max())
+
+
+def date_label(date: object) -> str:
+    """Format an optional date for dashboard/report status text."""
+
+    if date is None or pd.isna(date):
+        return "unknown"
+    return str(pd.to_datetime(date).date())
 
 
 def available_inflation_measures(df: pd.DataFrame) -> tuple[str, ...]:
