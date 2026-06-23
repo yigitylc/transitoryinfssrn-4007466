@@ -1,26 +1,29 @@
 # Next Tasks
 
-Current gate: Phase 5 - Macro Research Report (closeout).
+Current gate: Phase 5 closeout - code-health polish + governance commit.
 
-Phases 0-4 are implemented and committed (production stabilization, historical
-validation, benchmark comparison, robustness, and market linkage). Phase 5 (the
-macro research report layer) is implemented and is being finished and committed
-under this gate. Per `docs/09_PRODUCTION_ROADMAP.md`, do not start later phases
-(for example the trader research expansion) until this gate passes and is committed.
+Phase 5 (the macro research report layer) is implemented and committed (`d2cb783`).
+The Phase 0-5 audit's P2 code-health backlog has now been worked in full:
 
-Phase 5 closeout tasks:
+- P2-1 cache heavy Streamlit builders - DONE
+- P2-2 tab order (Benchmarks before Market Linkage) - DONE
+- P2-3 retire importlib.reload guards - DONE
+- P2-4 centralize duplicated helpers (pressure_label / date_label /
+  latest_valid_observation_date) - DONE
+- P2-5 align horizon option sets (36M market linkage; 3M validation/benchmark) - DONE
+- P2-6 refresh README to match config + shipped phases - DONE
+- P2-8 add diagnostics/plots smoke tests - DONE
+- P2-9 surface decay paper-deviation note in app - DONE
+- P2-7 stray file - DONE (prior cycle); P2-10 - note only, no change
 
-- Commit the Phase 2-5 source, tests, and governance docs together so the
-  committed state matches the implemented phases.
-- Keep the report descriptive: no PnL, trading rules, strategy backtests, or
-  buy/sell recommendations.
-- Disclose that the live signal is built on latest-revised FRED data with no
-  full-sample lookahead - it is not a real-time data-vintage backtest.
-- Decide the scope of the orphaned trader-report layer
-  (`report.build_trader_report` / `REGIME_PLAYBOOK`): gate it explicitly as future
-  scope or remove it until its gate is active.
-- Refresh `README.md` to match `config.py` (five FRED series, `paper_replication`
-  mode) and the shipped phases.
+Remaining in this gate:
+
+- Commit the P2 polish (code + tests + README + .gitignore) together with the
+  still-untracked governance/research docs, after explicit approval. Use an explicit
+  `git add` allowlist; never `git add -A`. Exclude `.env` and generated
+  `artifacts/*.log` / `artifacts/*.err` (now gitignored).
+
+Checks: ruff clean, pytest 92 passed, compileall OK, offline Streamlit AppTest smoke OK.
 
 Out of scope until this gate is committed:
 
