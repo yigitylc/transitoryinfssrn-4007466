@@ -28,13 +28,13 @@ Project in one line: a Streamlit research tool operationalizing the Peron & Bona
 
 Deep read-only audit is **complete**. **All five P1 findings are fixed and committed**
 (`d2cb783`, "close out Phase 5 ... reconcile governance"). **All eight open P2 code-health
-items are now done** in the working tree (see section 3). Checks are green:
+items are now done and committed** (see section 3). Checks are green:
 ruff clean · pytest **92 passed** · compileall OK · plus an offline Streamlit `AppTest` smoke
 (full app body, caching active, network forced offline -> demo/cache fallback, 0 exceptions).
 
-**Not yet committed/staged:** this P2 polish cycle's code+tests, and the authored
-governance/research docs that `d2cb783` left untracked. Both are pending the user-approved
-commit (section 4). Commit needs explicit approval; never `git add -A`.
+**Committed** this cycle as `e9462d0` (P2 code-health polish) and `b476ed7` (governance /
+research / audit docs). Working tree is clean except `.claude/` (project command defs,
+intentionally kept local/untracked).
 
 ---
 
@@ -143,14 +143,13 @@ message ends with the trailer `Co-Authored-By: Claude Opus 4.8 <noreply@anthropi
 
 ## 5. Next action (REWRITE this each loop iteration)
 
-P2 backlog is fully implemented and green. **Next action: get explicit approval, then run the
-two commits in section 4** (or one combined commit if preferred), and mark this section
-"committed."
+P2 backlog is fully implemented, green, and **committed** as `e9462d0` (P2 polish) +
+`b476ed7` (governance docs) on `main`. The Phase 5 gate is fully closed.
 
-After that commit the Phase 5 gate is fully closed. The next roadmap item (Trader research
-mode / market trade priors) is then unblocked but should be a **deliberate, separately scoped
-decision** - it conflicts with the current rates-only registry, so confirm scope before
-starting. Otherwise the project is in a maintenance state.
+Next: the next roadmap item (Trader research mode / market trade priors) is unblocked but
+should be a **deliberate, separately scoped decision** - it conflicts with the current
+rates-only registry, so confirm scope before starting. Otherwise the project is in a
+maintenance state.
 
 Known non-blocking follow-up: the app passes `use_container_width=` to every `st.dataframe`/
 `st.plotly_chart`, which Streamlit now deprecates (runtime warning). A future cleanup switches

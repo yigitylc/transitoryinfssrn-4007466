@@ -16,12 +16,13 @@ The Phase 0-5 audit's P2 code-health backlog has now been worked in full:
 - P2-9 surface decay paper-deviation note in app - DONE
 - P2-7 stray file - DONE (prior cycle); P2-10 - note only, no change
 
-Remaining in this gate:
+Committed this cycle:
 
-- Commit the P2 polish (code + tests + README + .gitignore) together with the
-  still-untracked governance/research docs, after explicit approval. Use an explicit
-  `git add` allowlist; never `git add -A`. Exclude `.env` and generated
-  `artifacts/*.log` / `artifacts/*.err` (now gitignored).
+- `e9462d0` - P2 code-health polish (code + tests + README + .gitignore).
+- `b476ed7` - governance / research / audit docs + scaffolding .gitkeeps.
+
+The Phase 5 closeout gate is fully closed. The next roadmap item (Trader research mode)
+is a separate, deliberately-scoped decision; `.claude/` command defs are kept local.
 
 Checks: ruff clean, pytest 92 passed, compileall OK, offline Streamlit AppTest smoke OK.
 
