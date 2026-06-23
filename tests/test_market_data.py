@@ -55,31 +55,40 @@ def _workspace_temp_dir() -> TemporaryDirectory[str]:
 
 
 def test_market_series_registry_is_fred_rates_only() -> None:
-    expected_ids = {"DGS2", "DGS10", "T5YIE", "T10YIE", "DFII5", "DFII10"}
-    expected_variables = {
+    expected_ids = ("DGS2", "DGS10", "T5YIE", "T10YIE", "DFII5", "DFII10")
+    expected_variables = (
         "yield_2y",
         "yield_10y",
         "breakeven_5y",
         "breakeven_10y",
         "real_yield_5y",
         "real_yield_10y",
-    }
+    )
     forbidden = {
         "SPY",
         "QQQ",
+        "SP500",
+        "S&P",
+        "NASDAQ",
+        "VIX",
         "DXY",
         "GLD",
         "GOLD",
         "OIL",
+        "CRUDE",
         "WTI",
+        "COMMODITY",
         "FEDFUNDS",
         "DFF",
+        "PNL",
+        "BACKTEST",
+        "TRADE SIGNAL",
     }
 
     validate_market_series_registry()
 
-    assert set(MARKET_FRED_SERIES_IDS) == expected_ids
-    assert set(MARKET_VALUE_COLUMNS) == expected_variables
+    assert expected_ids == MARKET_FRED_SERIES_IDS
+    assert expected_variables == MARKET_VALUE_COLUMNS
     metadata_text = " ".join(
         f"{variable} {meta.series_id} {meta.label}"
         for variable, meta in MARKET_FRED_SERIES.items()

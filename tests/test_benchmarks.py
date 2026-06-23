@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import transitory_inflation.benchmarks as benchmark_mod
 from transitory_inflation.benchmarks import (
     BENCHMARK_MODELS,
     benchmark_comparison_tables,
@@ -190,3 +191,35 @@ def test_alternative_measure_forecasts_do_not_use_future_outcomes() -> None:
     assert set(base_forecasts.index) == set(BENCHMARK_MODELS)
     assert changed_forecasts.index.tolist() == base_forecasts.index.tolist()
     assert changed_forecasts.to_numpy() == pytest.approx(base_forecasts.to_numpy())
+
+
+def test_benchmark_forecasts_recover_from_stale_validation_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def stale_build_historical_validation_frame(
+        df,
+        forward_horizons=(3,),
+        label_horizons=(3,),
+        epsilon_threshold_pp=0.50,
+        fed_target_threshold_pp=0.50,
+        fed_target=2.0,
+    ):
+        raise AssertionError("stale validation function should be reloaded before use")
+
+    monkeypatch.setattr(
+        benchmark_mod.validation_mod,
+        "build_historical_validation_frame",
+        stale_build_historical_validation_frame,
+    )
+
+    featured = _feature_frame()
+    forecasts = benchmark_mod.build_benchmark_forecasts(
+        featured,
+        horizon=3,
+        inflation_col="inflation_yoy",
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+
+    assert not forecasts.empty
+    assert set(forecasts["model"]) == set(BENCHMARK_MODELS)

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import importlib
+import inspect
 from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
 
-from transitory_inflation.validation import (
-    DEFAULT_EPSILON_THRESHOLD_PP,
-    build_historical_validation_frame,
-)
+from transitory_inflation import validation as validation_mod
+
+DEFAULT_EPSILON_THRESHOLD_PP = validation_mod.DEFAULT_EPSILON_THRESHOLD_PP
+BENCHMARK_VALIDATION_SIGNATURE_GUARD = True
 
 BENCHMARK_MODELS: tuple[str, ...] = (
     "no_change",
@@ -40,6 +42,31 @@ def _safe_rate(numerator: int, denominator: int) -> float:
     if denominator == 0:
         return float("nan")
     return float(numerator / denominator)
+
+
+def _historical_validation_frame(
+    df: pd.DataFrame,
+    horizon: int,
+    threshold_pp: float,
+    inflation_col: str,
+) -> pd.DataFrame:
+    """Call validation through the module so Streamlit stale imports can recover."""
+
+    global validation_mod
+
+    validation_func = validation_mod.build_historical_validation_frame
+    if "inflation_col" not in inspect.signature(validation_func).parameters:
+        validation_mod = importlib.reload(validation_mod)
+        validation_func = validation_mod.build_historical_validation_frame
+
+    return validation_func(
+        df,
+        forward_horizons=(horizon,),
+        label_horizons=(horizon,),
+        epsilon_threshold_pp=threshold_pp,
+        fed_target_threshold_pp=threshold_pp,
+        inflation_col=inflation_col,
+    )
 
 
 def _expanding_ar1_forecast(
@@ -141,12 +168,10 @@ def build_benchmark_forecasts(
     threshold_pp = float(threshold_pp)
     _require_columns(df, [inflation_col, baseline_col, "epsilon", "tinf_4m"])
 
-    validation_df = build_historical_validation_frame(
+    validation_df = _historical_validation_frame(
         df,
-        forward_horizons=(horizon,),
-        label_horizons=(horizon,),
-        epsilon_threshold_pp=threshold_pp,
-        fed_target_threshold_pp=threshold_pp,
+        horizon=horizon,
+        threshold_pp=threshold_pp,
         inflation_col=inflation_col,
     )
     suffix = _suffix(horizon)

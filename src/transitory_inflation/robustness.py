@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib
+import inspect
 from collections.abc import Mapping
 
 import pandas as pd
 
-from transitory_inflation.benchmarks import benchmark_comparison_tables
+from transitory_inflation import benchmarks as benchmark_mod
 from transitory_inflation.data import (
     HEADLINE_INFLATION_MEASURE,
     INFLATION_MEASURES,
@@ -20,6 +22,7 @@ DEFAULT_ROBUSTNESS_BASELINES: tuple[str, ...] = (
     "full_sample",
 )
 DEFAULT_ROBUSTNESS_INFLATION_MEASURES: tuple[str, ...] = (HEADLINE_INFLATION_MEASURE,)
+ROBUSTNESS_BENCHMARK_SIGNATURE_GUARD = True
 
 
 def _baseline_label(baseline_method: str) -> str:
@@ -51,6 +54,33 @@ def _inflation_measure_configs(values) -> tuple[InflationMeasure, ...]:
             f"Unknown inflation measures: {unknown}. Expected one of {list(INFLATION_MEASURES)}"
         )
     return tuple(INFLATION_MEASURES[key] for key in measure_keys)
+
+
+def _benchmark_comparison_tables(
+    featured: pd.DataFrame,
+    horizon: int,
+    threshold: float,
+    inflation_col: str,
+    ar_min_observations: int,
+    bucket_min_observations: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Call benchmark tables through the module so Streamlit stale imports can recover."""
+
+    global benchmark_mod
+
+    benchmark_func = benchmark_mod.benchmark_comparison_tables
+    if "inflation_col" not in inspect.signature(benchmark_func).parameters:
+        benchmark_mod = importlib.reload(benchmark_mod)
+        benchmark_func = benchmark_mod.benchmark_comparison_tables
+
+    return benchmark_func(
+        featured,
+        horizon=horizon,
+        threshold_pp=threshold,
+        inflation_col=inflation_col,
+        ar_min_observations=ar_min_observations,
+        bucket_min_observations=bucket_min_observations,
+    )
 
 
 def inflation_measure_availability(
@@ -124,10 +154,10 @@ def build_robustness_scorecard(
                 )
                 for horizon in horizons:
                     for threshold in thresholds:
-                        _, metrics, _, _ = benchmark_comparison_tables(
+                        _, metrics, _, _ = _benchmark_comparison_tables(
                             featured,
                             horizon=horizon,
-                            threshold_pp=threshold,
+                            threshold=threshold,
                             inflation_col=measure.yoy_col,
                             ar_min_observations=ar_min_observations,
                             bucket_min_observations=bucket_min_observations,

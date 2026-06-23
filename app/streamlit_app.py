@@ -17,6 +17,7 @@ from transitory_inflation import benchmarks as benchmark_mod
 from transitory_inflation import data as macro_data
 from transitory_inflation import market_data as market_data_mod
 from transitory_inflation import market_linkage as market_linkage_mod
+from transitory_inflation import report as report_mod
 from transitory_inflation import robustness as robustness_mod
 from transitory_inflation import validation as validation_mod
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
@@ -39,25 +40,36 @@ from transitory_inflation.plots import (
     rolling_rho_figure,
     tinf_term_structure_figure,
 )
-from transitory_inflation.report import build_trader_report
 
 if not hasattr(macro_data, "load_macro_data_for_mode_with_status") or not hasattr(
     macro_data,
     "INFLATION_MEASURES",
 ):
     macro_data = importlib.reload(macro_data)
-if not hasattr(benchmark_mod, "benchmark_comparison_tables"):
+if not hasattr(benchmark_mod, "benchmark_comparison_tables") or not hasattr(
+    benchmark_mod,
+    "BENCHMARK_VALIDATION_SIGNATURE_GUARD",
+):
     benchmark_mod = importlib.reload(benchmark_mod)
 if not hasattr(market_data_mod, "load_market_data_for_mode_with_status") or not hasattr(
     market_data_mod,
     "MARKET_FRED_SERIES",
 ):
     market_data_mod = importlib.reload(market_data_mod)
-if not hasattr(market_linkage_mod, "build_market_linkage_tables"):
+if not hasattr(market_linkage_mod, "build_market_linkage_tables") or not hasattr(
+    market_linkage_mod,
+    "channel_regime_summary",
+):
     market_linkage_mod = importlib.reload(market_linkage_mod)
-if not hasattr(robustness_mod, "robustness_tables") or not hasattr(
-    robustness_mod,
-    "inflation_measure_availability",
+if not hasattr(report_mod, "build_macro_research_report") or not hasattr(
+    report_mod,
+    "MacroResearchReport",
+):
+    report_mod = importlib.reload(report_mod)
+if (
+    not hasattr(robustness_mod, "robustness_tables")
+    or not hasattr(robustness_mod, "inflation_measure_availability")
+    or not hasattr(robustness_mod, "ROBUSTNESS_BENCHMARK_SIGNATURE_GUARD")
 ):
     robustness_mod = importlib.reload(robustness_mod)
 if not hasattr(validation_mod, "forward_outcome_summary_by_regime_and_pressure") or not hasattr(
@@ -188,6 +200,35 @@ INFLATION_MEASURE_LABELS = {
     key: measure.label for key, measure in macro_data.INFLATION_MEASURES.items()
 }
 
+MARKET_LINKAGE_HORIZON_OPTIONS = {"3M": 3, "6M": 6, "12M": 12, "24M": 24}
+MARKET_CHANNEL_LABELS = {
+    "nominal_rates": "Nominal rates",
+    "breakevens": "Breakevens",
+    "real_yields": "Real yields",
+}
+MARKET_CHANNEL_INTERPRETATION_COLUMNS = [
+    "historical_regime",
+    "historical_direction",
+    "avg_change_bp",
+    "median_change_bp",
+    "count",
+    "increase_hit_rate",
+    "decrease_hit_rate",
+    "weak_evidence",
+    "evidence_note",
+]
+MARKET_RANKING_COLUMNS = [
+    "market_variable",
+    "historical_regime",
+    "historical_short_term_pressure",
+    "avg_change_bp",
+    "median_change_bp",
+    "count",
+    "increase_hit_rate",
+    "decrease_hit_rate",
+    "weak_evidence",
+]
+
 with st.sidebar:
     st.header("Configuration")
     mode_names = list(MODE_LABELS)
@@ -314,7 +355,7 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
         "Paper Framework",
         "Decay / Convergence",
         "Robustness",
-        "Report",
+        "Macro Research Report",
     ]
 )
 
@@ -527,6 +568,18 @@ with tab_market_linkage:
         "trade recommendation. It summarizes how selected FRED rates changed after past "
         "TINF/regime states."
     )
+    st.markdown(
+        "- This is descriptive market linkage, not a trading signal.\n"
+        "- A positive forward change means the market variable rose after the signal date.\n"
+        "- Nominal yields, breakevens, and real yields measure different channels.\n"
+        "- Market linkage may be useful even if TINF/regime is not the best CPI point-forecast model."
+    )
+    market_linkage_horizon_label = st.selectbox(
+        "Market linkage horizon",
+        options=list(MARKET_LINKAGE_HORIZON_OPTIONS),
+        index=list(MARKET_LINKAGE_HORIZON_OPTIONS).index("12M"),
+    )
+    market_linkage_horizon = MARKET_LINKAGE_HORIZON_OPTIONS[market_linkage_horizon_label]
 
     market_result = get_market_data(sample_mode)
     latest_market_dates = market_result.latest_valid_date_by_variable or {}
@@ -583,6 +636,126 @@ with tab_market_linkage:
         st.markdown("#### Current market snapshot")
         st.caption("Latest available FRED observation by approved market variable.")
         st.dataframe(market_tables.current_snapshot, use_container_width=True)
+
+        selected_channel_summary = market_tables.channel_summary_by_regime.loc[
+            market_tables.channel_summary_by_regime["horizon_months"]
+            == market_linkage_horizon
+        ]
+        st.markdown(f"#### Channel interpretation ({market_linkage_horizon_label})")
+        st.caption(
+            "Channel rows use row-wise averages across the two approved FRED variables in "
+            "each channel: 2Y/10Y nominal yields, 5Y/10Y breakevens, and 5Y/10Y real yields."
+        )
+        if selected_channel_summary.empty:
+            st.info("No channel summary is available for the selected horizon.")
+        else:
+            if selected_channel_summary["weak_evidence"].fillna(False).astype(bool).any():
+                st.warning(
+                    "Rows marked weak_evidence=True have fewer than 30 complete observations."
+                )
+            for channel, channel_label in MARKET_CHANNEL_LABELS.items():
+                channel_rows = selected_channel_summary.loc[
+                    selected_channel_summary["market_channel"] == channel
+                ].copy()
+                st.markdown(f"##### {channel_label}")
+                if channel_rows.empty:
+                    st.info(f"No {channel_label.lower()} summary is available.")
+                else:
+                    st.dataframe(
+                        channel_rows.loc[
+                            :,
+                            [
+                                column
+                                for column in MARKET_CHANNEL_INTERPRETATION_COLUMNS
+                                if column in channel_rows.columns
+                            ],
+                        ],
+                        use_container_width=True,
+                    )
+
+            st.markdown("#### What historically happened?")
+            what_happened = selected_channel_summary.copy()
+            what_happened["market_channel"] = (
+                what_happened["market_channel"].map(MARKET_CHANNEL_LABELS).fillna(
+                    what_happened["market_channel"]
+                )
+            )
+            what_happened_cols = [
+                "historical_regime",
+                "market_channel",
+                "historical_direction",
+                "avg_change_bp",
+                "median_change_bp",
+                "count",
+                "weak_evidence",
+                "evidence_note",
+            ]
+            st.dataframe(
+                what_happened.loc[
+                    :,
+                    [
+                        column
+                        for column in what_happened_cols
+                        if column in what_happened.columns
+                    ],
+                ].sort_values(["market_channel", "historical_regime"]),
+                use_container_width=True,
+            )
+
+        selected_rankings = market_tables.regime_pressure_rankings.loc[
+            market_tables.regime_pressure_rankings["horizon_months"] == market_linkage_horizon
+        ]
+        st.markdown(f"#### Regime x pressure rankings ({market_linkage_horizon_label})")
+        st.caption(
+            "Rankings compare historical_regime x historical_short_term_pressure groups "
+            "within each market variable at the selected horizon."
+        )
+        if selected_rankings.empty:
+            st.info("No regime x pressure rankings are available for the selected horizon.")
+        else:
+            rank_col1, rank_col2 = st.columns(2)
+            with rank_col1:
+                st.markdown("##### Largest average increases")
+                highest_cols = [
+                    "highest_change_rank",
+                    *MARKET_RANKING_COLUMNS,
+                ]
+                st.dataframe(
+                    selected_rankings.sort_values(
+                        ["highest_change_rank", "market_variable"]
+                    )
+                    .head(12)
+                    .loc[
+                        :,
+                        [
+                            column
+                            for column in highest_cols
+                            if column in selected_rankings.columns
+                        ],
+                    ],
+                    use_container_width=True,
+                )
+            with rank_col2:
+                st.markdown("##### Largest average decreases")
+                lowest_cols = [
+                    "lowest_change_rank",
+                    *MARKET_RANKING_COLUMNS,
+                ]
+                st.dataframe(
+                    selected_rankings.sort_values(
+                        ["lowest_change_rank", "market_variable"]
+                    )
+                    .head(12)
+                    .loc[
+                        :,
+                        [
+                            column
+                            for column in lowest_cols
+                            if column in selected_rankings.columns
+                        ],
+                    ],
+                    use_container_width=True,
+                )
 
         st.markdown("#### Forward market-change summary by historical regime")
         st.caption(
@@ -700,7 +873,8 @@ with tab_benchmarks:
             "MAE and RMSE score CPI YoY forecast errors. Directional accuracy scores whether "
             "the forecast got the direction of the CPI YoY change right. Hit, false-positive, "
             "and false-negative rates classify persistent high-inflation outcomes for current "
-            "positive-shock rows."
+            "positive-shock rows. Note: no-change forecasts zero CPI change, so its directional "
+            "accuracy is ~0 by construction rather than a skill signal."
         )
         st.dataframe(benchmark_metrics, use_container_width=True)
 
@@ -715,7 +889,9 @@ with tab_benchmarks:
         st.caption(
             "Positive class: persistent high inflation after a current positive inflation shock. "
             "Forecast classifications compare each model forecast with the current-month baseline "
-            "and the selected threshold."
+            "and the selected threshold. Note: mean reversion forecasts the baseline, so by "
+            "construction it can never be classified persistent (its confusion row is all-negative) "
+            "- read it as a structural floor, not a failure to detect."
         )
         st.dataframe(benchmark_confusion, use_container_width=True)
 
@@ -738,8 +914,17 @@ with tab_benchmarks:
         )
 
 with tab_report:
-    st.subheader("Report")
-    report = build_trader_report(raw, df, baseline_method=baseline_method, sample_mode=sample_mode)
+    st.subheader("Phase 5 Macro Research Report")
+    report_market_result = get_market_data(sample_mode)
+    report = report_mod.build_macro_research_report(
+        raw,
+        df,
+        baseline_method=baseline_method,
+        sample_mode=sample_mode,
+        macro_status=load_result,
+        market_monthly=report_market_result.data,
+        market_status=report_market_result,
+    )
     if not report.available:
         st.warning(report.reason or "Report unavailable.")
     else:
@@ -750,33 +935,58 @@ with tab_report:
             )
         st.markdown(f"**{report.headline}**")
 
-        st.markdown("#### 1. Where inflation stands")
-        st.markdown("\n".join(f"- {line}" for line in report.state_lines))
+        st.markdown("#### 1. Current Regime")
+        st.markdown("\n".join(f"- {line}" for line in report.current_regime_lines))
+        if not report.current_regime_table.empty:
+            st.dataframe(report.current_regime_table, use_container_width=True)
 
-        st.markdown("#### 2. Persistence and model-implied normalization")
-        st.markdown("\n".join(f"- {line}" for line in report.persistence_lines))
+        st.markdown("#### 2. Signal Confidence")
+        st.markdown("\n".join(f"- {line}" for line in report.signal_confidence_lines))
+        if not report.benchmark_comparisons.empty:
+            st.dataframe(report.benchmark_comparisons, use_container_width=True)
+        if not report.benchmark_metrics.empty:
+            with st.expander("Benchmark metric detail"):
+                st.dataframe(report.benchmark_metrics, use_container_width=True)
 
-        st.markdown("#### 3. Robustness across live-safe baselines")
+        st.markdown("#### 3. Robustness Summary")
         st.markdown("\n".join(f"- {line}" for line in report.robustness_lines))
+        if not report.inflation_measure_availability.empty:
+            st.markdown("##### Inflation measure availability")
+            st.dataframe(report.inflation_measure_availability, use_container_width=True)
+        if not report.robustness_win_rates.empty:
+            st.markdown("##### Aggregate TINF/regime win rates")
+            st.dataframe(report.robustness_win_rates, use_container_width=True)
+        if not report.robustness_verdict.empty:
+            with st.expander("Robustness verdict detail"):
+                st.dataframe(report.robustness_verdict, use_container_width=True)
 
-        st.markdown("#### 4. What to watch")
-        st.markdown("\n".join(f"- {line}" for line in report.watch_lines))
+        st.markdown("#### 4. Historical Analogs")
+        st.markdown("\n".join(f"- {line}" for line in report.historical_analog_lines))
+        if report.historical_analogs.empty:
+            st.info("No analog rows are available for the current signal state.")
+        else:
+            st.dataframe(report.historical_analogs, use_container_width=True)
 
-        report_snapshot = latest_signal_snapshot(df)
-        st.markdown("#### Concluding remarks")
-        st.markdown("\n".join(f"- {line}" for line in signal_conclusion(report_snapshot)))
+        st.markdown("#### 5. Market Linkage Summary")
+        st.markdown("\n".join(f"- {line}" for line in report.market_linkage_lines))
+        if report.market_channel_summary.empty:
+            st.info("No market channel summary is available for this report run.")
+        else:
+            st.dataframe(report.market_channel_summary, use_container_width=True)
+
+        st.markdown("#### 6. Caveats / Model Risk")
+        st.markdown("\n".join(f"- {line}" for line in report.caveats))
+
+        st.markdown("#### 7. Watchlist / What to Monitor Next")
+        st.markdown("\n".join(f"- {line}" for line in report.watchlist))
 
         section_notes(
-            "How to read today's transitory-inflation signal: where inflation sits against its "
-            "baseline, how persistent the framework estimates the deviation to be, whether the "
-            "call survives live-safe baseline changes, and what upcoming data would confirm or "
-            "invalidate it. Every number is generated from the currently selected sample mode and "
-            "baseline.",
-            "Read it top-down: sections 1-3 are computed facts from this dashboard; section 4 is a "
-            "mechanical watch list and approximate flip level for the next CPI print; the conclusion "
-            "summarizes the current regime read without turning it into a portfolio instruction. If "
-            "the headline regime conflicts with the robustness section, trust the disagreement: it "
-            "means the signal is baseline-dependent.",
+            "A single research-report layer that synthesizes current regime, benchmark evidence, "
+            "robustness, analog history, market linkage, caveats, and freshness from the validated "
+            "dashboard tables.",
+            "Read it as decision support. Signal interpretation, CPI point-forecast accuracy, and "
+            "descriptive market linkage are separate evidence layers; none of them is a trading "
+            "recommendation or PnL backtest.",
         )
 
 with tab_framework:
