@@ -34,17 +34,18 @@ eight open P2 code-health items are done and committed** (see section 3). The fo
 green: ruff clean · pytest **92 passed** · compileall OK · plus an offline Streamlit `AppTest`
 smoke (full app body, caching active, network forced offline -> demo/cache fallback, 0 exceptions).
 
-**Committed** across this work: `e9462d0` (P2 code-health polish), `b476ed7` (governance /
-research / audit docs), `5995a5e` (closeout reconciliation), and `1c1d90c` (Streamlit width
-cleanup). **No push has been performed** (none unless explicitly confirmed by the user).
-After the handoff-refresh commit the working tree is clean except `.claude/` (project command
-defs, intentionally kept local/untracked).
+**Committed and now pushed to `origin/main`:** the maintenance chain `e9462d0` (P2 code-health
+polish), `b476ed7` (governance / research / audit docs), `5995a5e` (closeout reconciliation),
+`1c1d90c` (Streamlit width cleanup), `dfa0ded` + `417eb4b` (handoff / NEXT_TASKS refresh), plus
+the Trader Research feature below (`cbfb2a0`). HEAD is `cbfb2a0`; `git status` is clean except
+`.claude/` (project command defs, intentionally kept local/untracked).
 
-**This cycle (implemented, NOT yet committed — pending commit approval):** the **Trader
-Research Scope Decision** was made by the user — **descriptive, rates-only, keep the shelved
-trader layer un-wired, surface as a new Streamlit tab**. Implemented: new module
+**Trader Research mode — committed + pushed (`cbfb2a0`):** the **Trader Research Scope
+Decision** was made by the user — **descriptive, rates-only, keep the shelved trader layer
+un-wired, surface as a new Streamlit tab** — and shipped: new module
 `src/transitory_inflation/trader_research.py` (a current-state-conditioned, live-safe reading
-of the Phase 4 linkage) + a new **Trader Research** tab in `app/streamlit_app.py` +
+of the Phase 4 linkage; it conditions on the **walk-forward** bucket, NOT the ex-post snapshot
+regime) + a new **Trader Research** tab in `app/streamlit_app.py` +
 `tests/test_trader_research.py` (9 tests) + doc sync (decision log, research spec §3, README,
 NEXT_TASKS). Checks green: ruff clean · pytest **101 passed** (92 prior + 9 new) · compileall
 OK · offline `AppTest` smoke renders all 9 tabs incl. Trader Research, 0 exceptions.
@@ -166,14 +167,13 @@ P2 backlog is fully implemented, green, and **committed** (`e9462d0` polish + `b
 governance docs) on `main`, and the Phase 5 gate is fully closed. The **Streamlit
 width-deprecation cleanup is done and committed** (`1c1d90c`): every `use_container_width=True`
 is now `width="stretch"`, clearing the runtime deprecation warning with no methodology or
-output change. **No push has been performed.**
+output change. **The full maintenance chain and the Trader Research feature are now pushed to `origin/main`.**
 
-The **Trader Research Scope Decision is made and implemented** (descriptive, rates-only,
-trader layer kept shelved, new Streamlit tab). Current next gate is **commit approval** for
-this increment (explicit allowlist, no `Co-Authored-By` trailer, no push), after which the
-project returns to a **maintenance** state. Deliberately deferred / out of scope until a fresh
-decision: a **predictive** linkage (out-of-sample scoring) and any **asset-universe expansion**
-beyond the six approved FRED rates.
+The **Trader Research Scope Decision is made, implemented, committed, and pushed** (`cbfb2a0`:
+descriptive, rates-only, trader layer kept shelved, new Streamlit tab). The project is now in a
+**maintenance** state — no implementation work is pending. Deliberately deferred / out of scope
+until a fresh, separately-scoped decision: a **predictive** linkage (out-of-sample scoring) and
+any **asset-universe expansion** beyond the six approved FRED rates.
 
 ---
 
