@@ -81,9 +81,7 @@ def signal_conclusion(snapshot: dict[str, object]) -> tuple[str, ...]:
         baseline_read = "running close to the selected mean-reversion baseline"
     else:
         side = "above" if epsilon > 0 else "below"
-        baseline_read = (
-            f"running {abs(epsilon):.2f}pp {side} the selected mean-reversion baseline"
-        )
+        baseline_read = f"running {abs(epsilon):.2f}pp {side} the selected mean-reversion baseline"
 
     if percentile >= 75:
         distribution_read = "elevated relative to the historical distribution"
@@ -185,6 +183,7 @@ with st.sidebar:
 
 meta = BASELINE_META[baseline_method]
 mode_meta = SAMPLE_MODES[sample_mode]
+
 
 @st.cache_data(show_spinner=True)
 def get_data(sample_mode: str):
@@ -407,7 +406,7 @@ with tab_signal:
             "regimes and will shift both.",
         )
 
-    st.plotly_chart(cpi_vs_baseline_figure(df), use_container_width=True)
+    st.plotly_chart(cpi_vs_baseline_figure(df), width="stretch")
     section_notes(
         "How CPI YoY inflation has tracked the selected mean-reversion baseline over the whole loaded "
         "sample: when inflation crossed above or below it, how long those episodes lasted, and how "
@@ -420,7 +419,7 @@ with tab_signal:
         "while the full-sample baseline is flat and ex-post only.",
     )
 
-    st.plotly_chart(tinf_term_structure_figure(df), use_container_width=True)
+    st.plotly_chart(tinf_term_structure_figure(df), width="stretch")
     section_notes(
         "Whether the transitory component is building or fading across horizons: the same deviation "
         "series averaged over 4, 8, and 12 months, so recent pressure (4M) can be compared against "
@@ -521,19 +520,19 @@ with tab_validation:
         "from elevated-but-cooling pressure. Counts matter: small groups can produce unstable "
         "rates."
     )
-    st.dataframe(combined_summary, use_container_width=True)
+    st.dataframe(combined_summary, width="stretch")
 
     st.markdown("#### Selected summary")
     if validation_group == "regime":
-        st.dataframe(regime_summary, use_container_width=True)
+        st.dataframe(regime_summary, width="stretch")
     else:
-        st.dataframe(pressure_summary, use_container_width=True)
+        st.dataframe(pressure_summary, width="stretch")
 
     st.markdown("#### Forward outcome summary by regime")
-    st.dataframe(regime_summary, use_container_width=True)
+    st.dataframe(regime_summary, width="stretch")
 
     st.markdown("#### Forward outcome summary by short-term pressure")
-    st.dataframe(pressure_summary, use_container_width=True)
+    st.dataframe(pressure_summary, width="stretch")
 
     st.markdown(f"#### Threshold sensitivity ({validation_horizon} months)")
     st.caption(
@@ -541,16 +540,14 @@ with tab_validation:
         "and 1.00 pp. It is sensitivity analysis only, not threshold optimization. Phase 2 "
         "benchmark comparison is still required before treating hit rates as forecast skill."
     )
-    st.dataframe(sensitivity_summary, use_container_width=True)
+    st.dataframe(sensitivity_summary, width="stretch")
 
     st.markdown(f"#### Regime transition matrix ({validation_horizon} months)")
-    transition = validation_mod.regime_transition_matrix(
-        validation_df, horizon=validation_horizon
-    )
+    transition = validation_mod.regime_transition_matrix(validation_df, horizon=validation_horizon)
     if transition.empty:
         st.info("No valid regime transitions are available for the selected horizon.")
     else:
-        st.dataframe(transition, use_container_width=True)
+        st.dataframe(transition, width="stretch")
 
     st.markdown("#### False positive / false negative examples")
     examples = validation_mod.validation_examples(validation_df, horizon=validation_horizon)
@@ -575,7 +572,7 @@ with tab_validation:
         if table.empty:
             st.info("No examples found under the current settings.")
         else:
-            st.dataframe(table, use_container_width=True)
+            st.dataframe(table, width="stretch")
 
 with tab_market_linkage:
     st.subheader("Phase 4A Market Linkage")
@@ -643,7 +640,7 @@ with tab_market_linkage:
         "FRED real-yield and breakeven histories start later than CPI history. Counts are "
         "reported by variable rather than forced to match the inflation sample."
     )
-    st.dataframe(availability, use_container_width=True)
+    st.dataframe(availability, width="stretch")
 
     if not market_result.available_market_variables:
         st.info("No approved market variables are available for the selected sample.")
@@ -652,11 +649,10 @@ with tab_market_linkage:
 
         st.markdown("#### Current market snapshot")
         st.caption("Latest available FRED observation by approved market variable.")
-        st.dataframe(market_tables.current_snapshot, use_container_width=True)
+        st.dataframe(market_tables.current_snapshot, width="stretch")
 
         selected_channel_summary = market_tables.channel_summary_by_regime.loc[
-            market_tables.channel_summary_by_regime["horizon_months"]
-            == market_linkage_horizon
+            market_tables.channel_summary_by_regime["horizon_months"] == market_linkage_horizon
         ]
         st.markdown(f"#### Channel interpretation ({market_linkage_horizon_label})")
         st.caption(
@@ -687,15 +683,15 @@ with tab_market_linkage:
                                 if column in channel_rows.columns
                             ],
                         ],
-                        use_container_width=True,
+                        width="stretch",
                     )
 
             st.markdown("#### What historically happened?")
             what_happened = selected_channel_summary.copy()
             what_happened["market_channel"] = (
-                what_happened["market_channel"].map(MARKET_CHANNEL_LABELS).fillna(
-                    what_happened["market_channel"]
-                )
+                what_happened["market_channel"]
+                .map(MARKET_CHANNEL_LABELS)
+                .fillna(what_happened["market_channel"])
             )
             what_happened_cols = [
                 "historical_regime",
@@ -710,13 +706,9 @@ with tab_market_linkage:
             st.dataframe(
                 what_happened.loc[
                     :,
-                    [
-                        column
-                        for column in what_happened_cols
-                        if column in what_happened.columns
-                    ],
+                    [column for column in what_happened_cols if column in what_happened.columns],
                 ].sort_values(["market_channel", "historical_regime"]),
-                use_container_width=True,
+                width="stretch",
             )
 
         selected_rankings = market_tables.regime_pressure_rankings.loc[
@@ -738,19 +730,13 @@ with tab_market_linkage:
                     *MARKET_RANKING_COLUMNS,
                 ]
                 st.dataframe(
-                    selected_rankings.sort_values(
-                        ["highest_change_rank", "market_variable"]
-                    )
+                    selected_rankings.sort_values(["highest_change_rank", "market_variable"])
                     .head(12)
                     .loc[
                         :,
-                        [
-                            column
-                            for column in highest_cols
-                            if column in selected_rankings.columns
-                        ],
+                        [column for column in highest_cols if column in selected_rankings.columns],
                     ],
-                    use_container_width=True,
+                    width="stretch",
                 )
             with rank_col2:
                 st.markdown("##### Largest average decreases")
@@ -759,19 +745,13 @@ with tab_market_linkage:
                     *MARKET_RANKING_COLUMNS,
                 ]
                 st.dataframe(
-                    selected_rankings.sort_values(
-                        ["lowest_change_rank", "market_variable"]
-                    )
+                    selected_rankings.sort_values(["lowest_change_rank", "market_variable"])
                     .head(12)
                     .loc[
                         :,
-                        [
-                            column
-                            for column in lowest_cols
-                            if column in selected_rankings.columns
-                        ],
+                        [column for column in lowest_cols if column in selected_rankings.columns],
                     ],
-                    use_container_width=True,
+                    width="stretch",
                 )
 
         st.markdown("#### Forward market-change summary by historical regime")
@@ -782,13 +762,13 @@ with tab_market_linkage:
         if market_tables.summary_by_regime.empty:
             st.info("No regime summary is available with the current market data.")
         else:
-            st.dataframe(market_tables.summary_by_regime, use_container_width=True)
+            st.dataframe(market_tables.summary_by_regime, width="stretch")
 
         st.markdown("#### Forward market-change summary by short-term pressure")
         if market_tables.summary_by_pressure.empty:
             st.info("No short-term pressure summary is available with the current market data.")
         else:
-            st.dataframe(market_tables.summary_by_pressure, use_container_width=True)
+            st.dataframe(market_tables.summary_by_pressure, width="stretch")
 
         st.markdown("#### Combined regime x short-term pressure")
         if market_tables.summary_by_regime_and_pressure.empty:
@@ -796,7 +776,7 @@ with tab_market_linkage:
         else:
             st.dataframe(
                 market_tables.summary_by_regime_and_pressure,
-                use_container_width=True,
+                width="stretch",
             )
 
         st.markdown("#### Signal-to-future-market-change correlations")
@@ -807,7 +787,7 @@ with tab_market_linkage:
         if market_tables.correlations.empty:
             st.info("No correlations are available with the current market data.")
         else:
-            st.dataframe(market_tables.correlations, use_container_width=True)
+            st.dataframe(market_tables.correlations, width="stretch")
 
 
 with tab_benchmarks:
@@ -889,14 +869,14 @@ with tab_benchmarks:
             "positive-shock rows. Note: no-change forecasts zero CPI change, so its directional "
             "accuracy is ~0 by construction rather than a skill signal."
         )
-        st.dataframe(benchmark_metrics, use_container_width=True)
+        st.dataframe(benchmark_metrics, width="stretch")
 
         st.markdown("#### Benchmark-relative improvement")
         st.caption(
             "Positive values mean the model reduced MAE or RMSE versus the comparison baseline. "
             "These are historical validation statistics, not optimized thresholds."
         )
-        st.dataframe(benchmark_improvements, use_container_width=True)
+        st.dataframe(benchmark_improvements, width="stretch")
 
         st.markdown("#### Classification summary")
         st.caption(
@@ -906,7 +886,7 @@ with tab_benchmarks:
             "construction it can never be classified persistent (its confusion row is all-negative) "
             "- read it as a structural floor, not a failure to detect."
         )
-        st.dataframe(benchmark_confusion, use_container_width=True)
+        st.dataframe(benchmark_confusion, width="stretch")
 
         st.markdown("#### Forecast audit sample")
         sample_cols = [
@@ -923,7 +903,7 @@ with tab_benchmarks:
         ]
         st.dataframe(
             forecasts.loc[:, sample_cols].sort_values("date", ascending=False).head(50),
-            use_container_width=True,
+            width="stretch",
         )
 
 with tab_report:
@@ -951,41 +931,41 @@ with tab_report:
         st.markdown("#### 1. Current Regime")
         st.markdown("\n".join(f"- {line}" for line in report.current_regime_lines))
         if not report.current_regime_table.empty:
-            st.dataframe(report.current_regime_table, use_container_width=True)
+            st.dataframe(report.current_regime_table, width="stretch")
 
         st.markdown("#### 2. Signal Confidence")
         st.markdown("\n".join(f"- {line}" for line in report.signal_confidence_lines))
         if not report.benchmark_comparisons.empty:
-            st.dataframe(report.benchmark_comparisons, use_container_width=True)
+            st.dataframe(report.benchmark_comparisons, width="stretch")
         if not report.benchmark_metrics.empty:
             with st.expander("Benchmark metric detail"):
-                st.dataframe(report.benchmark_metrics, use_container_width=True)
+                st.dataframe(report.benchmark_metrics, width="stretch")
 
         st.markdown("#### 3. Robustness Summary")
         st.markdown("\n".join(f"- {line}" for line in report.robustness_lines))
         if not report.inflation_measure_availability.empty:
             st.markdown("##### Inflation measure availability")
-            st.dataframe(report.inflation_measure_availability, use_container_width=True)
+            st.dataframe(report.inflation_measure_availability, width="stretch")
         if not report.robustness_win_rates.empty:
             st.markdown("##### Aggregate TINF/regime win rates")
-            st.dataframe(report.robustness_win_rates, use_container_width=True)
+            st.dataframe(report.robustness_win_rates, width="stretch")
         if not report.robustness_verdict.empty:
             with st.expander("Robustness verdict detail"):
-                st.dataframe(report.robustness_verdict, use_container_width=True)
+                st.dataframe(report.robustness_verdict, width="stretch")
 
         st.markdown("#### 4. Historical Analogs")
         st.markdown("\n".join(f"- {line}" for line in report.historical_analog_lines))
         if report.historical_analogs.empty:
             st.info("No analog rows are available for the current signal state.")
         else:
-            st.dataframe(report.historical_analogs, use_container_width=True)
+            st.dataframe(report.historical_analogs, width="stretch")
 
         st.markdown("#### 5. Market Linkage Summary")
         st.markdown("\n".join(f"- {line}" for line in report.market_linkage_lines))
         if report.market_channel_summary.empty:
             st.info("No market channel summary is available for this report run.")
         else:
-            st.dataframe(report.market_channel_summary, use_container_width=True)
+            st.dataframe(report.market_channel_summary, width="stretch")
 
         st.markdown("#### 6. Caveats / Model Risk")
         st.markdown("\n".join(f"- {line}" for line in report.caveats))
@@ -1005,7 +985,7 @@ with tab_report:
 with tab_framework:
     st.subheader("Paper-style descriptive tables")
     table_cols = ["inflation_yoy", "tinf_4m", "tinf_8m", "tinf_12m", "tbill_3m"]
-    st.dataframe(summary_stats(df, table_cols), use_container_width=True)
+    st.dataframe(summary_stats(df, table_cols), width="stretch")
     section_notes(
         "Paper-style descriptive moments for the selected sample: mean, standard deviation, and "
         "decile/quartile cuts of CPI YoY, the three TINF horizons, and the 3-month T-bill control, "
@@ -1019,7 +999,7 @@ with tab_framework:
     )
 
     st.subheader("Correlation matrix")
-    st.dataframe(correlation_matrix(df, table_cols), use_container_width=True)
+    st.dataframe(correlation_matrix(df, table_cols), width="stretch")
     section_notes(
         "How strongly the current YoY inflation level co-moves with each TINF horizon and the "
         "T-bill control, and how the TINF horizons co-move with each other, over the selected "
@@ -1034,7 +1014,7 @@ with tab_framework:
 
     st.subheader("OLS table with robust standard errors")
     try:
-        st.dataframe(run_paper_style_regressions(df), use_container_width=True)
+        st.dataframe(run_paper_style_regressions(df), width="stretch")
         section_notes(
             "The paper's core contemporaneous regressions: how much of the current CPI YoY level "
             "is explained by each transitory-inflation horizon, controlling for the 3-month "
@@ -1052,7 +1032,7 @@ with tab_framework:
 
     st.subheader("White-noise / autocorrelation diagnostic")
     try:
-        st.dataframe(ljung_box_table(df["tinf_4m"], lags=40), use_container_width=True)
+        st.dataframe(ljung_box_table(df["tinf_4m"], lags=40), width="stretch")
         section_notes(
             "Whether TINF 4M is white noise. The Ljung-Box statistic jointly tests for "
             "autocorrelation up to the shown lag (40 months when the sample allows; fewer "
@@ -1068,10 +1048,14 @@ with tab_framework:
 
 with tab_decay:
     st.subheader("Rolling AR(1) persistence and decay")
-    windows = st.multiselect("Rolling windows", options=[24, 30, 36, 48, 60, 84, 120], default=[24, 30, 36, 60])
+    windows = st.multiselect(
+        "Rolling windows", options=[24, 30, 36, 48, 60, 84, 120], default=[24, 30, 36, 60]
+    )
     if windows:
-        rho_df, decay_df = decay_summaries_for_windows(df, windows=tuple(windows), value_col="tinf_4m")
-        st.plotly_chart(rolling_rho_figure(rho_df), use_container_width=True)
+        rho_df, decay_df = decay_summaries_for_windows(
+            df, windows=tuple(windows), value_col="tinf_4m"
+        )
+        st.plotly_chart(rolling_rho_figure(rho_df), width="stretch")
         section_notes(
             "How persistent the transitory component has been through time: the AR(1) coefficient "
             "(rho) of TINF 4M, re-estimated in rolling windows ending at each date, one line per "
@@ -1084,7 +1068,7 @@ with tab_decay:
             "estimation window.",
         )
 
-        st.dataframe(decay_df, use_container_width=True)
+        st.dataframe(decay_df, width="stretch")
         section_notes(
             "The paper's convergence arithmetic for each selected window: the latest rho (rho_T), "
             "an AR(1) fit of the rolling-rho series itself (mu and c). The published paper decay "
@@ -1104,7 +1088,7 @@ with tab_decay:
         if not valid_decay.empty:
             selected_row = valid_decay.iloc[0]
             curve = decay_curve(float(selected_row["rho_T"]), float(selected_row["mu"]), months=48)
-            st.plotly_chart(decay_curve_figure(curve), use_container_width=True)
+            st.plotly_chart(decay_curve_figure(curve), width="stretch")
             section_notes(
                 "The implied forward path of the current deviation, using rho_T and mu from the "
                 "first valid row of the table above: what percentage has decayed, and what "
@@ -1195,14 +1179,14 @@ with tab_robustness:
         )
 
         st.markdown("#### Robustness data status")
-        st.dataframe(pd.DataFrame(status_rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(status_rows), width="stretch")
         st.markdown("#### Inflation measure availability")
         st.caption(
             "Unavailable measures are skipped rather than filled with demo data. If live FRED "
             "and cache files lack a selected core/PCE series, the headline CPI rows still run "
             "and the missing measure is disclosed here."
         )
-        st.dataframe(availability, use_container_width=True)
+        st.dataframe(availability, width="stretch")
 
         if scorecard.empty:
             st.info("No robustness scorecard is available for the selected settings.")
@@ -1230,7 +1214,7 @@ with tab_robustness:
                 "rank_by_mae",
                 "rank_by_rmse",
             ]
-            st.dataframe(scorecard.loc[:, scorecard_cols], use_container_width=True)
+            st.dataframe(scorecard.loc[:, scorecard_cols], width="stretch")
 
             st.markdown("#### TINF/regime verdict across settings")
             verdict_cols = [
@@ -1256,7 +1240,7 @@ with tab_robustness:
                 "beats_ar1_mae",
                 "beats_ar1_rmse",
             ]
-            st.dataframe(verdict.loc[:, verdict_cols], use_container_width=True)
+            st.dataframe(verdict.loc[:, verdict_cols], width="stretch")
 
             st.markdown("#### Aggregate TINF/regime win rates")
             st.caption(
@@ -1264,7 +1248,7 @@ with tab_robustness:
                 "visible horizon and threshold grid. They are diagnostics, not a setting "
                 "selection rule."
             )
-            st.dataframe(win_rates, use_container_width=True)
+            st.dataframe(win_rates, width="stretch")
 
     st.subheader("Baseline robustness quick comparison")
     rows = []
@@ -1283,7 +1267,7 @@ with tab_robustness:
                     "short_term_pressure": pressure_label(snap["term_structure"]),
                 }
             )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch")
     section_notes(
         "Whether today's signal survives changing the baseline definition: the latest snapshot "
         "(date, TINF 4M, percentile, regime, short-term pressure) recomputed under every baseline, "
@@ -1296,7 +1280,7 @@ with tab_robustness:
     )
 
     st.subheader("Stationarity diagnostics for selected TINF 4M")
-    st.dataframe(stationarity_diagnostics(df["tinf_4m"]), use_container_width=True)
+    st.dataframe(stationarity_diagnostics(df["tinf_4m"]), width="stretch")
     section_notes(
         "Whether the selected TINF 4M series is statistically mean-reverting over this sample, "
         "using two complementary tests: ADF (null hypothesis: unit root) and KPSS (null "
