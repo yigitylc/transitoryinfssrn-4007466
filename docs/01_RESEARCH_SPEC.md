@@ -103,14 +103,28 @@ can use information unavailable at month t.
 
 ### 3. Trader research mode
 
-Purpose: study relationships between inflation persistence and markets.
+Purpose: study, descriptively, how markets behaved after past inflation-persistence
+states.
 
-Possible assets/features:
+Scope (decided 2026-06-24): descriptive only, rates-only, and live-safe. It ships as
+the **Trader Research** Streamlit tab, which conditions on the latest live-safe
+walk-forward regime bucket (`historical_regime` / `historical_short_term_pressure`)
+and reports, for the six approved FRED rate instruments, the forward-change
+distribution (median, p25-p75, increase/decrease hit rates, sample count,
+weak-evidence) plus the analog months behind it. It reuses the Phase 4 market-linkage
+tables (`market_linkage.build_market_linkage_tables`) and adds no new market series.
 
-- policy rates / T-bills
-- Treasury yields
-- breakevens / real yields
-- SPY, QQQ, TLT, GLD, DXY, VIX
-- value/growth and sector proxies
+In scope (approved FRED rates only):
+
+- 2Y / 10Y Treasury yields
+- 5Y / 10Y breakeven inflation
+- 5Y / 10Y real yields
+
+Explicitly out of scope (future, not implemented):
+
+- predictive / out-of-sample forecast scoring of market moves
+- any PnL, sizing, timing, instruments, or trade recommendations
+- other assets (e.g. SPY, QQQ, TLT, GLD, DXY, VIX, value/growth, sector proxies),
+  which would require expanding the approved market registry
 
 Do not treat this as a trading system unless explicitly requested.

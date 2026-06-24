@@ -18,6 +18,7 @@ from transitory_inflation import market_data as market_data_mod
 from transitory_inflation import market_linkage as market_linkage_mod
 from transitory_inflation import report as report_mod
 from transitory_inflation import robustness as robustness_mod
+from transitory_inflation import trader_research as trader_research_mod
 from transitory_inflation import validation as validation_mod
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
 from transitory_inflation.data import date_label, latest_valid_observation_date
@@ -356,6 +357,7 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
     tab_validation,
     tab_benchmarks,
     tab_market_linkage,
+    tab_trader_research,
     tab_framework,
     tab_decay,
     tab_robustness,
@@ -366,6 +368,7 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
         "Historical Signal Validation",
         "Benchmark Comparison",
         "Market Linkage",
+        "Trader Research",
         "Paper Framework",
         "Decay / Convergence",
         "Robustness",
@@ -788,6 +791,204 @@ with tab_market_linkage:
             st.info("No correlations are available with the current market data.")
         else:
             st.dataframe(market_tables.correlations, width="stretch")
+
+
+with tab_trader_research:
+    st.subheader("Trader Research (descriptive, rates-only)")
+    st.markdown(
+        "Given the macro state we are in **today**, what did the six approved FRED rate "
+        "instruments historically do over the next 3/6/12/24/36 months? This collapses the "
+        "Market Linkage history to the current live-safe regime bucket and shows the "
+        "forward-change distribution plus the analog months behind it."
+    )
+    st.warning(
+        "Descriptive historical base rates only. This is not a forecast, not a trading signal, "
+        "and not a model-generated trade recommendation. No sizing, timing, or instruments are "
+        "implied."
+    )
+
+    bucket = trader_research_mod.latest_walk_forward_bucket(df)
+    if not bucket.available:
+        st.info(bucket.reason or "No live-safe regime bucket is available yet.")
+    else:
+        st.markdown(
+            f"**Current bucket** (live-safe walk-forward, as of {date_label(bucket.as_of)}): "
+            f"regime **'{bucket.regime}'**, short-term pressure **'{bucket.pressure}'**. "
+            f"{bucket.regime_count} historical month(s) share this regime; "
+            f"{bucket.regime_pressure_count} also share the pressure."
+        )
+        trader_snapshot = latest_signal_snapshot(df)
+        if trader_snapshot.get("available"):
+            st.caption(
+                "Cross-check only: the ex-post full-sample snapshot labels this month "
+                f"'{trader_snapshot['regime']}'. Bucket matching uses the live-safe walk-forward "
+                "label above, never this full-sample one."
+            )
+
+        market_result = get_market_data(sample_mode)
+        if market_result.market_data_source_used == "fred_csv":
+            st.warning(
+                "Official FRED API market fetch was unavailable or not configured, so this tab "
+                "is using public FRED CSV market data."
+            )
+        elif market_result.market_data_source_used == "cached_fred_market":
+            st.warning(
+                "Live FRED market fetch failed, so this tab is using cached market data from "
+                f"`{market_result.market_cache_file_used}`."
+            )
+        elif market_result.market_data_source_used == "unavailable":
+            st.warning(
+                "Trader Research is unavailable because official FRED API, public FRED CSV, and "
+                "local cached market data all failed. No demo market data are used."
+            )
+
+        if not market_result.available_market_variables:
+            st.info("No approved market variables are available for the selected sample.")
+        else:
+            market_tables = get_market_linkage_tables(df, market_result.data)
+
+            trader_horizon_label = st.selectbox(
+                "Forward horizon",
+                options=list(MARKET_LINKAGE_HORIZON_OPTIONS),
+                index=list(MARKET_LINKAGE_HORIZON_OPTIONS).index("12M"),
+                key="trader_research_horizon",
+            )
+            trader_horizon = MARKET_LINKAGE_HORIZON_OPTIONS[trader_horizon_label]
+
+            trader_regimes = trader_research_mod.available_regimes(market_tables) or (
+                (bucket.regime,) if bucket.regime else ()
+            )
+            if trader_regimes:
+                default_regime_index = (
+                    trader_regimes.index(bucket.regime)
+                    if bucket.regime in trader_regimes
+                    else 0
+                )
+                chosen_regime = st.selectbox(
+                    "Condition on regime (defaults to today's bucket)",
+                    options=list(trader_regimes),
+                    index=default_regime_index,
+                    key="trader_research_regime",
+                )
+            else:
+                chosen_regime = bucket.regime
+
+            condition_on_pressure = st.checkbox(
+                "Also condition on short-term pressure",
+                value=False,
+                key="trader_research_pressure_toggle",
+            )
+            chosen_pressure = None
+            if condition_on_pressure:
+                trader_pressures = trader_research_mod.available_pressures(market_tables) or (
+                    (bucket.pressure,) if bucket.pressure else ()
+                )
+                if trader_pressures:
+                    default_pressure_index = (
+                        trader_pressures.index(bucket.pressure)
+                        if bucket.pressure in trader_pressures
+                        else 0
+                    )
+                    chosen_pressure = st.selectbox(
+                        "Condition on pressure",
+                        options=list(trader_pressures),
+                        index=default_pressure_index,
+                        key="trader_research_pressure",
+                    )
+
+            view = trader_research_mod.build_trader_research_view(
+                market_tables,
+                chosen_regime,
+                chosen_pressure,
+                horizons=(trader_horizon,),
+            )
+
+            if not view.available:
+                st.info(view.reason or "No historical analogs for this bucket.")
+            else:
+                conditioning = f"regime '{view.regime}'" + (
+                    f" x pressure '{view.pressure}'" if view.pressure else ""
+                )
+                st.caption(f"Conditioned on {conditioning}. Forward changes are t to t+h in basis points.")
+                if view.weak_evidence:
+                    st.warning(
+                        "Some rows have fewer than 30 complete observations "
+                        "(weak_evidence=True) - interpret cautiously."
+                    )
+
+                st.markdown(f"#### Forward rate-change distribution ({trader_horizon_label})")
+                st.caption(
+                    "Per approved FRED instrument: median and p25-p75 range of the forward change, "
+                    "the average, increase/decrease hit rates, and the sample count. A positive "
+                    "change means the instrument rose after the signal month."
+                )
+                trader_dist_cols = [
+                    column
+                    for column in (
+                        "market_variable",
+                        "count",
+                        "median_change_bp",
+                        "p25_change_bp",
+                        "p75_change_bp",
+                        "avg_change_bp",
+                        "increase_hit_rate",
+                        "decrease_hit_rate",
+                        "weak_evidence",
+                    )
+                    if column in view.distribution.columns
+                ]
+                if view.distribution.empty:
+                    st.info("No distribution rows for this bucket and horizon.")
+                else:
+                    st.dataframe(view.distribution.loc[:, trader_dist_cols], width="stretch")
+
+                st.markdown(f"#### Channel roll-up ({trader_horizon_label})")
+                st.caption(
+                    "Row-wise channel averages: nominal (2Y/10Y), breakevens (5Y/10Y), and real "
+                    "yields (5Y/10Y), for the selected regime."
+                )
+                trader_channel = view.channel_rollup
+                if not trader_channel.empty and "market_channel" in trader_channel.columns:
+                    trader_channel = trader_channel.copy()
+                    trader_channel["market_channel"] = (
+                        trader_channel["market_channel"]
+                        .map(MARKET_CHANNEL_LABELS)
+                        .fillna(trader_channel["market_channel"])
+                    )
+                trader_channel_cols = [
+                    column
+                    for column in (
+                        "market_channel",
+                        "historical_direction",
+                        "avg_change_bp",
+                        "median_change_bp",
+                        "count",
+                        "weak_evidence",
+                    )
+                    if column in trader_channel.columns
+                ]
+                if trader_channel.empty:
+                    st.info("No channel roll-up for this regime and horizon.")
+                else:
+                    st.dataframe(trader_channel.loc[:, trader_channel_cols], width="stretch")
+
+                st.markdown("#### Analog months (audit trail)")
+                st.caption(
+                    "The historical months in this bucket and their forward rate changes (bp) - "
+                    "the observations behind the distribution above."
+                )
+                if view.analog_months.empty:
+                    st.info("No analog months with forward market data for this bucket.")
+                else:
+                    st.dataframe(view.analog_months, width="stretch")
+
+                st.caption(
+                    "Caveats: descriptive and historical only; the bucket uses live-safe "
+                    "walk-forward labels (no full-sample lookahead); rate changes are in basis "
+                    "points; small buckets (weak_evidence) and the baseline/sample choice shift "
+                    "these readings; forward changes describe history only and never construct "
+                    "the signal."
+                )
 
 
 with tab_benchmarks:

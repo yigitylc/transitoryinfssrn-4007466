@@ -121,6 +121,7 @@ or buy/sell recommender.
 * **Historical Signal Validation** (Phase 1) — forward-outcome tables by regime and short-term pressure, threshold sensitivity, and worked examples.
 * **Benchmark Comparison** (Phase 2) — TINF/regime vs no-change, CPI persistence, mean reversion, and AR(1) on MAE/RMSE/directional/hit-rate metrics.
 * **Market Linkage** (Phase 4) — descriptive history of how Treasury yields, breakevens, and real yields moved after past TINF/regime states.
+* **Trader Research** — descriptive, rates-only reading conditioned on today's live-safe regime bucket: the forward rate-change distribution (median, p25–p75, hit rates) and the analog months behind it. No forecasts, no PnL.
 * **Paper Framework** — paper-style descriptive moments, correlations, and robust OLS regressions.
 * **Decay / Convergence** — rolling AR(1) persistence and the paper-style decay curve.
 * **Robustness** (Phase 3) — scorecard across baselines, sample modes, inflation measures, horizons, and thresholds.

@@ -40,6 +40,15 @@ cleanup). **No push has been performed** (none unless explicitly confirmed by th
 After the handoff-refresh commit the working tree is clean except `.claude/` (project command
 defs, intentionally kept local/untracked).
 
+**This cycle (implemented, NOT yet committed — pending commit approval):** the **Trader
+Research Scope Decision** was made by the user — **descriptive, rates-only, keep the shelved
+trader layer un-wired, surface as a new Streamlit tab**. Implemented: new module
+`src/transitory_inflation/trader_research.py` (a current-state-conditioned, live-safe reading
+of the Phase 4 linkage) + a new **Trader Research** tab in `app/streamlit_app.py` +
+`tests/test_trader_research.py` (9 tests) + doc sync (decision log, research spec §3, README,
+NEXT_TASKS). Checks green: ruff clean · pytest **101 passed** (92 prior + 9 new) · compileall
+OK · offline `AppTest` smoke renders all 9 tabs incl. Trader Research, 0 exceptions.
+
 ---
 
 ## 2. Environment & checks (how to verify anything)
@@ -159,11 +168,12 @@ width-deprecation cleanup is done and committed** (`1c1d90c`): every `use_contai
 is now `width="stretch"`, clearing the runtime deprecation warning with no methodology or
 output change. **No push has been performed.**
 
-Current known next gate is **not implementation** - it is the **Trader Research Scope
-Decision**. The next roadmap item (Trader research mode / market trade priors) is unblocked
-but conflicts with the current rates-only registry, so it must be a **deliberate, separately
-scoped decision** before any work starts. Until that decision, the project is in a
-**maintenance** state.
+The **Trader Research Scope Decision is made and implemented** (descriptive, rates-only,
+trader layer kept shelved, new Streamlit tab). Current next gate is **commit approval** for
+this increment (explicit allowlist, no `Co-Authored-By` trailer, no push), after which the
+project returns to a **maintenance** state. Deliberately deferred / out of scope until a fresh
+decision: a **predictive** linkage (out-of-sample scoring) and any **asset-universe expansion**
+beyond the six approved FRED rates.
 
 ---
 
