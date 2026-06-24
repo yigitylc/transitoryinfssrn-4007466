@@ -1,6 +1,6 @@
 # ACTIVE HANDOFF - Audit-Fix Cycle
 
-**As of:** 2026-06-24 · **Owner loop:** Maintenance - Streamlit width deprecation cleanup
+**As of:** 2026-06-24 · **Owner loop:** Maintenance - governance-doc reconciliation
 
 > **This is a LIVING document.** When a task completes, **update the relevant section
 > in place** (flip status, rewrite "Next action"); do **not** append a running log.
@@ -37,8 +37,9 @@ smoke (full app body, caching active, network forced offline -> demo/cache fallb
 **Committed and now pushed to `origin/main`:** the maintenance chain `e9462d0` (P2 code-health
 polish), `b476ed7` (governance / research / audit docs), `5995a5e` (closeout reconciliation),
 `1c1d90c` (Streamlit width cleanup), `dfa0ded` + `417eb4b` (handoff / NEXT_TASKS refresh), plus
-the Trader Research feature below (`cbfb2a0`). HEAD is `cbfb2a0`; `git status` is clean except
-`.claude/` (project command defs, intentionally kept local/untracked).
+the Trader Research feature below (`cbfb2a0`). HEAD is `76284e6` (the handoff-refresh commit
+that landed after this paragraph was first written); `git status` is clean except `.claude/`
+(project command defs, intentionally kept local/untracked).
 
 **Trader Research mode — committed + pushed (`cbfb2a0`):** the **Trader Research Scope
 Decision** was made by the user — **descriptive, rates-only, keep the shelved trader layer
@@ -59,7 +60,7 @@ OK · offline `AppTest` smoke renders all 9 tabs incl. Trader Research, 0 except
   - `& .\.venv\Scripts\ruff.exe check .`
   - `& .\.venv\Scripts\python.exe -m pytest -q`
   - `& .\.venv\Scripts\python.exe -m compileall src app scripts -q`
-- **Current check status:** ruff clean · **pytest 92 passed** · compileall OK · `git diff --check` clean.
+- **Current check status:** ruff clean · **pytest 101 passed** · compileall OK · `git diff --check` clean.
 - **Offline:** FRED CSV is flaky from this machine - keep work network-free. `pytest` is
   network-free (monkeypatched `requests.get`). An offline phase smoke is available via
   `data.make_demo_data()` + the phase builders (no network).
@@ -105,29 +106,25 @@ What each P1 fix changed (so you don't need the chat):
 
 ## 4. Working tree + commit history (refresh when files change / after commit)
 
-**Status: all planned commits have LANDED on `main`; NOT pushed.** The only routine churn
-left is this handoff refresh (committed as `docs: refresh active handoff after maintenance
-cleanup`) and the intentionally-local, untracked `.claude/`. Any further commit still needs
-explicit user approval; never `git add -A`.
+**Status: all commits have LANDED and been PUSHED to `origin/main` (`76284e6`, 0 ahead /
+0 behind).** The working tree is clean except the intentionally-local, untracked `.claude/`
+(project command defs). Any further commit still needs explicit user approval; never `git add -A`.
 
-History (all local, **no push performed**):
+History (all pushed to `origin/main`):
 - `d2cb783` - Phase 5 code + the three then-modified docs (`NEXT_TASKS.md`,
   `docs/01_RESEARCH_SPEC.md`, `docs/09_PRODUCTION_ROADMAP.md`).
 - `e9462d0` - P2 code-health polish (cache, tab order, dedup, horizons, tests).
 - `b476ed7` - governance / research / audit docs.
 - `5995a5e` - closeout reconciliation of the living status docs.
 - `1c1d90c` - Streamlit width-parameter migration (`use_container_width` -> `width="stretch"`).
+- `dfa0ded` + `417eb4b` - handoff / NEXT_TASKS refresh after maintenance cleanup.
+- `cbfb2a0` - Trader Research feature (module + tab + 9 tests + doc sync).
+- `76284e6` - handoff refresh after Trader Research (**current HEAD**).
 
-Modified tracked (P2 polish + hygiene + living docs):
-`.gitignore`, `NEXT_TASKS.md`, `README.md`, `app/streamlit_app.py`,
-`src/transitory_inflation/{benchmarks,data,report,robustness,validation}.py`,
-`tests/test_{benchmarks,robustness}.py`.
-
-New + untracked: `tests/test_{diagnostics,plots}.py`; `ACTIVE_HANDOFF.md`, `AGENTS.md`,
-`CLAUDE.md`, `docs/{00,02,03,04,05,06,08}_*.md`, `docs/CLAUDE_PROMPTS.md`,
-`docs/IMPLEMENTATION_PLAN.md`, `docs/METHODOLOGY.md`, `docs/PAPER_FORMULA_REFERENCE.md`,
-`docs/PAPER_NOTES.md`, `docs/RESEARCH_CHECKLIST.md`, `docs/decisions/.gitkeep`, `prompts/*`,
-scaffolding `.gitkeep`s, `reports/PHASE_0_5_AUDIT_{PLAN,FINDINGS}.md`, `.claude/*`.
+Working tree (current): **clean.** Every file from the prior cycles - P2 code-health polish,
+the governance / research / audit docs, the Trader Research module/tab/tests, and the living
+docs - is committed and pushed. The only untracked path is `.claude/` (project command defs,
+intentionally kept local; add it only if you want to share the command defs in the repo).
 
 ### Commit-readiness catches (do NOT miss)
 1. **`.env`** is gitignored - never commit it.
@@ -163,17 +160,18 @@ the command defs in the repo. A single combined commit is also fine if preferred
 
 ## 5. Next action (REWRITE this each loop iteration)
 
-P2 backlog is fully implemented, green, and **committed** (`e9462d0` polish + `b476ed7`
-governance docs) on `main`, and the Phase 5 gate is fully closed. The **Streamlit
-width-deprecation cleanup is done and committed** (`1c1d90c`): every `use_container_width=True`
-is now `width="stretch"`, clearing the runtime deprecation warning with no methodology or
-output change. **The full maintenance chain and the Trader Research feature are now pushed to `origin/main`.**
+**This loop reconciled the two living governance docs** (`NEXT_TASKS.md` + this file) to the
+actual shipped/pushed maintenance state: `NEXT_TASKS.md` no longer says Trader Research is
+"pending commit approval / not yet committed", and §1/§2/§4 above now show the correct HEAD
+(`76284e6`), pushed status, clean working tree, and `pytest 101 passed`. **Docs-only — no code,
+methodology, or output changed; not yet committed (needs approval).**
 
-The **Trader Research Scope Decision is made, implemented, committed, and pushed** (`cbfb2a0`:
-descriptive, rates-only, trader layer kept shelved, new Streamlit tab). The project is now in a
-**maintenance** state — no implementation work is pending. Deliberately deferred / out of scope
-until a fresh, separately-scoped decision: a **predictive** linkage (out-of-sample scoring) and
-any **asset-universe expansion** beyond the six approved FRED rates.
+The project is otherwise **idle in a maintenance state — no implementation work is pending.**
+Everything through the Trader Research feature (`cbfb2a0`) is committed and pushed to
+`origin/main`. Deliberately deferred / out of scope until a fresh, separately-scoped user
+decision (each needs its own scope decision before any work begins):
+- a **predictive** linkage — out-of-sample scoring of market moves vs descriptive base rates;
+- any **asset-universe expansion** beyond the six approved FRED rate series.
 
 ---
 
