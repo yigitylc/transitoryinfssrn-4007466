@@ -1,6 +1,6 @@
 # ACTIVE HANDOFF - Audit-Fix Cycle
 
-**As of:** 2026-06-23 · **Owner loop:** Phase 5 closeout + governance reconciliation
+**As of:** 2026-06-24 · **Owner loop:** Maintenance - Streamlit width deprecation cleanup
 
 > **This is a LIVING document.** When a task completes, **update the relevant section
 > in place** (flip status, rewrite "Next action"); do **not** append a running log.
@@ -26,15 +26,19 @@ Project in one line: a Streamlit research tool operationalizing the Peron & Bona
 
 ## 1. Where we are right now (rewrite when state changes)
 
-Deep read-only audit is **complete**. **All five P1 findings are fixed and committed**
-(`d2cb783`, "close out Phase 5 ... reconcile governance"). **All eight open P2 code-health
-items are now done and committed** (see section 3). Checks are green:
-ruff clean · pytest **92 passed** · compileall OK · plus an offline Streamlit `AppTest` smoke
-(full app body, caching active, network forced offline -> demo/cache fallback, 0 exceptions).
+Deep read-only audit is **complete** and **Phases 0-5 are closed**. **All five P1 findings
+are fixed and committed** (`d2cb783`, "close out Phase 5 ... reconcile governance"). **All
+eight open P2 code-health items are done and committed** (see section 3). The follow-on
+**Streamlit width-deprecation cleanup is also done and committed** (`1c1d90c`: every
+`use_container_width=True` -> `width="stretch"`; no methodology or output change). Checks are
+green: ruff clean · pytest **92 passed** · compileall OK · plus an offline Streamlit `AppTest`
+smoke (full app body, caching active, network forced offline -> demo/cache fallback, 0 exceptions).
 
-**Committed** this cycle as `e9462d0` (P2 code-health polish) and `b476ed7` (governance /
-research / audit docs). Working tree is clean except `.claude/` (project command defs,
-intentionally kept local/untracked).
+**Committed** across this work: `e9462d0` (P2 code-health polish), `b476ed7` (governance /
+research / audit docs), `5995a5e` (closeout reconciliation), and `1c1d90c` (Streamlit width
+cleanup). **No push has been performed** (none unless explicitly confirmed by the user).
+After the handoff-refresh commit the working tree is clean except `.claude/` (project command
+defs, intentionally kept local/untracked).
 
 ---
 
@@ -45,7 +49,7 @@ intentionally kept local/untracked).
   - `& .\.venv\Scripts\ruff.exe check .`
   - `& .\.venv\Scripts\python.exe -m pytest -q`
   - `& .\.venv\Scripts\python.exe -m compileall src app scripts -q`
-- **Current check status:** ruff clean · **pytest 85 passed** · compileall OK · `git diff --check` clean.
+- **Current check status:** ruff clean · **pytest 92 passed** · compileall OK · `git diff --check` clean.
 - **Offline:** FRED CSV is flaky from this machine - keep work network-free. `pytest` is
   network-free (monkeypatched `requests.get`). An offline phase smoke is available via
   `data.make_demo_data()` + the phase builders (no network).
@@ -89,13 +93,20 @@ What each P1 fix changed (so you don't need the chat):
 
 ---
 
-## 4. Uncommitted working tree + commit plan (refresh when files change / after commit)
+## 4. Working tree + commit history (refresh when files change / after commit)
 
-**Status: NOT committed, NOT staged. A commit needs explicit user approval.**
+**Status: all planned commits have LANDED on `main`; NOT pushed.** The only routine churn
+left is this handoff refresh (committed as `docs: refresh active handoff after maintenance
+cleanup`) and the intentionally-local, untracked `.claude/`. Any further commit still needs
+explicit user approval; never `git add -A`.
 
-`d2cb783` already committed the Phase 5 code + the three then-modified docs
-(`NEXT_TASKS.md`, `docs/01_RESEARCH_SPEC.md`, `docs/09_PRODUCTION_ROADMAP.md`). What remains
-is this P2 polish cycle plus the governance docs that commit left untracked.
+History (all local, **no push performed**):
+- `d2cb783` - Phase 5 code + the three then-modified docs (`NEXT_TASKS.md`,
+  `docs/01_RESEARCH_SPEC.md`, `docs/09_PRODUCTION_ROADMAP.md`).
+- `e9462d0` - P2 code-health polish (cache, tab order, dedup, horizons, tests).
+- `b476ed7` - governance / research / audit docs.
+- `5995a5e` - closeout reconciliation of the living status docs.
+- `1c1d90c` - Streamlit width-parameter migration (`use_container_width` -> `width="stretch"`).
 
 Modified tracked (P2 polish + hygiene + living docs):
 `.gitignore`, `NEXT_TASKS.md`, `README.md`, `app/streamlit_app.py`,
@@ -114,16 +125,16 @@ scaffolding `.gitkeep`s, `reports/PHASE_0_5_AUDIT_{PLAN,FINDINGS}.md`, `.claude/
    cycle and verified with `git check-ignore`). Still never `git add -A`; use the explicit
    allowlist below.
 
-### Two commits (explicit allowlist; never `git add -A`)
+### Commits that landed (the executed allowlist; we never used `git add -A`)
 
-**Commit 1 - P2 code-health polish.** `git add`: `README.md app/streamlit_app.py
+**Commit 1 - P2 code-health polish** (landed as `e9462d0`). `git add`: `README.md app/streamlit_app.py
 src/transitory_inflation/benchmarks.py src/transitory_inflation/data.py
 src/transitory_inflation/report.py src/transitory_inflation/robustness.py
 src/transitory_inflation/validation.py tests/test_benchmarks.py tests/test_robustness.py
 tests/test_diagnostics.py tests/test_plots.py .gitignore`
 Message: `chore: complete Phase 5 P2 code-health backlog (cache, tab order, dedup, horizons, tests)`
 
-**Commit 2 - governance / research docs.** `git add`: `AGENTS.md CLAUDE.md ACTIVE_HANDOFF.md
+**Commit 2 - governance / research docs** (landed as `b476ed7`). `git add`: `AGENTS.md CLAUDE.md ACTIVE_HANDOFF.md
 NEXT_TASKS.md docs/00_PROJECT_CONTEXT.md docs/02_DATA_CONTRACT.md docs/03_AGENT_WORKFLOW.md
 docs/04_VALIDATION_PROTOCOL.md docs/05_DASHBOARD_BRIEF.md docs/06_DECISION_LOG.md
 docs/08_LOCALHOST_REVIEW.md docs/CLAUDE_PROMPTS.md docs/IMPLEMENTATION_PLAN.md
@@ -136,24 +147,23 @@ reports/figures/.gitkeep reports/notes/.gitkeep reports/tables/.gitkeep`
 Message: `docs: track governance, research, and audit docs`
 
 `.claude/` (project skill/command defs) is optional - often kept local; add it only to share
-the command defs in the repo. A single combined commit is also fine if preferred. Each commit
-message ends with the trailer `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+the command defs in the repo. A single combined commit is also fine if preferred.
 
 ---
 
 ## 5. Next action (REWRITE this each loop iteration)
 
-P2 backlog is fully implemented, green, and **committed** as `e9462d0` (P2 polish) +
-`b476ed7` (governance docs) on `main`. The Phase 5 gate is fully closed.
+P2 backlog is fully implemented, green, and **committed** (`e9462d0` polish + `b476ed7`
+governance docs) on `main`, and the Phase 5 gate is fully closed. The **Streamlit
+width-deprecation cleanup is done and committed** (`1c1d90c`): every `use_container_width=True`
+is now `width="stretch"`, clearing the runtime deprecation warning with no methodology or
+output change. **No push has been performed.**
 
-Next: the next roadmap item (Trader research mode / market trade priors) is unblocked but
-should be a **deliberate, separately scoped decision** - it conflicts with the current
-rates-only registry, so confirm scope before starting. Otherwise the project is in a
-maintenance state.
-
-Known non-blocking follow-up: the app passes `use_container_width=` to every `st.dataframe`/
-`st.plotly_chart`, which Streamlit now deprecates (runtime warning). A future cleanup switches
-to `width=`; out of scope for this P2 cycle.
+Current known next gate is **not implementation** - it is the **Trader Research Scope
+Decision**. The next roadmap item (Trader research mode / market trade priors) is unblocked
+but conflicts with the current rates-only registry, so it must be a **deliberate, separately
+scoped decision** before any work starts. Until that decision, the project is in a
+**maintenance** state.
 
 ---
 
@@ -175,7 +185,7 @@ to `width=`; out of scope for this P2 cycle.
 ## 7. Quick self-orientation commands (read-only)
 
 ```
-git status --short                 # working tree (expect the M list in section 4)
+git status --short                 # working tree (expect only .claude/ untracked; see section 4)
 git diff --name-only               # tracked, unstaged changes
 git log --oneline -8               # history (initial df93a57 .. Phase 4)
 .venv\Scripts\python.exe -m pytest -q
