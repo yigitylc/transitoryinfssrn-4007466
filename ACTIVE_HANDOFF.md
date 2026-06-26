@@ -1,6 +1,6 @@
 # ACTIVE HANDOFF - Audit-Fix Cycle
 
-**As of:** 2026-06-24 · **Owner loop:** Maintenance - governance-doc reconciliation
+**As of:** 2026-06-25 · **Owner loop:** Dashboard UI/UX polish - batch 1 (foundation + flagship)
 
 > **This is a LIVING document.** When a task completes, **update the relevant section
 > in place** (flip status, rewrite "Next action"); do **not** append a running log.
@@ -17,6 +17,7 @@
 2. `reports/PHASE_0_5_AUDIT_FINDINGS.md` - the full audit (P0/P1/P2 findings, file:line evidence).
 3. `NEXT_TASKS.md` - current active gate (kept in sync with this file).
 4. `docs/09_PRODUCTION_ROADMAP.md` + `docs/10_AGENT_EXECUTION_PLAYBOOK.md` - phase gates & methodology rules.
+5. `docs/DASHBOARD_UI_POLISH_PLAN.md` - **active work**: the UI/UX polish plan (batch 1 done/uncommitted; batch 2 next).
 
 Project in one line: a Streamlit research tool operationalizing the Peron & Bonaparte
 "transitory inflation" paper (SSRN 4007466); three separate layers - paper replication
@@ -25,6 +26,32 @@ Project in one line: a Streamlit research tool operationalizing the Peron & Bona
 ---
 
 ## 1. Where we are right now (rewrite when state changes)
+
+**Active work: Dashboard UI/UX polish — batch 1 ("Foundation + flagship") is COMMITTED as
+`affbb0a` (NOT yet pushed — push needs separate approval; HEAD is 1 ahead of `origin/main`).**
+Presentation-only; **no methodology, numbers, series, or logic changed.** What landed (per
+`docs/DASHBOARD_UI_POLISH_PLAN.md`):
+- **C1 shared theme** — `apply_macro_theme()` in `plots.py`; all 5 figures routed through it
+  (consistent font, light gridlines, `hovermode="x unified"`, tight margins, top legend,
+  hot/cold palette `HOT`/`COLD`/`NEUTRAL`).
+- **C2 glossary + C5 sidebar** — `render_glossary()`/`GLOSSARY_ITEMS` in the sidebar; grouped
+  header + compact "Current reading" mini-status line.
+- **Tab 1 (Current Macro Signal) rebuilt** — `signal_headline()`, `regime_badge()`, metric cards
+  with neutral semantic deltas (`delta_color="off"`); CPI figure epsilon-shaded + current marker;
+  TINF figure zone-tinted above/below zero + current-value markers.
+- **Tab 5 (Trader Research)** — new `forward_change_range_figure()` (median marker + p25–p75
+  whisker, hot/cold by sign) as the headline with the table behind an expander; bucket **metric
+  cards**; analog months behind an "Audit trail" expander; `section_notes` + `scope_caveats()`
+  applied as the reusable C3/C4 template.
+- **Reusable helpers for later batches:** `apply_macro_theme`, `render_glossary`, `scope_caveats`,
+  `regime_badge`, `signal_headline`, and the palette constants.
+
+Gates green (this loop): ruff clean · pytest **104 passed** (101 prior + 3 new plot tests) ·
+compileall OK · offline `AppTest` smoke renders all 9 tabs, **0 exceptions / 0 errors**.
+**Next:** push `affbb0a` (when approved), then batch 2 (Validation + Market Linkage charts) —
+see §5. Read `docs/DASHBOARD_UI_POLISH_PLAN.md` first.
+
+---
 
 Deep read-only audit is **complete** and **Phases 0-5 are closed**. **All five P1 findings
 are fixed and committed** (`d2cb783`, "close out Phase 5 ... reconcile governance"). **All
@@ -60,7 +87,7 @@ OK · offline `AppTest` smoke renders all 9 tabs incl. Trader Research, 0 except
   - `& .\.venv\Scripts\ruff.exe check .`
   - `& .\.venv\Scripts\python.exe -m pytest -q`
   - `& .\.venv\Scripts\python.exe -m compileall src app scripts -q`
-- **Current check status:** ruff clean · **pytest 101 passed** · compileall OK · `git diff --check` clean.
+- **Current check status:** ruff clean · **pytest 104 passed** · compileall OK · `git diff --check` clean.
 - **Offline:** FRED CSV is flaky from this machine - keep work network-free. `pytest` is
   network-free (monkeypatched `requests.get`). An offline phase smoke is available via
   `data.make_demo_data()` + the phase builders (no network).
@@ -106,11 +133,28 @@ What each P1 fix changed (so you don't need the chat):
 
 ## 4. Working tree + commit history (refresh when files change / after commit)
 
-**Status: all commits have LANDED and been PUSHED to `origin/main` (`76284e6`, 0 ahead /
-0 behind).** The working tree is clean except the intentionally-local, untracked `.claude/`
-(project command defs). Any further commit still needs explicit user approval; never `git add -A`.
+**Status: prior commits are PUSHED to `origin/main` (`4b66470`); batch-1 UI polish is COMMITTED
+locally as `affbb0a` (code + plan doc) but NOT pushed. This handoff/NEXT_TASKS refresh is the
+follow-on commit. `main` is ahead of `origin/main` by these two commits until pushed —
+`git push origin main` needs explicit approval.** Never `git add -A`.
 
-History (all pushed to `origin/main`):
+**Committed in `affbb0a` (Dashboard UI polish batch 1 — code + plan doc):**
+- `src/transitory_inflation/plots.py` — `apply_macro_theme()`, hot/cold palette, epsilon shading
+  on the CPI figure, zone tints + current markers on the TINF figure, new
+  `forward_change_range_figure()`; all 5 figures themed.
+- `app/streamlit_app.py` — glossary/`scope_caveats`/`regime_badge`/`signal_headline` helpers;
+  sidebar glossary + "Current reading" mini-status; tab 1 executive rebuild; tab 5 range plot +
+  cards + expanders.
+- `tests/test_plots.py` — trace-count assertions updated for shading/markers; tests for
+  `apply_macro_theme` and `forward_change_range_figure` (incl. empty-frame branch).
+- `docs/DASHBOARD_UI_POLISH_PLAN.md` (new) — plan with batch 1 marked done.
+
+**Committed in this follow-on refresh:** `ACTIVE_HANDOFF.md` + `NEXT_TASKS.md` (this status update).
+
+**To push when approved:** `git push origin main` (sends `affbb0a` + this refresh). The only
+always-untracked path is `.claude/` (project command defs, intentionally local).
+
+History (pushed to `origin/main` through `4b66470`; the last two are local-only until pushed):
 - `d2cb783` - Phase 5 code + the three then-modified docs (`NEXT_TASKS.md`,
   `docs/01_RESEARCH_SPEC.md`, `docs/09_PRODUCTION_ROADMAP.md`).
 - `e9462d0` - P2 code-health polish (cache, tab order, dedup, horizons, tests).
@@ -119,12 +163,14 @@ History (all pushed to `origin/main`):
 - `1c1d90c` - Streamlit width-parameter migration (`use_container_width` -> `width="stretch"`).
 - `dfa0ded` + `417eb4b` - handoff / NEXT_TASKS refresh after maintenance cleanup.
 - `cbfb2a0` - Trader Research feature (module + tab + 9 tests + doc sync).
-- `76284e6` - handoff refresh after Trader Research (**current HEAD**).
+- `76284e6` - handoff refresh after Trader Research.
+- `4b66470` - NEXT_TASKS + handoff reconcile to pushed maintenance state (**last pushed**).
+- `affbb0a` - Dashboard UI polish batch 1 (shared theme, glossary, tab 1 + tab 5) — **local-only**.
+- (this commit) - handoff + NEXT_TASKS refresh after batch 1 — **local-only**.
 
-Working tree (current): **clean.** Every file from the prior cycles - P2 code-health polish,
-the governance / research / audit docs, the Trader Research module/tab/tests, and the living
-docs - is committed and pushed. The only untracked path is `.claude/` (project command defs,
-intentionally kept local; add it only if you want to share the command defs in the repo).
+Working tree (current): **clean after this refresh commit**, apart from the always-untracked
+`.claude/` (project command defs). Local `main` carries the two unpushed commits above on top of
+`origin/main` (`4b66470`); everything earlier remains committed and pushed.
 
 ### Commit-readiness catches (do NOT miss)
 1. **`.env`** is gitignored - never commit it.
@@ -160,16 +206,22 @@ the command defs in the repo. A single combined commit is also fine if preferred
 
 ## 5. Next action (REWRITE this each loop iteration)
 
-**This loop reconciled the two living governance docs** (`NEXT_TASKS.md` + this file) to the
-actual shipped/pushed maintenance state: `NEXT_TASKS.md` no longer says Trader Research is
-"pending commit approval / not yet committed", and §1/§2/§4 above now show the correct HEAD
-(`76284e6`), pushed status, clean working tree, and `pytest 101 passed`. **Docs-only — no code,
-methodology, or output changed; not yet committed (needs approval).**
+**This loop implemented AND committed Dashboard UI-polish batch 1** ("Foundation + flagship"):
+shared Plotly theme, glossary, rebuilt Current Macro Signal, and the Trader Research range plot
+(full per-item detail in §1 and `docs/DASHBOARD_UI_POLISH_PLAN.md`). Presentation-only; gates
+green (ruff · pytest **104 passed** · compileall · offline AppTest smoke 0 exceptions). Landed as
+`affbb0a` plus this handoff refresh — **both local-only, NOT pushed** (push needs approval).
 
-The project is otherwise **idle in a maintenance state — no implementation work is pending.**
-Everything through the Trader Research feature (`cbfb2a0`) is committed and pushed to
-`origin/main`. Deliberately deferred / out of scope until a fresh, separately-scoped user
-decision (each needs its own scope decision before any work begins):
+**Immediate next step:** when ready, `git push origin main` to publish `affbb0a` + this refresh
+(verify with a localhost eyeball first per `docs/08_LOCALHOST_REVIEW.md` if not already done).
+Then start **batch 2 — table-heavy tabs** (Validation: hit-rate bars, threshold-sensitivity line,
+regime-transition heatmap; Market Linkage: grouped forward-change bars, correlation heatmap,
+expanders). Reuse the batch-1 template (`apply_macro_theme`, `section_notes`, `scope_caveats`,
+`render_glossary`, palette constants); add a return-type + trace-count + empty-frame test for
+every new figure (mirror `forward_change_range_figure`). Keep all methodology/numbers
+byte-identical and all caveat text (relocate into expanders, never drop).
+
+Deferred / out of scope until a fresh, separately-scoped user decision (unchanged by this loop):
 - a **predictive** linkage — out-of-sample scoring of market moves vs descriptive base rates;
 - any **asset-universe expansion** beyond the six approved FRED rate series.
 
