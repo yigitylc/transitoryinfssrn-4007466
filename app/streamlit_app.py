@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -16,12 +17,12 @@ from transitory_inflation import benchmarks as benchmark_mod
 from transitory_inflation import data as macro_data
 from transitory_inflation import market_data as market_data_mod
 from transitory_inflation import market_linkage as market_linkage_mod
+from transitory_inflation import plots as plots_mod
 from transitory_inflation import report as report_mod
 from transitory_inflation import robustness as robustness_mod
 from transitory_inflation import trader_research as trader_research_mod
 from transitory_inflation import validation as validation_mod
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
-from transitory_inflation.data import date_label, latest_valid_observation_date
 from transitory_inflation.diagnostics import ljung_box_table, stationarity_diagnostics
 from transitory_inflation.features import (
     BASELINE_META,
@@ -35,13 +36,55 @@ from transitory_inflation.models import (
     run_paper_style_regressions,
     summary_stats,
 )
-from transitory_inflation.plots import (
-    cpi_vs_baseline_figure,
-    decay_curve_figure,
-    rolling_rho_figure,
-    tinf_term_structure_figure,
-)
-from transitory_inflation.validation import pressure_label
+
+if (
+    not hasattr(macro_data, "load_macro_data_for_mode_with_status")
+    or not hasattr(macro_data, "latest_valid_observation_date")
+    or not hasattr(macro_data, "date_label")
+    or not hasattr(macro_data, "INFLATION_MEASURES")
+):
+    macro_data = importlib.reload(macro_data)
+if not hasattr(benchmark_mod, "benchmark_comparison_tables") or not hasattr(
+    benchmark_mod,
+    "BENCHMARK_VALIDATION_SIGNATURE_GUARD",
+):
+    benchmark_mod = importlib.reload(benchmark_mod)
+if not hasattr(market_data_mod, "load_market_data_for_mode_with_status") or not hasattr(
+    market_data_mod,
+    "MARKET_FRED_SERIES",
+):
+    market_data_mod = importlib.reload(market_data_mod)
+if not hasattr(market_linkage_mod, "build_market_linkage_tables") or not hasattr(
+    market_linkage_mod,
+    "channel_regime_summary",
+):
+    market_linkage_mod = importlib.reload(market_linkage_mod)
+if not hasattr(plots_mod, "forward_change_range_figure") or not hasattr(
+    plots_mod,
+    "cpi_vs_baseline_figure",
+):
+    plots_mod = importlib.reload(plots_mod)
+if not hasattr(report_mod, "build_macro_research_report") or not hasattr(
+    report_mod,
+    "MacroResearchReport",
+):
+    report_mod = importlib.reload(report_mod)
+if (
+    not hasattr(robustness_mod, "robustness_tables")
+    or not hasattr(robustness_mod, "inflation_measure_availability")
+    or not hasattr(robustness_mod, "ROBUSTNESS_BENCHMARK_SIGNATURE_GUARD")
+):
+    robustness_mod = importlib.reload(robustness_mod)
+if not hasattr(trader_research_mod, "build_trader_research_view") or not hasattr(
+    trader_research_mod,
+    "TraderResearchView",
+):
+    trader_research_mod = importlib.reload(trader_research_mod)
+if not hasattr(validation_mod, "pressure_label") or not hasattr(
+    validation_mod,
+    "forward_outcome_summary_by_regime_and_pressure",
+):
+    validation_mod = importlib.reload(validation_mod)
 
 st.set_page_config(page_title="Transitory Inflation Macro Research", layout="wide")
 st.title("Transitory Inflation Macro Research")
@@ -58,11 +101,104 @@ def section_notes(answers: str, interpretation: str) -> None:
     st.markdown(f"**↳** {interpretation}")
 
 
+# Plain-language concept definitions (descriptive only; consistent with
+# docs/01_RESEARCH_SPEC.md and the UI prose). Backs the reusable glossary.
+GLOSSARY_ITEMS: tuple[tuple[str, str], ...] = (
+    (
+        "Baseline",
+        "the mean-reversion anchor inflation is compared against (e.g. the prior 36-month "
+        "rolling mean). Shifted baselines use only data through the prior month (live-safe); "
+        "the full-sample baseline is flat and ex-post.",
+    ),
+    (
+        "epsilon (ε)",
+        "the raw deviation `inflation_yoy − baseline`, in percentage points. Positive = inflation "
+        "above baseline; negative = below.",
+    ),
+    (
+        "TINF 4M / 8M / 12M",
+        "the n-month rolling average of epsilon. 4M is recent transitory pressure; 8M/12M are "
+        "slower-moving. Units: percentage points.",
+    ),
+    (
+        "Regime",
+        "a label combining level (vs the sample's 25th/75th-percentile band) with direction (vs the "
+        "prior month): elevated rising, elevated falling, neutral, or disinflationary.",
+    ),
+    (
+        "Short-term pressure",
+        "summarizes the 4M vs 8M vs 12M TINF ordering: firming (4M highest), cooling (4M lowest), "
+        "or mixed.",
+    ),
+    (
+        "weak_evidence",
+        "a flag that a bucket has fewer than 30 complete observations; its rates are unstable and "
+        "should be read cautiously.",
+    ),
+    (
+        "live-safe vs ex-post",
+        "live-safe = no full-sample lookahead (signal usable in real time); ex-post = uses "
+        "information not available at the time (paper-style only). 'live-safe' means no full-sample "
+        "lookahead, not a real-time data-vintage backtest.",
+    ),
+)
+
+
+def render_glossary(*, expanded: bool = False) -> None:
+    """Reusable Concepts / glossary expander (sidebar and inline)."""
+
+    with st.expander("Concepts / glossary", expanded=expanded):
+        for term, definition in GLOSSARY_ITEMS:
+            st.markdown(f"**{term}** — {definition}")
+
+
+def scope_caveats(one_liner: str, caveats: tuple[str, ...]) -> None:
+    """Keep one visible caption; tuck the full caveat wall into an expander.
+
+    All guardrail text is preserved — only relocated, never dropped.
+    """
+
+    st.caption(one_liner)
+    with st.expander("Scope & caveats"):
+        for caveat in caveats:
+            st.markdown(f"- {caveat}")
+
+
+# Hot/cold regime badge (matches plots.py: red = above baseline / inflationary,
+# blue = below baseline / disinflationary, gray = neutral). A regime read, not a
+# good/bad verdict.
+_REGIME_BADGES = {
+    "elevated rising": "🔴 Elevated · rising",
+    "elevated falling": "🔴 Elevated · falling",
+    "neutral": "⚪ Neutral",
+    "disinflationary": "🔵 Disinflationary",
+}
+
+
+def regime_badge(regime: object) -> str:
+    """Emoji-coded regime label for the executive read (no HTML dependency)."""
+
+    return _REGIME_BADGES.get(str(regime), f"⚪ {regime}")
+
+
+def signal_headline(snapshot: dict[str, object]) -> str:
+    """One-line plain-English current read: epsilon vs baseline + pressure."""
+
+    epsilon = float(snapshot.get("epsilon", 0.0))
+    pressure = validation_mod.pressure_label(snapshot.get("term_structure", "mixed"))
+    if abs(epsilon) < 0.05:
+        gap = "at its mean-reversion baseline"
+    else:
+        side = "above" if epsilon > 0 else "below"
+        gap = f"{abs(epsilon):.2f}pp {side} baseline"
+    return f"Inflation is {gap} · short-term pressure {pressure}"
+
+
 def signal_conclusion(snapshot: dict[str, object]) -> tuple[str, ...]:
     """Concise current-signal interpretation for the report tab."""
 
     regime = str(snapshot.get("regime", "neutral"))
-    pressure = pressure_label(snapshot.get("term_structure", "mixed"))
+    pressure = validation_mod.pressure_label(snapshot.get("term_structure", "mixed"))
     tinf = float(snapshot.get("tinf_4m", 0.0))
     tinf_8m = float(snapshot.get("tinf_8m", 0.0))
     tinf_12m = float(snapshot.get("tinf_12m", 0.0))
@@ -181,6 +317,8 @@ with st.sidebar:
         options=list(BASELINE_META.keys()),
         index=list(BASELINE_META.keys()).index("rolling_36_shifted"),
     )
+    st.divider()
+    render_glossary()
 
 meta = BASELINE_META[baseline_method]
 mode_meta = SAMPLE_MODES[sample_mode]
@@ -279,7 +417,7 @@ load_result = get_data(sample_mode)
 raw = load_result.data
 
 raw_cache_end = pd.to_datetime(raw["date"].max()).date() if not raw.empty else "unknown"
-latest_cpi_yoy = latest_valid_observation_date(raw, "inflation_yoy")
+latest_cpi_yoy = macro_data.latest_valid_observation_date(raw, "inflation_yoy")
 if load_result.data_source_used == "fred_csv":
     st.warning(
         "Official FRED API was unavailable or not configured, so the dashboard is using "
@@ -288,7 +426,8 @@ if load_result.data_source_used == "fred_csv":
 elif load_result.data_source_used == "cached_fred":
     st.warning(
         f"Live FRED fetch failed, so the dashboard is using cached data from "
-        f"`{load_result.cache_file_used}` with CPI YoY through {date_label(latest_cpi_yoy)} "
+        f"`{load_result.cache_file_used}` with CPI YoY through "
+        f"{macro_data.date_label(latest_cpi_yoy)} "
         f"(raw cache rows through {raw_cache_end}). Refresh the cache when network access returns."
     )
 elif load_result.data_source_used == "demo":
@@ -303,7 +442,9 @@ if raw.empty:
     st.stop()
 
 span_start = pd.to_datetime(raw["date"].min()).date()
-span_end = date_label(latest_valid_observation_date(raw, "inflation_yoy"))
+span_end = macro_data.date_label(
+    macro_data.latest_valid_observation_date(raw, "inflation_yoy")
+)
 raw_span_end = pd.to_datetime(raw["date"].max()).date()
 span_text = f"{span_start} -> {span_end}"
 if str(raw_span_end) != span_end:
@@ -319,11 +460,23 @@ if meta.warning:
 df = add_transitory_inflation_features(raw, baseline_method=baseline_method)
 status_snapshot = latest_signal_snapshot(df)
 latest_signal_date = (
-    date_label(pd.to_datetime(status_snapshot["date"]))
+    macro_data.date_label(pd.to_datetime(status_snapshot["date"]))
     if status_snapshot.get("available")
     else "unavailable"
 )
-latest_cpi_observation = latest_valid_observation_date(raw, "cpi_level")
+
+with st.sidebar:
+    st.divider()
+    st.markdown("**Current reading**")
+    if status_snapshot.get("available"):
+        st.markdown(regime_badge(status_snapshot["regime"]))
+        st.caption(
+            f"{signal_headline(status_snapshot)}  ·  as of {latest_signal_date}. "
+            "See the Current Macro Signal tab for the full read."
+        )
+    else:
+        st.caption("No complete signal yet for this mode/baseline.")
+latest_cpi_observation = macro_data.latest_valid_observation_date(raw, "cpi_level")
 imputation_applied = bool(
     "cpi_imputed" in raw.columns and raw["cpi_imputed"].fillna(False).astype(bool).any()
 )
@@ -333,7 +486,7 @@ st.caption(
     f"live_fetch_status={load_result.live_fetch_status}; "
     f"cache_file_used={load_result.cache_file_used or 'n/a'}; "
     f"raw_data_end={raw_span_end}; "
-    f"latest_cpi_observation_date={date_label(latest_cpi_observation)}; "
+    f"latest_cpi_observation_date={macro_data.date_label(latest_cpi_observation)}; "
     f"latest_valid_cpi_yoy_date={span_end}; "
     f"latest_valid_signal_date={latest_signal_date}; "
     f"cpi_imputation_applied={imputation_applied}."
@@ -381,16 +534,27 @@ with tab_signal:
     if not snapshot.get("available"):
         st.warning(snapshot.get("reason", "No signal available."))
     else:
+        epsilon = float(snapshot["epsilon"])
+        percentile = float(snapshot["tinf_4m_percentile"])
+        st.markdown(f"### {signal_headline(snapshot)}")
+        st.markdown(
+            f"**Regime:** {regime_badge(snapshot['regime'])}  |  "
+            f"**Short-term pressure:** {validation_mod.pressure_label(snapshot['term_structure'])}  |  "
+            f"**As of:** {pd.to_datetime(snapshot['date']).date()}"
+        )
+
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("CPI YoY", f"{snapshot['inflation_yoy']:.2f}%")
+        # delta_color="off" keeps the arrows gray: these are regime reads (hot/cold),
+        # not good/bad outcomes, so the default green-up/red-down scheme is suppressed.
+        col1.metric(
+            "CPI YoY", f"{snapshot['inflation_yoy']:.2f}%",
+            delta=f"{epsilon:+.2f}pp vs baseline", delta_color="off",
+        )
         col2.metric("Baseline", f"{snapshot['baseline']:.2f}%")
         col3.metric("TINF 4M", f"{snapshot['tinf_4m']:.2f} pp")
-        col4.metric("TINF 4M Percentile", f"{snapshot['tinf_4m_percentile']:.1f}%")
-
-        st.write(
-            f"**Regime:** {snapshot['regime']} | "
-            f"**Short-term pressure:** {pressure_label(snapshot['term_structure'])} | "
-            f"**Date:** {pd.to_datetime(snapshot['date']).date()}"
+        col4.metric(
+            "TINF 4M Percentile", f"{percentile:.1f}%",
+            delta=f"{percentile - 50:+.0f} vs median", delta_color="off",
         )
 
         section_notes(
@@ -409,7 +573,7 @@ with tab_signal:
             "regimes and will shift both.",
         )
 
-    st.plotly_chart(cpi_vs_baseline_figure(df), width="stretch")
+    st.plotly_chart(plots_mod.cpi_vs_baseline_figure(df), width="stretch")
     section_notes(
         "How CPI YoY inflation has tracked the selected mean-reversion baseline over the whole loaded "
         "sample: when inflation crossed above or below it, how long those episodes lasted, and how "
@@ -422,7 +586,7 @@ with tab_signal:
         "while the full-sample baseline is flat and ex-post only.",
     )
 
-    st.plotly_chart(tinf_term_structure_figure(df), width="stretch")
+    st.plotly_chart(plots_mod.tinf_term_structure_figure(df), width="stretch")
     section_notes(
         "Whether the transitory component is building or fading across horizons: the same deviation "
         "series averaged over 4, 8, and 12 months, so recent pressure (4M) can be compared against "
@@ -604,7 +768,7 @@ with tab_market_linkage:
     market_result = get_market_data(sample_mode)
     latest_market_dates = market_result.latest_valid_date_by_variable or {}
     latest_market_dates_text = "; ".join(
-        f"{variable}={date_label(date)}"
+        f"{variable}={macro_data.date_label(date)}"
         for variable, date in latest_market_dates.items()
         if variable in market_result.available_market_variables
     )
@@ -795,16 +959,27 @@ with tab_market_linkage:
 
 with tab_trader_research:
     st.subheader("Trader Research (descriptive, rates-only)")
-    st.markdown(
-        "Given the macro state we are in **today**, what did the six approved FRED rate "
-        "instruments historically do over the next 3/6/12/24/36 months? This collapses the "
-        "Market Linkage history to the current live-safe regime bucket and shows the "
-        "forward-change distribution plus the analog months behind it."
+    section_notes(
+        "Given the macro state we are in today, what did the six approved FRED rate instruments "
+        "historically do over the next 3/6/12/24/36 months? This collapses the Market Linkage "
+        "history to the current live-safe regime bucket and shows the forward-change distribution "
+        "plus the analog months behind it.",
+        "Read the range plot per instrument: the marker is the median forward change and the "
+        "whisker is the p25-p75 spread, in basis points, with hot/cold by the sign of the median. "
+        "These are descriptive historical base rates conditioned on today's bucket, never a "
+        "forecast or trade.",
     )
-    st.warning(
-        "Descriptive historical base rates only. This is not a forecast, not a trading signal, "
-        "and not a model-generated trade recommendation. No sizing, timing, or instruments are "
-        "implied."
+    scope_caveats(
+        "Descriptive historical base rates only — not a forecast or a trade.",
+        (
+            "Descriptive historical base rates only. This is not a forecast, not a trading signal, "
+            "and not a model-generated trade recommendation. No sizing, timing, or instruments are "
+            "implied.",
+            "The bucket uses live-safe walk-forward labels (no full-sample lookahead); rate changes "
+            "are in basis points; small buckets (weak_evidence) and the baseline/sample choice "
+            "shift these readings; forward changes describe history only and never construct the "
+            "signal.",
+        ),
     )
 
     bucket = trader_research_mod.latest_walk_forward_bucket(df)
@@ -812,11 +987,17 @@ with tab_trader_research:
         st.info(bucket.reason or "No live-safe regime bucket is available yet.")
     else:
         st.markdown(
-            f"**Current bucket** (live-safe walk-forward, as of {date_label(bucket.as_of)}): "
-            f"regime **'{bucket.regime}'**, short-term pressure **'{bucket.pressure}'**. "
-            f"{bucket.regime_count} historical month(s) share this regime; "
-            f"{bucket.regime_pressure_count} also share the pressure."
+            "#### Current bucket "
+            f"(live-safe walk-forward, as of {macro_data.date_label(bucket.as_of)})"
         )
+        bcol1, bcol2, bcol3, bcol4 = st.columns(4)
+        bcol1.metric("Regime", regime_badge(bucket.regime))
+        bcol2.metric("Short-term pressure", str(bucket.pressure))
+        bcol3.metric(
+            "Regime analogs", f"{bucket.regime_count}",
+            delta=f"{bucket.regime_pressure_count} also share pressure", delta_color="off",
+        )
+        bcol4.metric("As of", macro_data.date_label(bucket.as_of))
         trader_snapshot = latest_signal_snapshot(df)
         if trader_snapshot.get("available"):
             st.caption(
@@ -918,9 +1099,9 @@ with tab_trader_research:
 
                 st.markdown(f"#### Forward rate-change distribution ({trader_horizon_label})")
                 st.caption(
-                    "Per approved FRED instrument: median and p25-p75 range of the forward change, "
-                    "the average, increase/decrease hit rates, and the sample count. A positive "
-                    "change means the instrument rose after the signal month."
+                    "Per approved FRED instrument: the median (marker) and p25-p75 range (whisker) "
+                    "of the forward change in basis points, colored hot/cold by the sign of the "
+                    "median. A positive change means the instrument rose after the signal month."
                 )
                 trader_dist_cols = [
                     column
@@ -940,7 +1121,12 @@ with tab_trader_research:
                 if view.distribution.empty:
                     st.info("No distribution rows for this bucket and horizon.")
                 else:
-                    st.dataframe(view.distribution.loc[:, trader_dist_cols], width="stretch")
+                    st.plotly_chart(
+                        plots_mod.forward_change_range_figure(view.distribution),
+                        width="stretch",
+                    )
+                    with st.expander("Distribution table"):
+                        st.dataframe(view.distribution.loc[:, trader_dist_cols], width="stretch")
 
                 st.markdown(f"#### Channel roll-up ({trader_horizon_label})")
                 st.caption(
@@ -972,23 +1158,15 @@ with tab_trader_research:
                 else:
                     st.dataframe(trader_channel.loc[:, trader_channel_cols], width="stretch")
 
-                st.markdown("#### Analog months (audit trail)")
-                st.caption(
-                    "The historical months in this bucket and their forward rate changes (bp) - "
-                    "the observations behind the distribution above."
-                )
-                if view.analog_months.empty:
-                    st.info("No analog months with forward market data for this bucket.")
-                else:
-                    st.dataframe(view.analog_months, width="stretch")
-
-                st.caption(
-                    "Caveats: descriptive and historical only; the bucket uses live-safe "
-                    "walk-forward labels (no full-sample lookahead); rate changes are in basis "
-                    "points; small buckets (weak_evidence) and the baseline/sample choice shift "
-                    "these readings; forward changes describe history only and never construct "
-                    "the signal."
-                )
+                with st.expander("Analog months (audit trail)"):
+                    st.caption(
+                        "The historical months in this bucket and their forward rate changes (bp) - "
+                        "the observations behind the distribution above."
+                    )
+                    if view.analog_months.empty:
+                        st.info("No analog months with forward market data for this bucket.")
+                    else:
+                        st.dataframe(view.analog_months, width="stretch")
 
 
 with tab_benchmarks:
@@ -1256,7 +1434,7 @@ with tab_decay:
         rho_df, decay_df = decay_summaries_for_windows(
             df, windows=tuple(windows), value_col="tinf_4m"
         )
-        st.plotly_chart(rolling_rho_figure(rho_df), width="stretch")
+        st.plotly_chart(plots_mod.rolling_rho_figure(rho_df), width="stretch")
         section_notes(
             "How persistent the transitory component has been through time: the AR(1) coefficient "
             "(rho) of TINF 4M, re-estimated in rolling windows ending at each date, one line per "
@@ -1289,7 +1467,7 @@ with tab_decay:
         if not valid_decay.empty:
             selected_row = valid_decay.iloc[0]
             curve = decay_curve(float(selected_row["rho_T"]), float(selected_row["mu"]), months=48)
-            st.plotly_chart(decay_curve_figure(curve), width="stretch")
+            st.plotly_chart(plots_mod.decay_curve_figure(curve), width="stretch")
             section_notes(
                 "The implied forward path of the current deviation, using rho_T and mu from the "
                 "first valid row of the table above: what percentage has decayed, and what "
@@ -1465,7 +1643,9 @@ with tab_robustness:
                     "tinf_4m": snap["tinf_4m"],
                     "percentile": snap["tinf_4m_percentile"],
                     "regime": snap["regime"],
-                    "short_term_pressure": pressure_label(snap["term_structure"]),
+                    "short_term_pressure": validation_mod.pressure_label(
+                        snap["term_structure"]
+                    ),
                 }
             )
     st.dataframe(pd.DataFrame(rows), width="stretch")
