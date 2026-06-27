@@ -1,6 +1,6 @@
 # ACTIVE HANDOFF - Audit-Fix Cycle
 
-**As of:** 2026-06-27 · **Owner loop:** Dashboard UI/UX polish - batch 3 (evidence tabs)
+**As of:** 2026-06-27 · **Owner loop:** Dashboard UI/UX polish - batch 3 shipped (`56b7037`); batch 4 (report + light touches) next
 
 > **This is a LIVING document.** When a task completes, **update the relevant section
 > in place** (flip status, rewrite "Next action"); do **not** append a running log.
@@ -17,7 +17,7 @@
 2. `reports/PHASE_0_5_AUDIT_FINDINGS.md` - the full audit (P0/P1/P2 findings, file:line evidence).
 3. `NEXT_TASKS.md` - current active gate (kept in sync with this file).
 4. `docs/09_PRODUCTION_ROADMAP.md` + `docs/10_AGENT_EXECUTION_PLAYBOOK.md` - phase gates & methodology rules.
-5. `docs/DASHBOARD_UI_POLISH_PLAN.md` - **active work**: the UI/UX polish plan (batches 1–2 committed + pushed through `1a0f5ab`; batch 3 done/uncommitted; batch 4 next).
+5. `docs/DASHBOARD_UI_POLISH_PLAN.md` - **active work**: the UI/UX polish plan (batches 1–3 committed + pushed through `56b7037`; batch 4 next).
 
 Project in one line: a Streamlit research tool operationalizing the Peron & Bonaparte
 "transitory inflation" paper (SSRN 4007466); three separate layers - paper replication
@@ -27,9 +27,9 @@ Project in one line: a Streamlit research tool operationalizing the Peron & Bona
 
 ## 1. Where we are right now (rewrite when state changes)
 
-**Active work: Dashboard UI/UX polish — batch 3 ("evidence tabs") is implemented in the working
-tree (UNCOMMITTED, needs review/commit approval). Batches 1–2 are COMMITTED and PUSHED to
-`origin/main` through `1a0f5ab`.** Presentation-only; **no methodology, numbers, series, or logic
+**Active work: Dashboard UI/UX polish — batch 3 ("evidence tabs") is COMMITTED as `56b7037` and
+PUSHED (`origin/main` = `56b7037`); batches 1–2 preceded it. Batch 4 ("report + light touches") is
+the next proposed step.** Presentation-only; **no methodology, numbers, series, or logic
 changed; every caveat's text preserved, only relocated into expanders.** What batch 3 added (per
 `docs/DASHBOARD_UI_POLISH_PLAN.md`), all reusing the batch-1/2 template:
 - **`plots.py`** — one new figure `improvement_diverging_figure` (horizontal diverging bars of the
@@ -51,9 +51,8 @@ changed; every caveat's text preserved, only relocated into expanders.** What ba
 Gates green (this loop): ruff clean · pytest **117 passed** (112 prior + 5 new plot tests) ·
 compileall OK · offline `AppTest` smoke renders all 9 tabs, **0 exceptions / 0 errors** (fully
 offline; the new Benchmark diverging chart, verdict badges, and Robustness win-rate chart sections
-were each asserted to render their non-empty path). **Next:** review + commit batch 3 (then push,
-when approved); then batch 4 (Report + light touches) — see §5. Read
-`docs/DASHBOARD_UI_POLISH_PLAN.md` first.
+were each asserted to render their non-empty path). **Next:** start batch 4 (Report + light
+touches) — see §5. Read `docs/DASHBOARD_UI_POLISH_PLAN.md` first.
 
 ---
 
@@ -137,17 +136,15 @@ What each P1 fix changed (so you don't need the chat):
 
 ## 4. Working tree + commit history (refresh when files change / after commit)
 
-**Status: batches 1–2 are COMMITTED and PUSHED to `origin/main` (HEAD = `1a0f5ab`). Batch-3 UI
-polish (evidence tabs) is implemented in the WORKING TREE and is UNCOMMITTED — review/commit
-approval pending. Both commit and push need explicit approval.** Never `git add -A`.
+**Status: batches 1–3 are COMMITTED and PUSHED to `origin/main` (HEAD = `56b7037`). The working
+tree is clean apart from the always-untracked `.claude/`. Batch 4 (report + light touches) is the
+next proposed step; its commit + push will need explicit approval.** Never `git add -A`.
 
-**Uncommitted now (batch 3 — to `git add` when approved):** `src/transitory_inflation/plots.py`,
-`app/streamlit_app.py`, `tests/test_plots.py`, plus this doc refresh
-`docs/DASHBOARD_UI_POLISH_PLAN.md`, `NEXT_TASKS.md`, `ACTIVE_HANDOFF.md`. The only always-untracked
-path remains `.claude/`. The offline AppTest smoke is run ad hoc (a temp script kept outside the
-repo, not committed).
+**Batch 3 landed in `56b7037`** (`src/transitory_inflation/plots.py`, `app/streamlit_app.py`,
+`tests/test_plots.py` + the three status docs), followed by this handoff/NEXT_TASKS/plan refresh.
+The offline AppTest smoke is run ad hoc (a temp script kept outside the repo, not committed).
 
-**What batch 3 touches (for the commit allowlist):**
+**What batch 3 changed (landed in `56b7037`):**
 - `src/transitory_inflation/plots.py` — new `improvement_diverging_figure`; `hit_rate_bar_figure`
   gained additive `yaxis_title` + `reference` kwargs (batch-2 callers unchanged).
 - `app/streamlit_app.py` — Benchmark verdict badges + diverging chart + expanders; Robustness
@@ -156,20 +153,23 @@ repo, not committed).
 - `tests/test_plots.py` — +5 tests (diverging return/empty/unknown-model; hit-rate reference+axis;
   hit-rate no-reference default).
 
-**Dashboard UI-polish commit arc (all PUSHED to `origin/main` through `1a0f5ab`):**
+**Dashboard UI-polish commit arc (all PUSHED to `origin/main` through `56b7037` + this refresh):**
 - `affbb0a` - batch 1 (shared theme, glossary, Current Macro Signal rebuild, Trader Research range
   plot) + plan doc.
 - `9771837` - handoff + NEXT_TASKS refresh after batch 1.
 - `1a0f5ab` - batch 2 (chart-ify Validation + Market Linkage: 4 new figures, tables behind
-  expanders) + the three doc refreshes. **Last pushed (HEAD == origin/main).**
+  expanders) + the three doc refreshes.
+- `56b7037` - batch 3 (chart-ify Benchmark + Robustness: diverging improvement chart + verdict
+  badges, win-rate bars, conditional formatting) + the three doc refreshes.
+- (this commit) - handoff / NEXT_TASKS / plan refresh after batch 3. **Last pushed.**
 
 Earlier history (all pushed; see `git log` for the full chain): `4b66470` maintenance reconcile ·
 `cbfb2a0` Trader Research feature · `e9462d0` P2 code-health · `b476ed7` governance/research docs ·
 `1c1d90c` Streamlit width migration.
 
-Working tree (current): **batch-3 changes are uncommitted** (the three code/test files + the three
-docs listed above), apart from the always-untracked `.claude/`. Local `main` == `origin/main` ==
-`1a0f5ab`; batch 3 is not yet a commit. Everything earlier remains committed and pushed.
+Working tree (current): **clean** apart from the always-untracked `.claude/`. Local `main` ==
+`origin/main` == this refresh on top of `56b7037`. Everything through batch 3 is committed and
+pushed.
 
 ### Commit-readiness catches (do NOT miss)
 1. **`.env`** is gitignored - never commit it.
@@ -216,11 +216,9 @@ changed and every caveat's text kept, only relocated.** One new figure
 (`improvement_diverging_figure`) plus additive `yaxis_title`/`reference` kwargs on
 `hit_rate_bar_figure` (reused for the win-rate bars), each with tests. Gates green (ruff · pytest
 **117 passed** · compileall · offline AppTest smoke 0 exceptions, fully-offline, new chart sections
-asserted rendered). **Batch 3 is UNCOMMITTED.**
+asserted rendered). **Batch 3 is COMMITTED as `56b7037` and PUSHED** (localhost eyeball done).
 
-**Immediate next step:** review batch 3 (localhost eyeball per `docs/08_LOCALHOST_REVIEW.md` if
-wanted). When approved, commit batch 3 (code + tests + the three doc refreshes) and push
-(`git push origin main` — needs approval). Then start **batch 4 — report + light touches** (Macro
+**Immediate next step:** start **batch 4 — report + light touches** (Macro
 Research Report headline/regime as metric cards + `st.divider()` between sections with supporting
 tables behind expanders; Decay metric cards from the first valid window; Paper Framework
 correlation-matrix heatmap with the table behind an expander). Reuse the established template

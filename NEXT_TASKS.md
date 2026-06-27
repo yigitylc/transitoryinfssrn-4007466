@@ -1,12 +1,12 @@
 # Next Tasks
 
-**Active gate: Dashboard UI/UX Polish — batches 1–2 committed + pushed (`origin/main` = `1a0f5ab`),
-batch 3 DONE (working tree, UNCOMMITTED — needs review/commit approval), batch 4 NEXT.** See
-`docs/DASHBOARD_UI_POLISH_PLAN.md` for the full plan and `ACTIVE_HANDOFF.md` §1/§4/§5 for status.
+**Active gate: Dashboard UI/UX Polish — batches 1–3 committed + pushed (`origin/main` = `56b7037`),
+batch 4 NEXT.** See `docs/DASHBOARD_UI_POLISH_PLAN.md` for the full plan and `ACTIVE_HANDOFF.md`
+§1/§4/§5 for status.
 
-Batch 3 ("evidence tabs") is implemented in the working tree (presentation-only; **no methodology,
+Batch 3 ("evidence tabs") is committed as `56b7037` and pushed (presentation-only; **no methodology,
 numbers, series, or logic changed**; every caveat's text preserved, only relocated into expanders).
-Touches `src/transitory_inflation/plots.py`, `app/streamlit_app.py`, `tests/test_plots.py`:
+Touched `src/transitory_inflation/plots.py`, `app/streamlit_app.py`, `tests/test_plots.py`:
 - **Benchmark tab:** two verdict badges (vs no-change / vs mean-reversion) + a diverging MAE/RMSE
   improvement chart (cold = TINF wins, hot = trails) as the headline; metric summary stays visible;
   improvement / classification / forecast-audit tables behind expanders; intro folded into
@@ -19,17 +19,17 @@ Touches `src/transitory_inflation/plots.py`, `app/streamlit_app.py`, `tests/test
   additive `yaxis_title` + `reference` kwargs and now also backs the win-rate bars (batch-2 callers
   unchanged). New `style_regime_cells()` Styler helper in the app. **+5 tests.**
 
-Batches 1–2 ("Foundation + flagship" and "table-heavy tabs") are committed and pushed to
-`origin/main` through `1a0f5ab`.
+Batches 1–2 ("Foundation + flagship" and "table-heavy tabs") preceded it; the whole UI-polish arc
+through batch 3 is pushed to `origin/main` (`56b7037`).
 
-Gates (batch 3): ruff clean · pytest **117 passed** (112 prior + 5 new plot tests) · compileall OK ·
-offline `AppTest` smoke renders all 9 tabs (fully-offline; new chart sections asserted rendered),
-0 exceptions.
+Gates (batch 3, at commit): ruff clean · pytest **117 passed** (112 prior + 5 new plot tests) ·
+compileall OK · offline `AppTest` smoke renders all 9 tabs (fully-offline; new chart sections
+asserted rendered), 0 exceptions.
 
-**Next:** review batch 3; when approved, commit it and push. Then batch 4 — report + light touches
-(Macro Research Report cards/dividers + tables behind expanders; Decay metric cards; Paper
-Framework correlation heatmap). Reuse the established template (incl. `heatmap_figure`); add a
-return-type + trace-count + empty-frame test per new figure.
+**Next:** start batch 4 — report + light touches (Macro Research Report cards/dividers + tables
+behind expanders; Decay metric cards; Paper Framework correlation heatmap). Reuse the established
+template (incl. `heatmap_figure`); add a return-type + trace-count + empty-frame test per new
+figure. Keep methodology/numbers byte-identical and all caveat text (relocate into expanders).
 
 ---
 

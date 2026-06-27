@@ -1,8 +1,7 @@
 # Dashboard UI/UX Polish Plan
 
-**Status:** **batches 1–2 committed + pushed** (`origin/main` = `1a0f5ab`) · **batch 3 implemented**
-(working tree, uncommitted — needs review/commit approval) · batch 4 still proposed · **As of:**
-2026-06-27 · **Scope:** presentation/visualization only · **Methodology:** unchanged (no new models,
+**Status:** **batches 1–3 committed + pushed** (`origin/main` = `56b7037`) · batch 4 still
+proposed · **As of:** 2026-06-27 · **Scope:** presentation/visualization only · **Methodology:** unchanged (no new models,
 market series, vendors, signals, PnL, or recommendations) · **Color semantic:** hot = above baseline
 / inflationary (red), cold = below baseline / disinflationary (blue), neutral = gray.
 
@@ -24,7 +23,7 @@ market series, vendors, signals, PnL, or recommendations) · **Color semantic:**
 > `heatmap_figure`, `forward_change_by_regime_channel_figure`), each with return-type + trace-count
 > + empty-frame tests.
 >
-> **Batch 3 — DONE (uncommitted).** Evidence tabs charted: Benchmark gained two verdict badges (vs
+> **Batch 3 — DONE (committed `56b7037`, pushed).** Evidence tabs charted: Benchmark gained two verdict badges (vs
 > no-change / vs mean-reversion) + a diverging MAE/RMSE improvement chart (cold = TINF wins, hot =
 > trails), with improvement / classification / forecast-audit tables behind expanders; Robustness
 > gained win-rate bars by setting (MAE | RMSE, each with a 0.5 reference line), with data-status /
@@ -195,7 +194,7 @@ descriptive only and consistent with `docs/01_RESEARCH_SPEC.md` / `docs/METHODOL
 - **Don't reorder or rename tabs** (beyond cosmetic heading polish); tab order encodes the
   Phase 2→4 roadmap narrative.
 
-## Recommended first implementation batch (smallest useful — "Foundation + flagship") — DONE (uncommitted)
+## Recommended first implementation batch (smallest useful — "Foundation + flagship") — DONE (committed `affbb0a`, pushed)
 
 1. **DONE — `apply_macro_theme()`** in `plots.py` (shared template: font, light gridlines,
    `hovermode="x unified"`, tight margins, top legend, hot/cold palette); all 5 figures routed
@@ -251,7 +250,7 @@ constants rather than new ad-hoc styling.
   line, transition heatmap) and Market Linkage (grouped bars, correlation heatmap, expanders). Each
   new figure has a return-type + trace-count + empty-frame test in `tests/test_plots.py`, mirroring
   `forward_change_range_figure`.
-- **Batch 3 — evidence tabs (DONE, uncommitted):** Benchmark (diverging improvement bars + badges)
+- **Batch 3 — evidence tabs (DONE, committed `56b7037`):** Benchmark (diverging improvement bars + badges)
   and Robustness (win-rate bars, conditional formatting, expanders). New `improvement_diverging_figure`;
   `hit_rate_bar_figure` extended with `yaxis_title`/`reference` and reused for the win-rate bars;
   new `style_regime_cells()` helper. Each new/changed figure has a test.
