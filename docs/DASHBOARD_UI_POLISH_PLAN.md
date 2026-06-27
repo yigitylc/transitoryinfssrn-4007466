@@ -1,13 +1,13 @@
 # Dashboard UI/UX Polish Plan
 
-**Status:** **batches 1–3 committed + pushed** (`origin/main` = `56b7037`) · batch 4 still
-proposed · **As of:** 2026-06-27 · **Scope:** presentation/visualization only · **Methodology:** unchanged (no new models,
+**Status:** **batches 1–4 committed + pushed** (`origin/main` = the docs-refresh on top of batch-4
+feat `0d9ddb3`) · UI-polish arc complete · **As of:** 2026-06-27 · **Scope:** presentation/visualization only · **Methodology:** unchanged (no new models,
 market series, vendors, signals, PnL, or recommendations) · **Color semantic:** hot = above baseline
 / inflationary (red), cold = below baseline / disinflationary (blue), neutral = gray.
 
 > This is a design plan with batches 1–3 now built. It does **not** change any computed value,
 > model, series, or research conclusion. Every change is a different *presentation* of outputs the
-> app already produces. Remaining batches land in later, separately-approved steps.
+> app already produces. All four batches have now landed.
 
 > **Batch 1 — DONE (committed `affbb0a`, pushed).** Shared Plotly theme + glossary, rebuilt Current
 > Macro Signal, and the Trader Research range plot. Files: `plots.py`, `app/streamlit_app.py`,
@@ -35,6 +35,15 @@ market series, vendors, signals, PnL, or recommendations) · **Color semantic:**
 > OK · offline `AppTest` smoke renders all 9 tabs, 0 exceptions (new chart sections asserted
 > rendered). Files touched: `src/transitory_inflation/plots.py`, `app/streamlit_app.py`,
 > `tests/test_plots.py`.
+>
+> **Batch 4 — DONE (committed `0d9ddb3`, pushed).** Report + light touches: Macro Research Report
+> headline + current regime as the tab-1 snapshot metric cards, `st.divider()` between the 7
+> sections, every supporting DataFrame behind an expander (narrative bullets stay visible); Decay
+> convergence metric cards (decayed 6m/12m, t*) from the first valid window; Paper Framework
+> correlation matrix as a `heatmap_figure` with the table behind an expander (OLS/Ljung-Box left as
+> tables). **No new `plots.py` figure** (reused `heatmap_figure`) → `tests/test_plots.py` unchanged;
+> the gate is the existing 117-test suite + the offline AppTest smoke (0 exceptions across all 9
+> tabs, both the live-safe and ex-post baselines). Files touched: `app/streamlit_app.py`.
 
 ## Locked design decisions
 
@@ -254,5 +263,6 @@ constants rather than new ad-hoc styling.
   and Robustness (win-rate bars, conditional formatting, expanders). New `improvement_diverging_figure`;
   `hit_rate_bar_figure` extended with `yaxis_title`/`reference` and reused for the win-rate bars;
   new `style_regime_cells()` helper. Each new/changed figure has a test.
-- **Batch 4 — report + light touches (NEXT):** Macro Research Report cards/dividers, Decay cards,
-  Paper Framework correlation heatmap (reuse `heatmap_figure`).
+- **Batch 4 — report + light touches (DONE, committed `0d9ddb3`):** Macro Research Report
+  cards/dividers + expanders, Decay convergence cards, Paper Framework correlation heatmap (reused
+  `heatmap_figure`). App-only — no new figure, so `tests/test_plots.py` is unchanged.

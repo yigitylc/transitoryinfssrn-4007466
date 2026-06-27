@@ -1,35 +1,31 @@
 # Next Tasks
 
-**Active gate: Dashboard UI/UX Polish — batches 1–3 committed + pushed (`origin/main` = `56b7037`),
-batch 4 NEXT.** See `docs/DASHBOARD_UI_POLISH_PLAN.md` for the full plan and `ACTIVE_HANDOFF.md`
+**Active gate: NONE — the Dashboard UI/UX Polish arc (batches 1–4) is COMPLETE, committed + pushed
+(`origin/main` = the docs-refresh on top of batch-4 feat `0d9ddb3`).** Project returns to
+maintenance. See `docs/DASHBOARD_UI_POLISH_PLAN.md` for the full plan and `ACTIVE_HANDOFF.md`
 §1/§4/§5 for status.
 
-Batch 3 ("evidence tabs") is committed as `56b7037` and pushed (presentation-only; **no methodology,
-numbers, series, or logic changed**; every caveat's text preserved, only relocated into expanders).
-Touched `src/transitory_inflation/plots.py`, `app/streamlit_app.py`, `tests/test_plots.py`:
-- **Benchmark tab:** two verdict badges (vs no-change / vs mean-reversion) + a diverging MAE/RMSE
-  improvement chart (cold = TINF wins, hot = trails) as the headline; metric summary stays visible;
-  improvement / classification / forecast-audit tables behind expanders; intro folded into
-  `section_notes` + `scope_caveats()`.
-- **Robustness tab:** win-rate bars by setting (MAE | RMSE side by side, each with a 0.5 reference
-  line); data-status / availability / scorecard / verdict / win-rate table behind expanders;
-  hot/cold regime conditional formatting on the baseline quick-comparison table; intro folded into
-  `section_notes` + `scope_caveats()`.
-- **`plots.py`:** one new figure `improvement_diverging_figure`; `hit_rate_bar_figure` gained
-  additive `yaxis_title` + `reference` kwargs and now also backs the win-rate bars (batch-2 callers
-  unchanged). New `style_regime_cells()` Styler helper in the app. **+5 tests.**
+Batch 4 ("report + light touches") is committed as `0d9ddb3` and pushed (presentation-only; **no
+methodology, numbers, series, or logic changed**; every caveat's text preserved, only relocated
+into expanders). App-only (`app/streamlit_app.py`); **no `plots.py` or `tests/test_plots.py`
+change** — it reuses already-tested figures:
+- **Macro Research Report tab:** headline + current regime as the tab-1 snapshot metric cards (via
+  `latest_signal_snapshot`); `st.divider()` between the 7 sections; all supporting DataFrames behind
+  expanders (narrative bullets + empty-state `st.info` stay visible).
+- **Decay / Convergence tab:** 3 convergence metric cards (decayed 6m/12m, time-to-95% t*) from the
+  first valid window, before the charts; `valid_decay` reused for the decay-curve block.
+- **Paper Framework tab:** correlation matrix as a `plots_mod.heatmap_figure` (RdBu / zmid=0), table
+  behind an expander; OLS / Ljung-Box left as tables.
 
-Batches 1–2 ("Foundation + flagship" and "table-heavy tabs") preceded it; the whole UI-polish arc
-through batch 3 is pushed to `origin/main` (`56b7037`).
+Batches 1–3 (foundation + flagship, table-heavy tabs, evidence tabs) preceded it; the whole
+UI-polish arc through batch 4 is pushed to `origin/main`.
 
-Gates (batch 3, at commit): ruff clean · pytest **117 passed** (112 prior + 5 new plot tests) ·
-compileall OK · offline `AppTest` smoke renders all 9 tabs (fully-offline; new chart sections
-asserted rendered), 0 exceptions.
+Gates (batch 4, at commit): ruff clean · pytest **117 passed** (unchanged — no new/removed tests) ·
+compileall OK · offline `AppTest` smoke renders all 9 tabs for both the live-safe and ex-post
+baselines (the Framework heatmap + Report/Decay cards asserted), 0 exceptions.
 
-**Next:** start batch 4 — report + light touches (Macro Research Report cards/dividers + tables
-behind expanders; Decay metric cards; Paper Framework correlation heatmap). Reuse the established
-template (incl. `heatmap_figure`); add a return-type + trace-count + empty-frame test per new
-figure. Keep methodology/numbers byte-identical and all caveat text (relocate into expanders).
+**Next:** none queued — the UI/UX polish arc is finished. Further visual work or either deferred
+item (predictive linkage; asset-universe expansion) needs a fresh, separately-scoped user decision.
 
 ---
 

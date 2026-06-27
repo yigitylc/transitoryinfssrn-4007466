@@ -1,6 +1,6 @@
 # ACTIVE HANDOFF - Audit-Fix Cycle
 
-**As of:** 2026-06-27 · **Owner loop:** Dashboard UI/UX polish - batch 3 shipped (`56b7037`); batch 4 (report + light touches) next
+**As of:** 2026-06-27 · **Owner loop:** Dashboard UI/UX polish - batch 4 shipped (`0d9ddb3`); UI-polish arc complete
 
 > **This is a LIVING document.** When a task completes, **update the relevant section
 > in place** (flip status, rewrite "Next action"); do **not** append a running log.
@@ -17,7 +17,7 @@
 2. `reports/PHASE_0_5_AUDIT_FINDINGS.md` - the full audit (P0/P1/P2 findings, file:line evidence).
 3. `NEXT_TASKS.md` - current active gate (kept in sync with this file).
 4. `docs/09_PRODUCTION_ROADMAP.md` + `docs/10_AGENT_EXECUTION_PLAYBOOK.md` - phase gates & methodology rules.
-5. `docs/DASHBOARD_UI_POLISH_PLAN.md` - **active work**: the UI/UX polish plan (batches 1–3 committed + pushed through `56b7037`; batch 4 next).
+5. `docs/DASHBOARD_UI_POLISH_PLAN.md` - the UI/UX polish plan (batches 1–4 committed + pushed through `0d9ddb3`; arc complete).
 
 Project in one line: a Streamlit research tool operationalizing the Peron & Bonaparte
 "transitory inflation" paper (SSRN 4007466); three separate layers - paper replication
@@ -27,32 +27,30 @@ Project in one line: a Streamlit research tool operationalizing the Peron & Bona
 
 ## 1. Where we are right now (rewrite when state changes)
 
-**Active work: Dashboard UI/UX polish — batch 3 ("evidence tabs") is COMMITTED as `56b7037` and
-PUSHED (`origin/main` = `56b7037`); batches 1–2 preceded it. Batch 4 ("report + light touches") is
-the next proposed step.** Presentation-only; **no methodology, numbers, series, or logic
-changed; every caveat's text preserved, only relocated into expanders.** What batch 3 added (per
-`docs/DASHBOARD_UI_POLISH_PLAN.md`), all reusing the batch-1/2 template:
-- **`plots.py`** — one new figure `improvement_diverging_figure` (horizontal diverging bars of the
-  TINF model's MAE/RMSE improvement % vs each naive baseline; cold = TINF wins / lower error, hot =
-  trails; dotted zero line). `hit_rate_bar_figure` gained two **additive** kwargs — `yaxis_title`
-  and an optional `reference` guide line — so it also backs the robustness win-rate bars (batch-2
-  callers unchanged; defaults preserve old behavior). Each change covered in `tests/test_plots.py`
-  (return-type + trace-count + empty-frame + the new reference/axis params): **+5 tests**.
-- **Tab 3 (Benchmark)** — two verdict **badges** (vs no-change / vs mean-reversion, metric cards),
-  the diverging improvement chart as the headline; the metric summary stays visible; the
-  improvement / classification / 50-row forecast-audit tables moved behind expanders; intro folded
-  into `section_notes` + `scope_caveats()`.
-- **Tab 8 (Robustness)** — **win-rate bars by setting** (MAE | RMSE side by side, each with a 0.5
-  coin-flip reference line) reusing `hit_rate_bar_figure`; data-status / availability / scorecard /
-  verdict / win-rate table moved behind expanders; the baseline quick-comparison table given
-  hot/cold **regime conditional formatting** via a new `style_regime_cells()` Styler helper; intro
-  folded into `section_notes` + `scope_caveats()`. Stationarity diagnostics left as a table.
+**Active work: Dashboard UI/UX polish — batch 4 ("report + light touches") is COMMITTED as
+`0d9ddb3` and PUSHED (`origin/main` = the docs-refresh on top of `0d9ddb3`); batches 1–3 preceded
+it, so the UI-polish arc is now COMPLETE.** Presentation-only; **no methodology, numbers, series,
+or logic changed; every caveat's text preserved, only relocated into expanders.** What batch 4
+added (per `docs/DASHBOARD_UI_POLISH_PLAN.md`), all reusing the batch-1/2/3 template and adding
+**no new `plots.py` figure** (so `tests/test_plots.py` is unchanged):
+- **Tab 9 (Macro Research Report)** — headline kept visible, current regime rendered as the tab-1
+  snapshot **metric cards** (regime badge + CPI YoY/ε, Baseline, TINF 4M, TINF 4M percentile, all
+  `delta_color="off"`) via `latest_signal_snapshot` (same values the report builder uses); a
+  `st.divider()` between all 7 sections; every supporting DataFrame moved behind expanders;
+  narrative bullets + empty-state `st.info` stay visible.
+- **Tab 7 (Decay / Convergence)** — convergence headline as 3 **metric cards** (decayed in 6m /
+  12m, time-to-95% t* with years as the delta) from the first valid window, before the charts;
+  the `valid_decay` frame is reused for the decay-curve block (dropped a duplicate recompute).
+  Both figures were already themed — untouched.
+- **Tab 6 (Paper Framework)** — correlation matrix rendered via `plots_mod.heatmap_figure` (same
+  RdBu / zmid=0 convention as the market-linkage grid), numeric table behind an expander;
+  OLS / Ljung-Box left as tables.
 
-Gates green (this loop): ruff clean · pytest **117 passed** (112 prior + 5 new plot tests) ·
-compileall OK · offline `AppTest` smoke renders all 9 tabs, **0 exceptions / 0 errors** (fully
-offline; the new Benchmark diverging chart, verdict badges, and Robustness win-rate chart sections
-were each asserted to render their non-empty path). **Next:** start batch 4 (Report + light
-touches) — see §5. Read `docs/DASHBOARD_UI_POLISH_PLAN.md` first.
+Gates green (this loop): ruff clean · pytest **117 passed** (unchanged — no new/removed tests) ·
+compileall OK · offline `AppTest` smoke renders all 9 tabs, **0 exceptions** for both the
+`rolling_36_shifted` (live-safe) and `full_sample` (ex-post) baselines (the Framework heatmap and
+the Report/Decay cards were each asserted to render; the heatmap trace type checked directly).
+**Next:** the UI-polish arc is complete; project returns to maintenance — see §5.
 
 ---
 
@@ -136,24 +134,25 @@ What each P1 fix changed (so you don't need the chat):
 
 ## 4. Working tree + commit history (refresh when files change / after commit)
 
-**Status: batches 1–3 are COMMITTED and PUSHED to `origin/main` (HEAD = `56b7037`). The working
-tree is clean apart from the always-untracked `.claude/`. Batch 4 (report + light touches) is the
-next proposed step; its commit + push will need explicit approval.** Never `git add -A`.
+**Status: batches 1–4 are COMMITTED and PUSHED to `origin/main` (batch 4 feat = `0d9ddb3`, plus
+this docs-refresh on top). The working tree is clean apart from the always-untracked `.claude/`.
+The UI-polish arc is complete; project returns to maintenance.** Never `git add -A`.
 
-**Batch 3 landed in `56b7037`** (`src/transitory_inflation/plots.py`, `app/streamlit_app.py`,
-`tests/test_plots.py` + the three status docs), followed by this handoff/NEXT_TASKS/plan refresh.
-The offline AppTest smoke is run ad hoc (a temp script kept outside the repo, not committed).
+**Batch 4 landed in `0d9ddb3`** (`app/streamlit_app.py` only — no `plots.py`/test change),
+followed by this handoff/NEXT_TASKS/plan refresh. The offline AppTest smoke is run ad hoc (a temp
+script kept outside the repo, not committed).
 
-**What batch 3 changed (landed in `56b7037`):**
-- `src/transitory_inflation/plots.py` — new `improvement_diverging_figure`; `hit_rate_bar_figure`
-  gained additive `yaxis_title` + `reference` kwargs (batch-2 callers unchanged).
-- `app/streamlit_app.py` — Benchmark verdict badges + diverging chart + expanders; Robustness
-  win-rate bars + expanders; new `style_regime_cells()` helper + `WIN_RATE_SPECS_*` constants;
-  `improvement_diverging_figure` added to the plot-reload guard.
-- `tests/test_plots.py` — +5 tests (diverging return/empty/unknown-model; hit-rate reference+axis;
-  hit-rate no-reference default).
+**What batch 4 changed (landed in `0d9ddb3`):**
+- `app/streamlit_app.py` — Report tab: snapshot metric cards (via `latest_signal_snapshot`) +
+  `st.divider()` between the 7 sections + all supporting DataFrames behind expanders. Decay tab:
+  3 convergence metric cards from the first valid window (`valid_decay` reused for the curve
+  block). Framework tab: correlation matrix via `plots_mod.heatmap_figure` + table behind an
+  expander.
+- No `src/transitory_inflation/plots.py` change and no `tests/test_plots.py` change — batch 4
+  reuses already-tested figures (`heatmap_figure`); the gate is the existing 117-test suite plus
+  the offline AppTest smoke.
 
-**Dashboard UI-polish commit arc (all PUSHED to `origin/main` through `56b7037` + this refresh):**
+**Dashboard UI-polish commit arc (all PUSHED to `origin/main` through `0d9ddb3` + this refresh):**
 - `affbb0a` - batch 1 (shared theme, glossary, Current Macro Signal rebuild, Trader Research range
   plot) + plan doc.
 - `9771837` - handoff + NEXT_TASKS refresh after batch 1.
@@ -161,14 +160,17 @@ The offline AppTest smoke is run ad hoc (a temp script kept outside the repo, no
   expanders) + the three doc refreshes.
 - `56b7037` - batch 3 (chart-ify Benchmark + Robustness: diverging improvement chart + verdict
   badges, win-rate bars, conditional formatting) + the three doc refreshes.
-- (this commit) - handoff / NEXT_TASKS / plan refresh after batch 3. **Last pushed.**
+- `cc7f216` - handoff / NEXT_TASKS / plan refresh after batch 3.
+- `0d9ddb3` - batch 4 (Report cards/dividers + expanders, Decay convergence cards, Framework
+  correlation heatmap); app-only, no new figure/test.
+- (this commit) - handoff / NEXT_TASKS / plan refresh after batch 4. **Last pushed.**
 
 Earlier history (all pushed; see `git log` for the full chain): `4b66470` maintenance reconcile ·
 `cbfb2a0` Trader Research feature · `e9462d0` P2 code-health · `b476ed7` governance/research docs ·
 `1c1d90c` Streamlit width migration.
 
 Working tree (current): **clean** apart from the always-untracked `.claude/`. Local `main` ==
-`origin/main` == this refresh on top of `56b7037`. Everything through batch 3 is committed and
+`origin/main` == this refresh on top of `0d9ddb3`. Everything through batch 4 is committed and
 pushed.
 
 ### Commit-readiness catches (do NOT miss)
@@ -205,26 +207,21 @@ the command defs in the repo. A single combined commit is also fine if preferred
 
 ## 5. Next action (REWRITE this each loop iteration)
 
-**This loop implemented Dashboard UI-polish batch 3** ("evidence tabs"): Benchmark verdict badges
-(vs no-change / vs mean-reversion) + a diverging MAE/RMSE improvement chart (cold = TINF wins, hot
-= trails) with the improvement / classification / forecast-audit tables behind expanders;
-Robustness win-rate bars by setting (MAE | RMSE, each with a 0.5 reference line) with
-scorecard / verdict / status behind expanders and hot/cold regime conditional formatting on the
-baseline quick-comparison table (full per-item detail in §1 and
-`docs/DASHBOARD_UI_POLISH_PLAN.md`). Presentation-only — **no methodology/numbers/series/logic
-changed and every caveat's text kept, only relocated.** One new figure
-(`improvement_diverging_figure`) plus additive `yaxis_title`/`reference` kwargs on
-`hit_rate_bar_figure` (reused for the win-rate bars), each with tests. Gates green (ruff · pytest
-**117 passed** · compileall · offline AppTest smoke 0 exceptions, fully-offline, new chart sections
-asserted rendered). **Batch 3 is COMMITTED as `56b7037` and PUSHED** (localhost eyeball done).
+**This loop implemented Dashboard UI-polish batch 4** ("report + light touches"): Macro Research
+Report headline + current regime as snapshot metric cards, `st.divider()` between the 7 sections,
+all supporting DataFrames behind expanders (narrative bullets stay visible); Decay convergence
+metric cards (decayed 6m/12m, t*) from the first valid window; Paper Framework correlation matrix
+as a `heatmap_figure` with the table behind an expander (OLS/Ljung-Box left as tables, full
+per-item detail in §1 and `docs/DASHBOARD_UI_POLISH_PLAN.md`). Presentation-only — **no
+methodology/numbers/series/logic changed and every caveat's text kept, only relocated.** No new
+`plots.py` figure (reused `heatmap_figure`), so `tests/test_plots.py` is unchanged. Gates green
+(ruff · pytest **117 passed** · compileall · offline AppTest smoke 0 exceptions across all 9 tabs
+for both live-safe and ex-post baselines, with the new heatmap + cards asserted). **Batch 4 is
+COMMITTED as `0d9ddb3` and PUSHED; the UI-polish arc is complete.**
 
-**Immediate next step:** start **batch 4 — report + light touches** (Macro
-Research Report headline/regime as metric cards + `st.divider()` between sections with supporting
-tables behind expanders; Decay metric cards from the first valid window; Paper Framework
-correlation-matrix heatmap with the table behind an expander). Reuse the established template
-(`apply_macro_theme`, `section_notes`, `scope_caveats`, `render_glossary`, `heatmap_figure`,
-palette constants); add a return-type + trace-count + empty-frame test for every new figure. Keep
-all methodology/numbers byte-identical and all caveat text (relocate into expanders, never drop).
+**Immediate next step:** none queued — the dashboard UI/UX polish arc (batches 1–4) is finished
+and the project returns to maintenance. Any further visual work, or either deferred item below,
+needs a fresh, separately-scoped user decision.
 
 Deferred / out of scope until a fresh, separately-scoped user decision (unchanged by this loop):
 - a **predictive** linkage — out-of-sample scoring of market moves vs descriptive base rates;
