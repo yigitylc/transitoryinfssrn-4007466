@@ -1,35 +1,35 @@
 # Next Tasks
 
-**Active gate: Dashboard UI/UX Polish — batch 1 committed (`affbb0a`, NOT pushed), batch 2 DONE
-(working tree, UNCOMMITTED — needs review/commit approval), batch 3 NEXT.** See
+**Active gate: Dashboard UI/UX Polish — batches 1–2 committed + pushed (`origin/main` = `1a0f5ab`),
+batch 3 DONE (working tree, UNCOMMITTED — needs review/commit approval), batch 4 NEXT.** See
 `docs/DASHBOARD_UI_POLISH_PLAN.md` for the full plan and `ACTIVE_HANDOFF.md` §1/§4/§5 for status.
 
-Batch 2 ("table-heavy tabs") is implemented in the working tree (presentation-only; **no
-methodology, numbers, series, or logic changed**; every caveat's text preserved, only relocated
-into expanders). Touches `src/transitory_inflation/plots.py`, `app/streamlit_app.py`,
-`tests/test_plots.py`:
-- **Validation tab:** hit-rate bars by regime + by short-term pressure, a threshold-sensitivity
-  line chart, and a regime-transition heatmap; worked-example tables, rate tables, and the
-  sensitivity/transition tables moved behind expanders; intro folded into `section_notes` + a
-  "How to read this tab" expander + `scope_caveats()`.
-- **Market Linkage tab:** grouped forward-change bars (bp) by regime per channel and a
-  signal-vs-market correlation heatmap; availability / rankings / per-channel detail / forward
-  summary tables behind expanders; the stacked disclaimers folded into one "Scope & caveats".
-- **Four new figures in `plots.py`** (`hit_rate_bar_figure`, `threshold_sensitivity_figure`,
-  `heatmap_figure`, `forward_change_by_regime_channel_figure`), each with a return-type +
-  trace-count + empty-frame test (mirroring `forward_change_range_figure`).
+Batch 3 ("evidence tabs") is implemented in the working tree (presentation-only; **no methodology,
+numbers, series, or logic changed**; every caveat's text preserved, only relocated into expanders).
+Touches `src/transitory_inflation/plots.py`, `app/streamlit_app.py`, `tests/test_plots.py`:
+- **Benchmark tab:** two verdict badges (vs no-change / vs mean-reversion) + a diverging MAE/RMSE
+  improvement chart (cold = TINF wins, hot = trails) as the headline; metric summary stays visible;
+  improvement / classification / forecast-audit tables behind expanders; intro folded into
+  `section_notes` + `scope_caveats()`.
+- **Robustness tab:** win-rate bars by setting (MAE | RMSE side by side, each with a 0.5 reference
+  line); data-status / availability / scorecard / verdict / win-rate table behind expanders;
+  hot/cold regime conditional formatting on the baseline quick-comparison table; intro folded into
+  `section_notes` + `scope_caveats()`.
+- **`plots.py`:** one new figure `improvement_diverging_figure`; `hit_rate_bar_figure` gained
+  additive `yaxis_title` + `reference` kwargs and now also backs the win-rate bars (batch-2 callers
+  unchanged). New `style_regime_cells()` Styler helper in the app. **+5 tests.**
 
-Batch 1 ("Foundation + flagship") is committed as `affbb0a` (shared theme, glossary, rebuilt
-Current Macro Signal, Trader Research range plot); local `main` is ahead of `origin/main` until
-pushed (`git push origin main` needs approval).
+Batches 1–2 ("Foundation + flagship" and "table-heavy tabs") are committed and pushed to
+`origin/main` through `1a0f5ab`.
 
-Gates (batch 2): ruff clean · pytest **112 passed** (104 prior + 8 new plot tests) · compileall OK ·
-offline `AppTest` smoke renders all 9 tabs (market seeded + fully-offline), 0 exceptions.
+Gates (batch 3): ruff clean · pytest **117 passed** (112 prior + 5 new plot tests) · compileall OK ·
+offline `AppTest` smoke renders all 9 tabs (fully-offline; new chart sections asserted rendered),
+0 exceptions.
 
-**Next:** review batch 2; when approved, commit it (and push `affbb0a` + batch 2 together). Then
-batch 3 — evidence tabs (Benchmark diverging improvement bars + badges; Robustness win-rate bars,
-conditional formatting, expanders). Reuse the batch-1 template; add a return-type + trace-count +
-empty-frame test per new figure.
+**Next:** review batch 3; when approved, commit it and push. Then batch 4 — report + light touches
+(Macro Research Report cards/dividers + tables behind expanders; Decay metric cards; Paper
+Framework correlation heatmap). Reuse the established template (incl. `heatmap_figure`); add a
+return-type + trace-count + empty-frame test per new figure.
 
 ---
 

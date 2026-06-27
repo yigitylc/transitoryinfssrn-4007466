@@ -1,6 +1,6 @@
 # ACTIVE HANDOFF - Audit-Fix Cycle
 
-**As of:** 2026-06-26 · **Owner loop:** Dashboard UI/UX polish - batch 2 (table-heavy tabs)
+**As of:** 2026-06-27 · **Owner loop:** Dashboard UI/UX polish - batch 3 (evidence tabs)
 
 > **This is a LIVING document.** When a task completes, **update the relevant section
 > in place** (flip status, rewrite "Next action"); do **not** append a running log.
@@ -17,7 +17,7 @@
 2. `reports/PHASE_0_5_AUDIT_FINDINGS.md` - the full audit (P0/P1/P2 findings, file:line evidence).
 3. `NEXT_TASKS.md` - current active gate (kept in sync with this file).
 4. `docs/09_PRODUCTION_ROADMAP.md` + `docs/10_AGENT_EXECUTION_PLAYBOOK.md` - phase gates & methodology rules.
-5. `docs/DASHBOARD_UI_POLISH_PLAN.md` - **active work**: the UI/UX polish plan (batch 1 committed `affbb0a`; batch 2 done/uncommitted; batch 3 next).
+5. `docs/DASHBOARD_UI_POLISH_PLAN.md` - **active work**: the UI/UX polish plan (batches 1–2 committed + pushed through `1a0f5ab`; batch 3 done/uncommitted; batch 4 next).
 
 Project in one line: a Streamlit research tool operationalizing the Peron & Bonaparte
 "transitory inflation" paper (SSRN 4007466); three separate layers - paper replication
@@ -27,32 +27,32 @@ Project in one line: a Streamlit research tool operationalizing the Peron & Bona
 
 ## 1. Where we are right now (rewrite when state changes)
 
-**Active work: Dashboard UI/UX polish — batch 2 ("table-heavy tabs") is implemented in the working
-tree (UNCOMMITTED, needs review/commit approval). Batch 1 ("Foundation + flagship") is COMMITTED as
-`affbb0a` (NOT pushed).** Presentation-only; **no methodology, numbers, series, or logic changed;
-every caveat's text preserved, only relocated into expanders.** What batch 2 added (per
-`docs/DASHBOARD_UI_POLISH_PLAN.md`), all reusing the batch-1 template:
-- **Four new figures in `plots.py`** — `hit_rate_bar_figure` (grouped outcome-rate bars per
-  bucket), `threshold_sensitivity_figure` (rate-vs-threshold lines), `heatmap_figure` (generic
-  labeled heatmap; backs both the regime-transition and correlation grids), and
-  `forward_change_by_regime_channel_figure` (grouped forward-change bp bars by regime per channel).
-  Each routed through `apply_macro_theme` + the `HOT`/`COLD`/`NEUTRAL` palette; each has a
-  return-type + trace-count + empty-frame test in `tests/test_plots.py`.
-- **Tab 2 (Validation)** — hit-rate bars by regime + by short-term pressure (side by side), a
-  threshold-sensitivity line, and a regime-transition heatmap; intro folded into `section_notes` +
-  a "How to read this tab" expander + `scope_caveats()`; worked-example tables, the rate tables,
-  and the sensitivity/transition tables moved behind expanders (all kept).
-- **Tab 4 (Market Linkage)** — grouped forward-change bp bars by regime per channel (headline) and
-  a signal-vs-future-change correlation heatmap (RdBu, reversed → +corr hot); availability,
-  rankings, per-channel interpretation, "what happened", and the forward-summary tables moved
-  behind expanders; the stacked disclaimers folded into one `scope_caveats()` "Scope & caveats".
-  Correlation heatmap uses a display-only pivot of the existing correlation values (unchanged).
+**Active work: Dashboard UI/UX polish — batch 3 ("evidence tabs") is implemented in the working
+tree (UNCOMMITTED, needs review/commit approval). Batches 1–2 are COMMITTED and PUSHED to
+`origin/main` through `1a0f5ab`.** Presentation-only; **no methodology, numbers, series, or logic
+changed; every caveat's text preserved, only relocated into expanders.** What batch 3 added (per
+`docs/DASHBOARD_UI_POLISH_PLAN.md`), all reusing the batch-1/2 template:
+- **`plots.py`** — one new figure `improvement_diverging_figure` (horizontal diverging bars of the
+  TINF model's MAE/RMSE improvement % vs each naive baseline; cold = TINF wins / lower error, hot =
+  trails; dotted zero line). `hit_rate_bar_figure` gained two **additive** kwargs — `yaxis_title`
+  and an optional `reference` guide line — so it also backs the robustness win-rate bars (batch-2
+  callers unchanged; defaults preserve old behavior). Each change covered in `tests/test_plots.py`
+  (return-type + trace-count + empty-frame + the new reference/axis params): **+5 tests**.
+- **Tab 3 (Benchmark)** — two verdict **badges** (vs no-change / vs mean-reversion, metric cards),
+  the diverging improvement chart as the headline; the metric summary stays visible; the
+  improvement / classification / 50-row forecast-audit tables moved behind expanders; intro folded
+  into `section_notes` + `scope_caveats()`.
+- **Tab 8 (Robustness)** — **win-rate bars by setting** (MAE | RMSE side by side, each with a 0.5
+  coin-flip reference line) reusing `hit_rate_bar_figure`; data-status / availability / scorecard /
+  verdict / win-rate table moved behind expanders; the baseline quick-comparison table given
+  hot/cold **regime conditional formatting** via a new `style_regime_cells()` Styler helper; intro
+  folded into `section_notes` + `scope_caveats()`. Stationarity diagnostics left as a table.
 
-Gates green (this loop): ruff clean · pytest **112 passed** (104 prior + 8 new plot tests) ·
-compileall OK · offline `AppTest` smoke renders all 9 tabs, **0 exceptions / 0 errors** (verified
-both with a seeded offline market cache — exercises the new Market Linkage charts — and fully
-offline with market unavailable). **Next:** review + commit batch 2 (then push `affbb0a` + batch 2
-together, when approved); then batch 3 (Benchmark + Robustness) — see §5. Read
+Gates green (this loop): ruff clean · pytest **117 passed** (112 prior + 5 new plot tests) ·
+compileall OK · offline `AppTest` smoke renders all 9 tabs, **0 exceptions / 0 errors** (fully
+offline; the new Benchmark diverging chart, verdict badges, and Robustness win-rate chart sections
+were each asserted to render their non-empty path). **Next:** review + commit batch 3 (then push,
+when approved); then batch 4 (Report + light touches) — see §5. Read
 `docs/DASHBOARD_UI_POLISH_PLAN.md` first.
 
 ---
@@ -137,51 +137,39 @@ What each P1 fix changed (so you don't need the chat):
 
 ## 4. Working tree + commit history (refresh when files change / after commit)
 
-**Status: prior commits are PUSHED to `origin/main` (`4b66470`); batch-1 UI polish is COMMITTED
-locally as `affbb0a` (code + plan doc) + a follow-on handoff/NEXT_TASKS refresh, both NOT pushed.
-Batch-2 UI polish (table-heavy tabs) is implemented in the WORKING TREE and is UNCOMMITTED —
-review/commit approval pending. `main` is ahead of `origin/main` until pushed; commit + push both
-need explicit approval.** Never `git add -A`.
+**Status: batches 1–2 are COMMITTED and PUSHED to `origin/main` (HEAD = `1a0f5ab`). Batch-3 UI
+polish (evidence tabs) is implemented in the WORKING TREE and is UNCOMMITTED — review/commit
+approval pending. Both commit and push need explicit approval.** Never `git add -A`.
 
-**Uncommitted now (batch 2 — to `git add` when approved):** `src/transitory_inflation/plots.py`,
-`app/streamlit_app.py`, `tests/test_plots.py`, plus the doc refresh
+**Uncommitted now (batch 3 — to `git add` when approved):** `src/transitory_inflation/plots.py`,
+`app/streamlit_app.py`, `tests/test_plots.py`, plus this doc refresh
 `docs/DASHBOARD_UI_POLISH_PLAN.md`, `NEXT_TASKS.md`, `ACTIVE_HANDOFF.md`. The only always-untracked
-path remains `.claude/`. The offline AppTest smoke is run ad hoc (a temp script, not committed).
+path remains `.claude/`. The offline AppTest smoke is run ad hoc (a temp script kept outside the
+repo, not committed).
 
-**Committed in `affbb0a` (Dashboard UI polish batch 1 — code + plan doc):**
-- `src/transitory_inflation/plots.py` — `apply_macro_theme()`, hot/cold palette, epsilon shading
-  on the CPI figure, zone tints + current markers on the TINF figure, new
-  `forward_change_range_figure()`; all 5 figures themed.
-- `app/streamlit_app.py` — glossary/`scope_caveats`/`regime_badge`/`signal_headline` helpers;
-  sidebar glossary + "Current reading" mini-status; tab 1 executive rebuild; tab 5 range plot +
-  cards + expanders.
-- `tests/test_plots.py` — trace-count assertions updated for shading/markers; tests for
-  `apply_macro_theme` and `forward_change_range_figure` (incl. empty-frame branch).
-- `docs/DASHBOARD_UI_POLISH_PLAN.md` (new) — plan with batch 1 marked done.
+**What batch 3 touches (for the commit allowlist):**
+- `src/transitory_inflation/plots.py` — new `improvement_diverging_figure`; `hit_rate_bar_figure`
+  gained additive `yaxis_title` + `reference` kwargs (batch-2 callers unchanged).
+- `app/streamlit_app.py` — Benchmark verdict badges + diverging chart + expanders; Robustness
+  win-rate bars + expanders; new `style_regime_cells()` helper + `WIN_RATE_SPECS_*` constants;
+  `improvement_diverging_figure` added to the plot-reload guard.
+- `tests/test_plots.py` — +5 tests (diverging return/empty/unknown-model; hit-rate reference+axis;
+  hit-rate no-reference default).
 
-**Committed in this follow-on refresh:** `ACTIVE_HANDOFF.md` + `NEXT_TASKS.md` (this status update).
+**Dashboard UI-polish commit arc (all PUSHED to `origin/main` through `1a0f5ab`):**
+- `affbb0a` - batch 1 (shared theme, glossary, Current Macro Signal rebuild, Trader Research range
+  plot) + plan doc.
+- `9771837` - handoff + NEXT_TASKS refresh after batch 1.
+- `1a0f5ab` - batch 2 (chart-ify Validation + Market Linkage: 4 new figures, tables behind
+  expanders) + the three doc refreshes. **Last pushed (HEAD == origin/main).**
 
-**To push when approved:** `git push origin main` (sends `affbb0a` + this refresh). The only
-always-untracked path is `.claude/` (project command defs, intentionally local).
+Earlier history (all pushed; see `git log` for the full chain): `4b66470` maintenance reconcile ·
+`cbfb2a0` Trader Research feature · `e9462d0` P2 code-health · `b476ed7` governance/research docs ·
+`1c1d90c` Streamlit width migration.
 
-History (pushed to `origin/main` through `4b66470`; the last two are local-only until pushed):
-- `d2cb783` - Phase 5 code + the three then-modified docs (`NEXT_TASKS.md`,
-  `docs/01_RESEARCH_SPEC.md`, `docs/09_PRODUCTION_ROADMAP.md`).
-- `e9462d0` - P2 code-health polish (cache, tab order, dedup, horizons, tests).
-- `b476ed7` - governance / research / audit docs.
-- `5995a5e` - closeout reconciliation of the living status docs.
-- `1c1d90c` - Streamlit width-parameter migration (`use_container_width` -> `width="stretch"`).
-- `dfa0ded` + `417eb4b` - handoff / NEXT_TASKS refresh after maintenance cleanup.
-- `cbfb2a0` - Trader Research feature (module + tab + 9 tests + doc sync).
-- `76284e6` - handoff refresh after Trader Research.
-- `4b66470` - NEXT_TASKS + handoff reconcile to pushed maintenance state (**last pushed**).
-- `affbb0a` - Dashboard UI polish batch 1 (shared theme, glossary, tab 1 + tab 5) — **local-only**.
-- (this commit) - handoff + NEXT_TASKS refresh after batch 1 — **local-only**.
-
-Working tree (current): **batch-2 changes are uncommitted** (the three code/test files + the three
-docs listed above), apart from the always-untracked `.claude/`. Local `main` still carries the two
-unpushed batch-1 commits on top of `origin/main` (`4b66470`); batch 2 is not yet a commit.
-Everything earlier remains committed and pushed.
+Working tree (current): **batch-3 changes are uncommitted** (the three code/test files + the three
+docs listed above), apart from the always-untracked `.claude/`. Local `main` == `origin/main` ==
+`1a0f5ab`; batch 3 is not yet a commit. Everything earlier remains committed and pushed.
 
 ### Commit-readiness catches (do NOT miss)
 1. **`.env`** is gitignored - never commit it.
@@ -217,25 +205,28 @@ the command defs in the repo. A single combined commit is also fine if preferred
 
 ## 5. Next action (REWRITE this each loop iteration)
 
-**This loop implemented Dashboard UI-polish batch 2** ("table-heavy tabs"): Validation hit-rate
-bars (by regime + by pressure), a threshold-sensitivity line, and a regime-transition heatmap;
-Market Linkage grouped forward-change bp bars by regime per channel and a signal-vs-market
-correlation heatmap; table-heavy detail moved behind expanders; stacked disclaimers folded into
-`scope_caveats()` (full per-item detail in §1 and `docs/DASHBOARD_UI_POLISH_PLAN.md`).
-Presentation-only — **no methodology/numbers/series/logic changed and every caveat's text kept,
-only relocated.** Four new themed figures in `plots.py`, each with return-type + trace-count +
-empty-frame tests. Gates green (ruff · pytest **112 passed** · compileall · offline AppTest smoke
-0 exceptions, seeded + fully-offline). **Batch 2 is UNCOMMITTED.**
+**This loop implemented Dashboard UI-polish batch 3** ("evidence tabs"): Benchmark verdict badges
+(vs no-change / vs mean-reversion) + a diverging MAE/RMSE improvement chart (cold = TINF wins, hot
+= trails) with the improvement / classification / forecast-audit tables behind expanders;
+Robustness win-rate bars by setting (MAE | RMSE, each with a 0.5 reference line) with
+scorecard / verdict / status behind expanders and hot/cold regime conditional formatting on the
+baseline quick-comparison table (full per-item detail in §1 and
+`docs/DASHBOARD_UI_POLISH_PLAN.md`). Presentation-only — **no methodology/numbers/series/logic
+changed and every caveat's text kept, only relocated.** One new figure
+(`improvement_diverging_figure`) plus additive `yaxis_title`/`reference` kwargs on
+`hit_rate_bar_figure` (reused for the win-rate bars), each with tests. Gates green (ruff · pytest
+**117 passed** · compileall · offline AppTest smoke 0 exceptions, fully-offline, new chart sections
+asserted rendered). **Batch 3 is UNCOMMITTED.**
 
-**Immediate next step:** review batch 2 (localhost eyeball per `docs/08_LOCALHOST_REVIEW.md` if
-wanted). When approved, commit batch 2 (code + tests + the three doc refreshes) and push
-`affbb0a` + batch 2 together (`git push origin main` — needs approval). Then start **batch 3 —
-evidence tabs** (Benchmark: diverging MAE/RMSE improvement bars + beats-baseline badges;
-Robustness: win-rate bars, conditional formatting, scorecard/verdict behind expanders). Reuse the
-batch-1 template (`apply_macro_theme`, `section_notes`, `scope_caveats`, `render_glossary`, palette
-constants); add a return-type + trace-count + empty-frame test for every new figure (mirror
-`forward_change_range_figure`). Keep all methodology/numbers byte-identical and all caveat text
-(relocate into expanders, never drop).
+**Immediate next step:** review batch 3 (localhost eyeball per `docs/08_LOCALHOST_REVIEW.md` if
+wanted). When approved, commit batch 3 (code + tests + the three doc refreshes) and push
+(`git push origin main` — needs approval). Then start **batch 4 — report + light touches** (Macro
+Research Report headline/regime as metric cards + `st.divider()` between sections with supporting
+tables behind expanders; Decay metric cards from the first valid window; Paper Framework
+correlation-matrix heatmap with the table behind an expander). Reuse the established template
+(`apply_macro_theme`, `section_notes`, `scope_caveats`, `render_glossary`, `heatmap_figure`,
+palette constants); add a return-type + trace-count + empty-frame test for every new figure. Keep
+all methodology/numbers byte-identical and all caveat text (relocate into expanders, never drop).
 
 Deferred / out of scope until a fresh, separately-scoped user decision (unchanged by this loop):
 - a **predictive** linkage — out-of-sample scoring of market moves vs descriptive base rates;

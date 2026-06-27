@@ -313,13 +313,17 @@ def hit_rate_bar_figure(
     *,
     title: str | None = None,
     group_order: Sequence[str] | None = None,
+    yaxis_title: str = "Historical rate",
+    reference: float | None = None,
 ) -> go.Figure:
-    """Grouped bar chart of historical outcome rates per bucket (regime or
-    short-term pressure). Each ``rate_specs`` entry is ``(column, label, color)``
-    and is drawn as one bar series of the 0-1 rates already in ``summary``, shown
-    as percentages.
+    """Grouped bar chart of 0-1 rates per bucket (regime, short-term pressure, or
+    robustness setting). Each ``rate_specs`` entry is ``(column, label, color)``
+    and is drawn as one bar series of the rates already in ``summary``, shown as
+    percentages. ``reference`` (e.g. 0.5) draws a dotted horizontal guide line —
+    used by the robustness win-rate charts to mark the coin-flip level.
 
-    Presentation only — plots existing validation-summary rates, no recomputation.
+    Presentation only — plots existing summary rates, no recomputation. Backs both
+    the validation outcome-rate bars and the robustness win-rate bars.
     """
 
     fig = go.Figure()
@@ -327,7 +331,7 @@ def hit_rate_bar_figure(
     usable = summary is not None and not summary.empty and group_col in summary.columns
     present_specs = [spec for spec in rate_specs if spec[0] in summary.columns] if usable else []
     if not present_specs:
-        return apply_macro_theme(fig, title=empty_title, yaxis_title="Historical rate", hovermode="closest")
+        return apply_macro_theme(fig, title=empty_title, yaxis_title=yaxis_title, hovermode="closest")
 
     data = summary.dropna(subset=[group_col]).copy()
     data[group_col] = data[group_col].astype(str)
@@ -343,6 +347,8 @@ def hit_rate_bar_figure(
         )
     fig.update_layout(barmode="group")
     fig.update_yaxes(tickformat=".0%", rangemode="tozero")
+    if reference is not None:
+        fig.add_hline(y=reference, line_dash="dot", line_color=NEUTRAL)
     if group_order is not None:
         present = set(data[group_col])
         order = [str(value) for value in group_order if str(value) in present]
@@ -351,7 +357,7 @@ def hit_rate_bar_figure(
     return apply_macro_theme(
         fig,
         title=title or "Historical outcome rates by bucket",
-        yaxis_title="Historical rate",
+        yaxis_title=yaxis_title,
         hovermode="closest",
     )
 
@@ -529,5 +535,80 @@ def forward_change_by_regime_channel_figure(
         fig,
         title=title or "Forward change by regime per channel",
         yaxis_title="Forward change, basis points",
+        hovermode="closest",
+    )
+
+
+# Batch-3 "evidence tab" figure (Benchmark). Diverging bars of one model's
+# MAE/RMSE improvement vs each naive baseline — cold when the model wins (lower
+# error), hot when it trails. Presentation only: plots the improvement
+# percentages the benchmark layer already computed, no rescoring.
+_IMPROVEMENT_BASELINE_LABELS: dict[str, str] = {
+    "no_change": "No-change",
+    "mean_reversion": "Mean-reversion",
+    "ar1": "AR(1)",
+}
+
+
+def improvement_diverging_figure(
+    improvements: pd.DataFrame,
+    *,
+    model: str = "tinf_regime_bucket",
+    baseline_labels: dict[str, str] | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Diverging horizontal bars of one model's MAE and RMSE improvement (%) vs
+    each comparison baseline. Positive bars (cold) mean the model reduced error —
+    a win; negative bars (hot) mean it trailed the baseline. A dotted zero line
+    separates the two. ``improvements`` is the long-form benchmark improvement
+    frame (``model``, ``comparison_baseline``, ``mae_improvement_pct``,
+    ``rmse_improvement_pct``).
+
+    Presentation only — plots existing improvement percentages, no rescoring.
+    """
+
+    fig = go.Figure()
+    empty_title = (title or "TINF improvement vs benchmarks") + " — no data"
+    required = {"model", "comparison_baseline", "mae_improvement_pct", "rmse_improvement_pct"}
+    usable = (
+        improvements is not None
+        and not improvements.empty
+        and required.issubset(improvements.columns)
+    )
+    data = improvements.loc[improvements["model"] == model] if usable else pd.DataFrame()
+    if data.empty:
+        return apply_macro_theme(
+            fig, title=empty_title, xaxis_title="Improvement %", hovermode="closest"
+        )
+
+    labels = baseline_labels or _IMPROVEMENT_BASELINE_LABELS
+    categories: list[str] = []
+    values: list[float] = []
+    for _, row in data.iterrows():
+        friendly = labels.get(str(row["comparison_baseline"]), str(row["comparison_baseline"]))
+        for metric_col, metric_label in (
+            ("mae_improvement_pct", "MAE"),
+            ("rmse_improvement_pct", "RMSE"),
+        ):
+            categories.append(f"{friendly} · {metric_label}")
+            values.append(float(pd.to_numeric(row[metric_col], errors="coerce")))
+
+    # Diverging sign color: cold = the model reduced error (win), hot = it trailed.
+    colors = [COLD if value >= 0 else HOT for value in values]
+    # Reverse so the first comparison sits at the top of the horizontal axis.
+    fig.add_trace(
+        go.Bar(
+            x=values[::-1],
+            y=categories[::-1],
+            orientation="h",
+            marker_color=colors[::-1],
+            hovertemplate="%{y}<br>%{x:.1f}% improvement<extra></extra>",
+        )
+    )
+    fig.add_vline(x=0, line_dash="dot", line_color=NEUTRAL)
+    return apply_macro_theme(
+        fig,
+        title=title or "TINF improvement vs benchmarks",
+        xaxis_title="MAE / RMSE improvement % (positive → TINF wins)",
         hovermode="closest",
     )

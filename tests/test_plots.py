@@ -14,6 +14,7 @@ from transitory_inflation.plots import (
     forward_change_range_figure,
     heatmap_figure,
     hit_rate_bar_figure,
+    improvement_diverging_figure,
     rolling_rho_figure,
     threshold_sensitivity_figure,
     tinf_term_structure_figure,
@@ -105,6 +106,30 @@ def _demo_channel_summary() -> pd.DataFrame:
             "avg_change_bp": [15.0, 8.0, -10.0, -4.0],
             "median_change_bp": [12.0, 7.0, -9.0, -3.0],
             "count": [40, 40, 35, 35],
+        }
+    )
+
+
+def _demo_improvements() -> pd.DataFrame:
+    """Minimal long-form benchmark improvement frame (model x comparison baseline)."""
+
+    return pd.DataFrame(
+        {
+            "model": [
+                "tinf_regime_bucket",
+                "tinf_regime_bucket",
+                "no_change",
+                "no_change",
+            ],
+            "comparison_baseline": [
+                "no_change",
+                "mean_reversion",
+                "no_change",
+                "mean_reversion",
+            ],
+            # TINF wins vs no-change (positive), trails mean-reversion (negative).
+            "mae_improvement_pct": [12.0, -5.0, 0.0, -8.0],
+            "rmse_improvement_pct": [9.0, -3.0, 0.0, -6.0],
         }
     )
 
@@ -238,3 +263,49 @@ def test_forward_change_by_regime_channel_figure_empty_branch() -> None:
     assert isinstance(fig, go.Figure)
     assert len(fig.data) == 0
     assert "no data" in (fig.layout.title.text or "").lower()
+
+
+def test_hit_rate_bar_figure_reference_line_and_axis_title() -> None:
+    fig = hit_rate_bar_figure(
+        _demo_outcome_summary(),
+        "historical_regime",
+        _RATE_SPECS,
+        yaxis_title="Win rate",
+        reference=0.5,
+    )
+    assert isinstance(fig, go.Figure)
+    # The reference adds one horizontal guide line as a layout shape.
+    assert any(shape.type == "line" for shape in fig.layout.shapes)
+    assert fig.layout.yaxis.title.text == "Win rate"
+
+
+def test_hit_rate_bar_figure_no_reference_line_by_default() -> None:
+    fig = hit_rate_bar_figure(_demo_outcome_summary(), "historical_regime", _RATE_SPECS)
+    # Batch-2 behavior unchanged: no guide line unless reference is passed.
+    assert not fig.layout.shapes
+
+
+def test_improvement_diverging_figure_returns_figure() -> None:
+    fig = improvement_diverging_figure(_demo_improvements())
+    assert isinstance(fig, go.Figure)
+    # A single horizontal diverging bar trace (MAE + RMSE per comparison baseline).
+    assert len(fig.data) == 1
+    assert fig.data[0].orientation == "h"
+    # Two comparison baselines x two metrics = four bars.
+    assert len(fig.data[0].x) == 4
+    # Sign-based color: TINF wins vs no-change (cold), trails mean-reversion (hot).
+    assert set(fig.data[0].marker.color) == {"#2471a3", "#c0392b"}
+
+
+def test_improvement_diverging_figure_empty_branch() -> None:
+    fig = improvement_diverging_figure(pd.DataFrame())
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == 0
+    assert "no data" in (fig.layout.title.text or "").lower()
+
+
+def test_improvement_diverging_figure_unknown_model_is_empty() -> None:
+    # Filtering to a model not present yields the empty-data figure, not an error.
+    fig = improvement_diverging_figure(_demo_improvements(), model="not_a_model")
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == 0

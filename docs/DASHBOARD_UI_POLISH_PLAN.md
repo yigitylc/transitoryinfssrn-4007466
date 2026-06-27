@@ -1,30 +1,41 @@
 # Dashboard UI/UX Polish Plan
 
-**Status:** **batch 1 committed** (`affbb0a`, not pushed) · **batch 2 implemented** (working tree,
-uncommitted — needs review/commit approval) · batches 3–4 still proposed · **As of:** 2026-06-26 ·
-**Scope:** presentation/visualization only · **Methodology:** unchanged (no new models, market
-series, vendors, signals, PnL, or recommendations) · **Color semantic:** hot = above baseline /
-inflationary (red), cold = below baseline / disinflationary (blue), neutral = gray.
+**Status:** **batches 1–2 committed + pushed** (`origin/main` = `1a0f5ab`) · **batch 3 implemented**
+(working tree, uncommitted — needs review/commit approval) · batch 4 still proposed · **As of:**
+2026-06-27 · **Scope:** presentation/visualization only · **Methodology:** unchanged (no new models,
+market series, vendors, signals, PnL, or recommendations) · **Color semantic:** hot = above baseline
+/ inflationary (red), cold = below baseline / disinflationary (blue), neutral = gray.
 
-> This is a design plan with batches 1–2 now built. It does **not** change any computed value,
+> This is a design plan with batches 1–3 now built. It does **not** change any computed value,
 > model, series, or research conclusion. Every change is a different *presentation* of outputs the
 > app already produces. Remaining batches land in later, separately-approved steps.
 
-> **Batch 1 — DONE (committed `affbb0a`).** Shared Plotly theme + glossary, rebuilt Current Macro
-> Signal, and the Trader Research range plot. Files: `plots.py`, `app/streamlit_app.py`,
+> **Batch 1 — DONE (committed `affbb0a`, pushed).** Shared Plotly theme + glossary, rebuilt Current
+> Macro Signal, and the Trader Research range plot. Files: `plots.py`, `app/streamlit_app.py`,
 > `tests/test_plots.py`.
 >
-> **Batch 2 — DONE (uncommitted).** Table-heavy tabs converted to charts: Validation gained
-> hit-rate bars (by regime + by pressure), a threshold-sensitivity line, and a regime-transition
-> heatmap, with worked examples / rate tables / sensitivity / transition tables moved behind
-> expanders; Market Linkage gained grouped forward-change bars (bp) by regime per channel and a
-> signal-vs-market correlation heatmap, with availability / rankings / per-channel / summary
-> tables behind expanders and the stacked disclaimers folded into one "Scope & caveats". Four new
-> figures in `plots.py` (`hit_rate_bar_figure`, `threshold_sensitivity_figure`, `heatmap_figure`,
-> `forward_change_by_regime_channel_figure`), each with return-type + trace-count + empty-frame
-> tests. Gates green: ruff clean · pytest **112 passed** (104 prior + 8 new) · compileall OK ·
-> offline `AppTest` smoke renders all 9 tabs, 0 exceptions. Files touched:
-> `src/transitory_inflation/plots.py`, `app/streamlit_app.py`, `tests/test_plots.py`.
+> **Batch 2 — DONE (committed `1a0f5ab`, pushed).** Table-heavy tabs converted to charts: Validation
+> gained hit-rate bars (by regime + by pressure), a threshold-sensitivity line, and a
+> regime-transition heatmap, with worked examples / rate tables / sensitivity / transition tables
+> moved behind expanders; Market Linkage gained grouped forward-change bars (bp) by regime per
+> channel and a signal-vs-market correlation heatmap, with availability / rankings / per-channel /
+> summary tables behind expanders and the stacked disclaimers folded into one "Scope & caveats".
+> Four new figures in `plots.py` (`hit_rate_bar_figure`, `threshold_sensitivity_figure`,
+> `heatmap_figure`, `forward_change_by_regime_channel_figure`), each with return-type + trace-count
+> + empty-frame tests.
+>
+> **Batch 3 — DONE (uncommitted).** Evidence tabs charted: Benchmark gained two verdict badges (vs
+> no-change / vs mean-reversion) + a diverging MAE/RMSE improvement chart (cold = TINF wins, hot =
+> trails), with improvement / classification / forecast-audit tables behind expanders; Robustness
+> gained win-rate bars by setting (MAE | RMSE, each with a 0.5 reference line), with data-status /
+> availability / scorecard / verdict / win-rate table behind expanders and hot/cold regime
+> conditional formatting on the baseline quick-comparison table. One new figure
+> (`improvement_diverging_figure`) plus additive `yaxis_title`/`reference` kwargs on
+> `hit_rate_bar_figure` (reused for the win-rate bars) and a new `style_regime_cells()` Styler
+> helper; +5 tests. Gates green: ruff clean · pytest **117 passed** (112 prior + 5 new) · compileall
+> OK · offline `AppTest` smoke renders all 9 tabs, 0 exceptions (new chart sections asserted
+> rendered). Files touched: `src/transitory_inflation/plots.py`, `app/streamlit_app.py`,
+> `tests/test_plots.py`.
 
 ## Locked design decisions
 
@@ -236,11 +247,13 @@ The batch-1 template has landed (see above), so these are now unblocked. Reuse
 `apply_macro_theme`, `section_notes`, `scope_caveats`, `render_glossary`, and the palette
 constants rather than new ad-hoc styling.
 
-- **Batch 2 — table-heavy tabs (DONE, uncommitted):** Validation (hit-rate bars, sensitivity line,
-  transition heatmap) and Market Linkage (grouped bars, correlation heatmap, expanders). Each new
-  figure has a return-type + trace-count + empty-frame test in `tests/test_plots.py`, mirroring
+- **Batch 2 — table-heavy tabs (DONE, committed `1a0f5ab`):** Validation (hit-rate bars, sensitivity
+  line, transition heatmap) and Market Linkage (grouped bars, correlation heatmap, expanders). Each
+  new figure has a return-type + trace-count + empty-frame test in `tests/test_plots.py`, mirroring
   `forward_change_range_figure`.
-- **Batch 3 — evidence tabs (NEXT):** Benchmark (diverging improvement bars + badges) and
-  Robustness (win-rate bars, conditional formatting, expanders).
-- **Batch 4 — report + light touches:** Macro Research Report cards/dividers, Decay cards, Paper
-  Framework correlation heatmap.
+- **Batch 3 — evidence tabs (DONE, uncommitted):** Benchmark (diverging improvement bars + badges)
+  and Robustness (win-rate bars, conditional formatting, expanders). New `improvement_diverging_figure`;
+  `hit_rate_bar_figure` extended with `yaxis_title`/`reference` and reused for the win-rate bars;
+  new `style_regime_cells()` helper. Each new/changed figure has a test.
+- **Batch 4 — report + light touches (NEXT):** Macro Research Report cards/dividers, Decay cards,
+  Paper Framework correlation heatmap (reuse `heatmap_figure`).

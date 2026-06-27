@@ -70,6 +70,7 @@ _REQUIRED_PLOT_ATTRS = (
     "heatmap_figure",
     "forward_change_by_regime_channel_figure",
     "forward_change_range_figure",
+    "improvement_diverging_figure",
     "rolling_rho_figure",
     "decay_curve_figure",
 )
@@ -190,6 +191,27 @@ def regime_badge(regime: object) -> str:
     """Emoji-coded regime label for the executive read (no HTML dependency)."""
 
     return _REGIME_BADGES.get(str(regime), f"⚪ {regime}")
+
+
+def style_regime_cells(frame: pd.DataFrame):
+    """Tint the ``regime`` column hot/cold so baseline agreement reads at a glance.
+
+    Presentation only — returns a Styler that recolors cells; values are unchanged.
+    Falls back to the plain frame when there is no ``regime`` column to tint.
+    """
+
+    if frame.empty or "regime" not in frame.columns:
+        return frame
+
+    def _tint(value: object) -> str:
+        key = str(value)
+        if key in ("elevated rising", "elevated falling"):
+            return f"background-color: {plots_mod.HOT_TINT}"
+        if key == "disinflationary":
+            return f"background-color: {plots_mod.COLD_TINT}"
+        return ""
+
+    return frame.style.map(_tint, subset=["regime"])
 
 
 def signal_headline(snapshot: dict[str, object]) -> str:
@@ -314,6 +336,20 @@ VALIDATION_RATE_SPECS = (
     ("positive_shock_resolution_rate", "Positive-shock resolved", plots_mod.COLD),
     ("baseline_normalization_hit_rate", "Baseline convergence", plots_mod.NEUTRAL),
     ("positive_shock_persistent_rate", "Positive-shock persisted", plots_mod.HOT),
+)
+# Robustness win-rate series, as (column-stem, label, color). Colors identify the
+# benchmark (categorical), not a hot/cold sign read. The MAE/RMSE specs reuse the
+# same benchmarks; presentation only over the existing win_rates table.
+_WIN_RATE_BENCHMARKS = (
+    ("no_change", "Beats no-change", plots_mod.COLD),
+    ("mean_reversion", "Beats mean-reversion", "#8e44ad"),
+    ("ar1", "Beats AR(1)", plots_mod.NEUTRAL),
+)
+WIN_RATE_SPECS_MAE = tuple(
+    (f"beats_{key}_mae_rate", label, color) for key, label, color in _WIN_RATE_BENCHMARKS
+)
+WIN_RATE_SPECS_RMSE = tuple(
+    (f"beats_{key}_rmse_rate", label, color) for key, label, color in _WIN_RATE_BENCHMARKS
 )
 
 with st.sidebar:
@@ -1338,19 +1374,25 @@ with tab_trader_research:
 
 with tab_benchmarks:
     st.subheader("Phase 2 Benchmark Comparison")
-    st.markdown(
-        "This tab tests whether the TINF/regime signal adds useful forward inflation "
-        "information beyond simple baselines. Phase 1 hit rates are not enough unless "
-        "they beat naive alternatives."
+    section_notes(
+        "Does the TINF/regime signal add forward inflation information beyond simple baselines? "
+        "Each model forecasts CPI YoY using only information available at month t; future CPI is "
+        "used only to score it.",
+        "Read the diverging bars as TINF's MAE/RMSE improvement versus each naive baseline — bars "
+        "right of zero (cold) mean TINF reduced error, left (hot) mean it trailed — and the badges "
+        "as the verdict. Phase 1 hit rates are not enough unless they beat these naive alternatives.",
     )
-    st.markdown(
-        "Forecasts use only information available at month t. Future CPI outcomes are "
-        "used only for evaluation. Results are historical validation, not a guaranteed "
-        "trading signal."
-    )
-    st.warning(
-        "No market variables are used by these benchmark forecasts. Market linkage is reported "
-        "only in its separate descriptive tab."
+    scope_caveats(
+        "Historical forecast validation under the selected baseline — not a guaranteed trading signal.",
+        (
+            "This tab tests whether the TINF/regime signal adds useful forward inflation "
+            "information beyond simple baselines. Phase 1 hit rates are not enough unless they "
+            "beat naive alternatives.",
+            "Forecasts use only information available at month t. Future CPI outcomes are used "
+            "only for evaluation. Results are historical validation, not a guaranteed trading signal.",
+            "No market variables are used by these benchmark forecasts. Market linkage is reported "
+            "only in its separate descriptive tab.",
+        ),
     )
     if not meta.live_safe:
         st.warning(
@@ -1393,19 +1435,38 @@ with tab_benchmarks:
                 tinf_row["mae_improvement_vs_mean_reversion_pct"] > 0
                 or tinf_row["rmse_improvement_vs_mean_reversion_pct"] > 0
             )
-            st.info(
-                "TINF/regime bucket improvement: "
-                f"{tinf_row['mae_improvement_vs_no_change_pct']:.1f}% MAE vs no-change, "
-                f"{tinf_row['rmse_improvement_vs_no_change_pct']:.1f}% RMSE vs no-change; "
-                f"{tinf_row['mae_improvement_vs_mean_reversion_pct']:.1f}% MAE vs mean "
-                f"reversion, {tinf_row['rmse_improvement_vs_mean_reversion_pct']:.1f}% "
-                "RMSE vs mean reversion."
+            verdict_col1, verdict_col2 = st.columns(2)
+            verdict_col1.metric(
+                "vs no-change",
+                "🔵 TINF wins" if beats_no_change else "🔴 TINF trails",
+            )
+            verdict_col2.metric(
+                "vs mean-reversion",
+                "🔵 TINF wins" if beats_mean_reversion else "🔴 TINF trails",
+            )
+            st.caption(
+                f"Verdict at {benchmark_horizon} months: 'wins' = lower MAE or RMSE than that "
+                "baseline on the common scored sample. Exact percentages are in the chart hover "
+                "and the improvement table below."
             )
             if not beats_no_change and not beats_mean_reversion:
                 st.warning(
                     "Under the current settings, the TINF/regime bucket does not improve on "
                     "the simple no-change or mean-reversion baselines by MAE/RMSE."
                 )
+
+        st.markdown(f"#### TINF improvement vs benchmarks ({benchmark_horizon} months)")
+        st.caption(
+            "Diverging bars: positive (cold) means TINF reduced MAE or RMSE versus that baseline; "
+            "negative (hot) means it trailed. Same percentages as the improvement table below."
+        )
+        st.plotly_chart(
+            plots_mod.improvement_diverging_figure(
+                benchmark_improvements,
+                title=f"TINF improvement vs benchmarks ({benchmark_horizon} months)",
+            ),
+            width="stretch",
+        )
 
         st.markdown("#### Benchmark metric summary")
         st.caption(
@@ -1417,40 +1478,40 @@ with tab_benchmarks:
         )
         st.dataframe(benchmark_metrics, width="stretch")
 
-        st.markdown("#### Benchmark-relative improvement")
-        st.caption(
-            "Positive values mean the model reduced MAE or RMSE versus the comparison baseline. "
-            "These are historical validation statistics, not optimized thresholds."
-        )
-        st.dataframe(benchmark_improvements, width="stretch")
+        with st.expander("Benchmark-relative improvement table"):
+            st.caption(
+                "Positive values mean the model reduced MAE or RMSE versus the comparison baseline. "
+                "These are historical validation statistics, not optimized thresholds."
+            )
+            st.dataframe(benchmark_improvements, width="stretch")
 
-        st.markdown("#### Classification summary")
-        st.caption(
-            "Positive class: persistent high inflation after a current positive inflation shock. "
-            "Forecast classifications compare each model forecast with the current-month baseline "
-            "and the selected threshold. Note: mean reversion forecasts the baseline, so by "
-            "construction it can never be classified persistent (its confusion row is all-negative) "
-            "- read it as a structural floor, not a failure to detect."
-        )
-        st.dataframe(benchmark_confusion, width="stretch")
+        with st.expander("Classification summary"):
+            st.caption(
+                "Positive class: persistent high inflation after a current positive inflation shock. "
+                "Forecast classifications compare each model forecast with the current-month baseline "
+                "and the selected threshold. Note: mean reversion forecasts the baseline, so by "
+                "construction it can never be classified persistent (its confusion row is all-negative) "
+                "- read it as a structural floor, not a failure to detect."
+            )
+            st.dataframe(benchmark_confusion, width="stretch")
 
-        st.markdown("#### Forecast audit sample")
-        sample_cols = [
-            "date",
-            "horizon_months",
-            "model",
-            "historical_regime",
-            "current_cpi_yoy",
-            "forecast_cpi_yoy",
-            "actual_cpi_yoy",
-            "forecast_error",
-            "forecast_persistent_high_inflation",
-            "actual_persistent_high_inflation",
-        ]
-        st.dataframe(
-            forecasts.loc[:, sample_cols].sort_values("date", ascending=False).head(50),
-            width="stretch",
-        )
+        with st.expander("Forecast audit sample"):
+            sample_cols = [
+                "date",
+                "horizon_months",
+                "model",
+                "historical_regime",
+                "current_cpi_yoy",
+                "forecast_cpi_yoy",
+                "actual_cpi_yoy",
+                "forecast_error",
+                "forecast_persistent_high_inflation",
+                "actual_persistent_high_inflation",
+            ]
+            st.dataframe(
+                forecasts.loc[:, sample_cols].sort_values("date", ascending=False).head(50),
+                width="stretch",
+            )
 
 with tab_report:
     st.subheader("Phase 5 Macro Research Report")
@@ -1651,18 +1712,27 @@ with tab_decay:
 
 with tab_robustness:
     st.subheader("Phase 3 Benchmark Robustness")
-    st.markdown(
-        "Robustness asks whether the benchmark conclusion survives reasonable choices. "
-        "A signal that only works under one horizon or threshold is weaker than one that "
-        "works across settings."
+    section_notes(
+        "Does the benchmark conclusion survive reasonable choices of horizon, threshold, baseline, "
+        "sample, and inflation measure? A signal that only works under one setting is weaker than "
+        "one that holds across the grid.",
+        "Read the win-rate bars as how often TINF/regime beats each naive baseline across the fixed "
+        "horizon×threshold grid, per setting; bars above the dotted 50% line mean it wins more often "
+        "than not. The scorecard and verdict behind the expanders hold every underlying cell.",
     )
-    st.markdown(
-        "Phase 3B adds headline CPI, core CPI, PCE, and core PCE comparisons. Headline CPI "
-        "remains the paper/default measure; core and PCE measures are robustness checks, not "
-        "paper-exact replication. Future inflation outcomes are evaluation only, thresholds "
-        "are reported rather than optimized, and no market variables are included."
+    scope_caveats(
+        "Robustness diagnostics across settings — thresholds are reported, not optimized.",
+        (
+            "Robustness asks whether the benchmark conclusion survives reasonable choices. A signal "
+            "that only works under one horizon or threshold is weaker than one that works across "
+            "settings.",
+            "Phase 3B adds headline CPI, core CPI, PCE, and core PCE comparisons. Headline CPI "
+            "remains the paper/default measure; core and PCE measures are robustness checks, not "
+            "paper-exact replication. Future inflation outcomes are evaluation only, thresholds are "
+            "reported rather than optimized, and no market variables are included.",
+            "`full_sample` is ex-post / paper-style only and is not a live-safe baseline.",
+        ),
     )
-    st.warning("`full_sample` is ex-post / paper-style only and is not a live-safe baseline.")
 
     robustness_col1, robustness_col2, robustness_col3 = st.columns(3)
     with robustness_col1:
@@ -1724,77 +1794,127 @@ with tab_robustness:
             tuple(robustness_inflation_measures),
         )
 
-        st.markdown("#### Robustness data status")
-        st.dataframe(pd.DataFrame(status_rows), width="stretch")
-        st.markdown("#### Inflation measure availability")
-        st.caption(
-            "Unavailable measures are skipped rather than filled with demo data. If live FRED "
-            "and cache files lack a selected core/PCE series, the headline CPI rows still run "
-            "and the missing measure is disclosed here."
-        )
-        st.dataframe(availability, width="stretch")
+        with st.expander("Robustness data status & measure availability"):
+            st.markdown("##### Robustness data status")
+            st.dataframe(pd.DataFrame(status_rows), width="stretch")
+            st.markdown("##### Inflation measure availability")
+            st.caption(
+                "Unavailable measures are skipped rather than filled with demo data. If live FRED "
+                "and cache files lack a selected core/PCE series, the headline CPI rows still run "
+                "and the missing measure is disclosed here."
+            )
+            st.dataframe(availability, width="stretch")
 
         if scorecard.empty:
             st.info("No robustness scorecard is available for the selected settings.")
         else:
-            st.markdown("#### Robustness scorecard")
-            scorecard_cols = [
-                "sample_mode",
-                "inflation_measure_label",
-                "fred_series_id",
-                "paper_exact",
-                "baseline_method",
-                "baseline_live_safe",
-                "baseline_label",
-                "model",
-                "horizon_months",
-                "threshold_pp",
-                "count",
-                "mae",
-                "rmse",
-                "directional_accuracy",
-                "mae_improvement_vs_no_change_pct",
-                "rmse_improvement_vs_no_change_pct",
-                "mae_improvement_vs_mean_reversion_pct",
-                "rmse_improvement_vs_mean_reversion_pct",
-                "rank_by_mae",
-                "rank_by_rmse",
-            ]
-            st.dataframe(scorecard.loc[:, scorecard_cols], width="stretch")
+            if win_rates.empty:
+                st.info("No aggregate win rates are available for the selected settings.")
+            else:
+                # Presentation-only compact label per (sample, measure, baseline) row so the
+                # grouped bars stay legible; the identity columns are otherwise unchanged.
+                setting_label = win_rates["baseline_method"].astype(str)
+                if len(robustness_inflation_measures) > 1:
+                    setting_label = (
+                        win_rates["inflation_measure_label"].astype(str) + " · " + setting_label
+                    )
+                if len(robustness_sample_modes) > 1:
+                    setting_label = (
+                        win_rates["sample_mode"].map(MODE_LABELS).fillna(win_rates["sample_mode"])
+                        + " · "
+                        + setting_label
+                    )
+                win_rates_plot = win_rates.assign(setting_label=setting_label)
 
-            st.markdown("#### TINF/regime verdict across settings")
-            verdict_cols = [
-                "sample_mode",
-                "inflation_measure_label",
-                "fred_series_id",
-                "paper_exact",
-                "baseline_method",
-                "baseline_live_safe",
-                "baseline_label",
-                "horizon_months",
-                "threshold_pp",
-                "count",
-                "tinf_mae",
-                "tinf_rmse",
-                "tinf_directional_accuracy",
-                "tinf_rank_by_mae",
-                "tinf_rank_by_rmse",
-                "beats_no_change_mae",
-                "beats_no_change_rmse",
-                "beats_mean_reversion_mae",
-                "beats_mean_reversion_rmse",
-                "beats_ar1_mae",
-                "beats_ar1_rmse",
-            ]
-            st.dataframe(verdict.loc[:, verdict_cols], width="stretch")
+                st.markdown("#### TINF/regime win rates by setting")
+                st.caption(
+                    "How often TINF/regime beats each naive baseline across the fixed "
+                    "horizon×threshold grid, per setting. The dotted line marks 50% (wins as often "
+                    "as it loses); bars above it favor TINF. Same rates as the table below."
+                )
+                win_col1, win_col2 = st.columns(2)
+                with win_col1:
+                    st.plotly_chart(
+                        plots_mod.hit_rate_bar_figure(
+                            win_rates_plot,
+                            "setting_label",
+                            WIN_RATE_SPECS_MAE,
+                            title="Win rate by setting — MAE",
+                            yaxis_title="Win rate",
+                            reference=0.5,
+                        ),
+                        width="stretch",
+                    )
+                with win_col2:
+                    st.plotly_chart(
+                        plots_mod.hit_rate_bar_figure(
+                            win_rates_plot,
+                            "setting_label",
+                            WIN_RATE_SPECS_RMSE,
+                            title="Win rate by setting — RMSE",
+                            yaxis_title="Win rate",
+                            reference=0.5,
+                        ),
+                        width="stretch",
+                    )
+                with st.expander("Aggregate win-rate table"):
+                    st.caption(
+                        "Win rates summarize how often TINF/regime beats each benchmark across the "
+                        "visible horizon and threshold grid. They are diagnostics, not a setting "
+                        "selection rule."
+                    )
+                    st.dataframe(win_rates, width="stretch")
 
-            st.markdown("#### Aggregate TINF/regime win rates")
-            st.caption(
-                "Win rates summarize how often TINF/regime beats each benchmark across the "
-                "visible horizon and threshold grid. They are diagnostics, not a setting "
-                "selection rule."
-            )
-            st.dataframe(win_rates, width="stretch")
+            with st.expander("Robustness scorecard (all models × settings)"):
+                scorecard_cols = [
+                    "sample_mode",
+                    "inflation_measure_label",
+                    "fred_series_id",
+                    "paper_exact",
+                    "baseline_method",
+                    "baseline_live_safe",
+                    "baseline_label",
+                    "model",
+                    "horizon_months",
+                    "threshold_pp",
+                    "count",
+                    "mae",
+                    "rmse",
+                    "directional_accuracy",
+                    "mae_improvement_vs_no_change_pct",
+                    "rmse_improvement_vs_no_change_pct",
+                    "mae_improvement_vs_mean_reversion_pct",
+                    "rmse_improvement_vs_mean_reversion_pct",
+                    "rank_by_mae",
+                    "rank_by_rmse",
+                ]
+                st.dataframe(scorecard.loc[:, scorecard_cols], width="stretch")
+
+            with st.expander("TINF/regime verdict across settings"):
+                verdict_cols = [
+                    "sample_mode",
+                    "inflation_measure_label",
+                    "fred_series_id",
+                    "paper_exact",
+                    "baseline_method",
+                    "baseline_live_safe",
+                    "baseline_label",
+                    "horizon_months",
+                    "threshold_pp",
+                    "count",
+                    "tinf_mae",
+                    "tinf_rmse",
+                    "tinf_directional_accuracy",
+                    "tinf_rank_by_mae",
+                    "tinf_rank_by_rmse",
+                    "beats_no_change_mae",
+                    "beats_no_change_rmse",
+                    "beats_mean_reversion_mae",
+                    "beats_mean_reversion_rmse",
+                    "beats_ar1_mae",
+                    "beats_ar1_rmse",
+                ]
+                st.dataframe(verdict.loc[:, verdict_cols], width="stretch")
 
     st.subheader("Baseline robustness quick comparison")
     rows = []
@@ -1815,7 +1935,12 @@ with tab_robustness:
                     ),
                 }
             )
-    st.dataframe(pd.DataFrame(rows), width="stretch")
+    baseline_quick = pd.DataFrame(rows)
+    st.caption(
+        "Regime cells are tinted hot (above baseline) or cold (disinflationary) so agreement "
+        "across baselines reads at a glance; the underlying values are unchanged."
+    )
+    st.dataframe(style_regime_cells(baseline_quick), width="stretch")
     section_notes(
         "Whether today's signal survives changing the baseline definition: the latest snapshot "
         "(date, TINF 4M, percentile, regime, short-term pressure) recomputed under every baseline, "
