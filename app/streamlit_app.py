@@ -59,10 +59,21 @@ if not hasattr(market_linkage_mod, "build_market_linkage_tables") or not hasattr
     "channel_regime_summary",
 ):
     market_linkage_mod = importlib.reload(market_linkage_mod)
-if not hasattr(plots_mod, "forward_change_range_figure") or not hasattr(
-    plots_mod,
+_REQUIRED_PLOT_ATTRS = (
+    "HOT",
+    "COLD",
+    "NEUTRAL",
     "cpi_vs_baseline_figure",
-):
+    "tinf_term_structure_figure",
+    "hit_rate_bar_figure",
+    "threshold_sensitivity_figure",
+    "heatmap_figure",
+    "forward_change_by_regime_channel_figure",
+    "forward_change_range_figure",
+    "rolling_rho_figure",
+    "decay_curve_figure",
+)
+if not all(hasattr(plots_mod, attr) for attr in _REQUIRED_PLOT_ATTRS):
     plots_mod = importlib.reload(plots_mod)
 if not hasattr(report_mod, "build_macro_research_report") or not hasattr(
     report_mod,
@@ -296,6 +307,14 @@ MARKET_RANKING_COLUMNS = [
     "decrease_hit_rate",
     "weak_evidence",
 ]
+# Validation outcome rates to chart, as (column, label, hot/cold color). These are
+# existing forward-outcome rates: resolved (faded -> cold), baseline convergence
+# (neutral), persisted (still elevated -> hot). Presentation only.
+VALIDATION_RATE_SPECS = (
+    ("positive_shock_resolution_rate", "Positive-shock resolved", plots_mod.COLD),
+    ("baseline_normalization_hit_rate", "Baseline convergence", plots_mod.NEUTRAL),
+    ("positive_shock_persistent_rate", "Positive-shock persisted", plots_mod.HOT),
+)
 
 with st.sidebar:
     st.header("Configuration")
@@ -600,29 +619,42 @@ with tab_signal:
 
 with tab_validation:
     st.subheader("Historical Signal Validation")
-    st.markdown(
-        "This tab tests whether the current-month signal historically contained forward information. "
-        "Future CPI outcomes are used only for validation, not signal construction."
+    section_notes(
+        "Did the current-month signal historically contain forward information? Future CPI "
+        "outcomes are used only for validation here, never for signal construction.",
+        "Read the bars as historical outcome rates per bucket, the line as their sensitivity to "
+        "the outcome threshold, and the heatmap as regime persistence. Small buckets give "
+        "unstable rates, and Phase 2 benchmark comparison is still needed before treating these "
+        "as forecast skill.",
     )
-    st.warning(
-        "Historical validation is live-like only under rolling_36_shifted or expanding_shifted baselines."
-    )
-    st.warning("full_sample is ex-post and should not be used to judge live signal success.")
-    st.markdown(
-        "Positive-shock resolution asks whether above-baseline inflation pressure faded. "
-        "If epsilon moves from positive to negative, the high-inflation shock resolved and "
-        "overshot lower."
-    )
-    st.markdown(
-        "Absolute baseline convergence asks whether inflation ended close to baseline, "
-        "regardless of direction. A negative overshoot may fail this test because inflation "
-        "is still far from baseline, but it is not persistent high inflation."
-    )
-    st.markdown(
-        "For trading interpretation, positive-shock resolution is usually more actionable. "
-        "For equilibrium or policy-stability interpretation, absolute baseline convergence "
-        "remains useful. Counts matter: small groups can produce unstable hit rates, and "
-        "Phase 2 benchmark comparison is still needed before treating hit rates as signal skill."
+    with st.expander("How to read this tab"):
+        st.markdown(
+            "This tab tests whether the current-month signal historically contained forward "
+            "information. Future CPI outcomes are used only for validation, not signal construction."
+        )
+        st.markdown(
+            "Positive-shock resolution asks whether above-baseline inflation pressure faded. "
+            "If epsilon moves from positive to negative, the high-inflation shock resolved and "
+            "overshot lower."
+        )
+        st.markdown(
+            "Absolute baseline convergence asks whether inflation ended close to baseline, "
+            "regardless of direction. A negative overshoot may fail this test because inflation "
+            "is still far from baseline, but it is not persistent high inflation."
+        )
+        st.markdown(
+            "For trading interpretation, positive-shock resolution is usually more actionable. "
+            "For equilibrium or policy-stability interpretation, absolute baseline convergence "
+            "remains useful. Counts matter: small groups can produce unstable hit rates, and "
+            "Phase 2 benchmark comparison is still needed before treating hit rates as signal skill."
+        )
+    scope_caveats(
+        "Historical validation is live-like only under shifted baselines; full_sample is ex-post.",
+        (
+            "Historical validation is live-like only under rolling_36_shifted or expanding_shifted "
+            "baselines.",
+            "full_sample is ex-post and should not be used to judge live signal success.",
+        ),
     )
 
     control_col1, control_col2, control_col3 = st.columns(3)
@@ -689,74 +721,146 @@ with tab_validation:
     )
     st.dataframe(combined_summary, width="stretch")
 
-    st.markdown("#### Selected summary")
-    if validation_group == "regime":
+    st.markdown(f"#### Outcome rates by bucket ({validation_horizon} months)")
+    st.caption(
+        "Bars show three historical outcome rates per bucket at the selected horizon: "
+        "positive-shock resolved (cold), baseline convergence (gray), and positive-shock "
+        "persisted (hot). Same rates as the tables below; small buckets give unstable rates."
+    )
+    rate_chart_col1, rate_chart_col2 = st.columns(2)
+    with rate_chart_col1:
+        st.plotly_chart(
+            plots_mod.hit_rate_bar_figure(
+                regime_summary,
+                "historical_regime",
+                VALIDATION_RATE_SPECS,
+                title="By regime",
+                group_order=validation_mod.REGIME_ORDER,
+            ),
+            width="stretch",
+        )
+    with rate_chart_col2:
+        st.plotly_chart(
+            plots_mod.hit_rate_bar_figure(
+                pressure_summary,
+                "historical_short_term_pressure",
+                VALIDATION_RATE_SPECS,
+                title="By short-term pressure",
+                group_order=validation_mod.PRESSURE_ORDER,
+            ),
+            width="stretch",
+        )
+    with st.expander("Outcome rate tables (selected, by regime, by short-term pressure)"):
+        st.markdown("##### Selected summary")
+        if validation_group == "regime":
+            st.dataframe(regime_summary, width="stretch")
+        else:
+            st.dataframe(pressure_summary, width="stretch")
+
+        st.markdown("##### Forward outcome summary by regime")
         st.dataframe(regime_summary, width="stretch")
-    else:
+
+        st.markdown("##### Forward outcome summary by short-term pressure")
         st.dataframe(pressure_summary, width="stretch")
-
-    st.markdown("#### Forward outcome summary by regime")
-    st.dataframe(regime_summary, width="stretch")
-
-    st.markdown("#### Forward outcome summary by short-term pressure")
-    st.dataframe(pressure_summary, width="stretch")
 
     st.markdown(f"#### Threshold sensitivity ({validation_horizon} months)")
     st.caption(
-        "This table recomputes outcome labels at fixed thresholds of 0.25, 0.50, 0.75, "
+        "This recomputes outcome labels at fixed thresholds of 0.25, 0.50, 0.75, "
         "and 1.00 pp. It is sensitivity analysis only, not threshold optimization. Phase 2 "
         "benchmark comparison is still required before treating hit rates as forecast skill."
     )
-    st.dataframe(sensitivity_summary, width="stretch")
+    if sensitivity_summary.empty:
+        st.info("No threshold-sensitivity rows are available for the selected horizon.")
+    else:
+        st.plotly_chart(
+            plots_mod.threshold_sensitivity_figure(
+                sensitivity_summary,
+                VALIDATION_RATE_SPECS,
+                title=f"Outcome rates vs threshold ({validation_horizon} months)",
+            ),
+            width="stretch",
+        )
+        with st.expander("Threshold sensitivity table"):
+            st.dataframe(sensitivity_summary, width="stretch")
 
     st.markdown(f"#### Regime transition matrix ({validation_horizon} months)")
     transition = validation_mod.regime_transition_matrix(validation_df, horizon=validation_horizon)
     if transition.empty:
         st.info("No valid regime transitions are available for the selected horizon.")
     else:
-        st.dataframe(transition, width="stretch")
+        st.caption(
+            "Each row is the current regime; each column is the regime h months later. Cells are "
+            "row-normalized transition probabilities (each row sums to 1)."
+        )
+        st.plotly_chart(
+            plots_mod.heatmap_figure(
+                transition,
+                title=f"Regime transitions ({validation_horizon} months)",
+                colorscale="Blues",
+                zmin=0.0,
+                zmax=1.0,
+                value_fmt=".0%",
+                colorbar_title="P",
+                xaxis_title="Regime at t+h",
+                yaxis_title="Regime at t",
+                hover_value_label="probability",
+            ),
+            width="stretch",
+        )
+        with st.expander("Regime transition table"):
+            st.dataframe(transition, width="stretch")
 
-    st.markdown("#### False positive / false negative examples")
-    examples = validation_mod.validation_examples(validation_df, horizon=validation_horizon)
-    example_titles = {
-        "false_transitory": (
-            "False transitory: signal suggested fading pressure, but positive inflation shock persisted"
-        ),
-        "false_persistent": (
-            "False persistent: signal suggested persistent pressure, but positive shock resolved"
-        ),
-        "successful_transitory": (
-            "Successful transitory calls: positive shock resolved without downside overshoot"
-        ),
-        "successful_transitory_downside_overshoot": (
-            "Successful transitory with downside overshoot: positive shock resolved below baseline"
-        ),
-        "successful_persistent": "Successful persistent calls: positive shock stayed above threshold",
-    }
-    for key, title in example_titles.items():
-        st.markdown(f"##### {title}")
-        table = examples[key]
-        if table.empty:
-            st.info("No examples found under the current settings.")
-        else:
-            st.dataframe(table, width="stretch")
+    with st.expander("Worked examples — false / successful positives & negatives"):
+        st.caption(
+            "Audit trail: representative months behind the rates above, capped per category."
+        )
+        examples = validation_mod.validation_examples(validation_df, horizon=validation_horizon)
+        example_titles = {
+            "false_transitory": (
+                "False transitory: signal suggested fading pressure, but positive inflation shock persisted"
+            ),
+            "false_persistent": (
+                "False persistent: signal suggested persistent pressure, but positive shock resolved"
+            ),
+            "successful_transitory": (
+                "Successful transitory calls: positive shock resolved without downside overshoot"
+            ),
+            "successful_transitory_downside_overshoot": (
+                "Successful transitory with downside overshoot: positive shock resolved below baseline"
+            ),
+            "successful_persistent": "Successful persistent calls: positive shock stayed above threshold",
+        }
+        for key, title in example_titles.items():
+            st.markdown(f"##### {title}")
+            table = examples[key]
+            if table.empty:
+                st.info("No examples found under the current settings.")
+            else:
+                st.dataframe(table, width="stretch")
 
 with tab_market_linkage:
     st.subheader("Phase 4A Market Linkage")
-    st.markdown(
-        "This tab links the already-built inflation signal to FRED Treasury yield, "
-        "breakeven, and real-yield history. It is descriptive historical evidence only."
+    section_notes(
+        "How did FRED Treasury yields, breakevens, and real yields historically move after each "
+        "inflation-signal state? This links the already-built signal to market history as "
+        "descriptive evidence only.",
+        "Read the grouped bars as the average forward change (bp) by regime per channel and the "
+        "heatmap as signal-vs-future-change correlation. A positive change means the rate rose "
+        "after the signal date — descriptive history, not a forecast or trade.",
     )
-    st.warning(
-        "This is not a trading signal, not a forecast model, and not a model-generated "
-        "trade recommendation. It summarizes how selected FRED rates changed after past "
-        "TINF/regime states."
-    )
-    st.markdown(
-        "- This is descriptive market linkage, not a trading signal.\n"
-        "- A positive forward change means the market variable rose after the signal date.\n"
-        "- Nominal yields, breakevens, and real yields measure different channels.\n"
-        "- Market linkage may be useful even if TINF/regime is not the best CPI point-forecast model."
+    scope_caveats(
+        "Descriptive historical market linkage only — not a trading signal or forecast.",
+        (
+            "This tab links the already-built inflation signal to FRED Treasury yield, breakeven, "
+            "and real-yield history. It is descriptive historical evidence only.",
+            "This is not a trading signal, not a forecast model, and not a model-generated trade "
+            "recommendation. It summarizes how selected FRED rates changed after past TINF/regime "
+            "states.",
+            "This is descriptive market linkage, not a trading signal.",
+            "A positive forward change means the market variable rose after the signal date.",
+            "Nominal yields, breakevens, and real yields measure different channels.",
+            "Market linkage may be useful even if TINF/regime is not the best CPI point-forecast model.",
+        ),
     )
     market_linkage_horizon_label = st.selectbox(
         "Market linkage horizon",
@@ -802,12 +906,12 @@ with tab_market_linkage:
     )
 
     availability = market_data_mod.market_data_availability(market_result.data)
-    st.markdown("#### Market data availability")
-    st.caption(
-        "FRED real-yield and breakeven histories start later than CPI history. Counts are "
-        "reported by variable rather than forced to match the inflation sample."
-    )
-    st.dataframe(availability, width="stretch")
+    with st.expander("Market data availability"):
+        st.caption(
+            "FRED real-yield and breakeven histories start later than CPI history. Counts are "
+            "reported by variable rather than forced to match the inflation sample."
+        )
+        st.dataframe(availability, width="stretch")
 
     if not market_result.available_market_variables:
         st.info("No approved market variables are available for the selected sample.")
@@ -821,10 +925,11 @@ with tab_market_linkage:
         selected_channel_summary = market_tables.channel_summary_by_regime.loc[
             market_tables.channel_summary_by_regime["horizon_months"] == market_linkage_horizon
         ]
-        st.markdown(f"#### Channel interpretation ({market_linkage_horizon_label})")
+        st.markdown(f"#### Forward change by regime per channel ({market_linkage_horizon_label})")
         st.caption(
-            "Channel rows use row-wise averages across the two approved FRED variables in "
-            "each channel: 2Y/10Y nominal yields, 5Y/10Y breakevens, and 5Y/10Y real yields."
+            "Average forward change in basis points by historical regime, grouped by channel "
+            "(nominal 2Y/10Y, 5Y/10Y breakevens, 5Y/10Y real yields). A positive bar means the "
+            "channel's rates rose after that regime; hover for the median and count."
         )
         if selected_channel_summary.empty:
             st.info("No channel summary is available for the selected horizon.")
@@ -833,118 +938,135 @@ with tab_market_linkage:
                 st.warning(
                     "Rows marked weak_evidence=True have fewer than 30 complete observations."
                 )
-            for channel, channel_label in MARKET_CHANNEL_LABELS.items():
-                channel_rows = selected_channel_summary.loc[
-                    selected_channel_summary["market_channel"] == channel
-                ].copy()
-                st.markdown(f"##### {channel_label}")
-                if channel_rows.empty:
-                    st.info(f"No {channel_label.lower()} summary is available.")
-                else:
-                    st.dataframe(
-                        channel_rows.loc[
-                            :,
-                            [
-                                column
-                                for column in MARKET_CHANNEL_INTERPRETATION_COLUMNS
-                                if column in channel_rows.columns
-                            ],
-                        ],
-                        width="stretch",
-                    )
-
-            st.markdown("#### What historically happened?")
-            what_happened = selected_channel_summary.copy()
-            what_happened["market_channel"] = (
-                what_happened["market_channel"]
-                .map(MARKET_CHANNEL_LABELS)
-                .fillna(what_happened["market_channel"])
-            )
-            what_happened_cols = [
-                "historical_regime",
-                "market_channel",
-                "historical_direction",
-                "avg_change_bp",
-                "median_change_bp",
-                "count",
-                "weak_evidence",
-                "evidence_note",
-            ]
-            st.dataframe(
-                what_happened.loc[
-                    :,
-                    [column for column in what_happened_cols if column in what_happened.columns],
-                ].sort_values(["market_channel", "historical_regime"]),
+            st.plotly_chart(
+                plots_mod.forward_change_by_regime_channel_figure(
+                    selected_channel_summary,
+                    value_col="avg_change_bp",
+                    channel_labels=MARKET_CHANNEL_LABELS,
+                    regime_order=validation_mod.REGIME_ORDER,
+                    title=f"Avg forward change by regime per channel ({market_linkage_horizon_label})",
+                ),
                 width="stretch",
             )
+
+            with st.expander(f"Channel interpretation tables ({market_linkage_horizon_label})"):
+                st.caption(
+                    "Channel rows use row-wise averages across the two approved FRED variables in "
+                    "each channel: 2Y/10Y nominal yields, 5Y/10Y breakevens, and 5Y/10Y real yields."
+                )
+                for channel, channel_label in MARKET_CHANNEL_LABELS.items():
+                    channel_rows = selected_channel_summary.loc[
+                        selected_channel_summary["market_channel"] == channel
+                    ].copy()
+                    st.markdown(f"##### {channel_label}")
+                    if channel_rows.empty:
+                        st.info(f"No {channel_label.lower()} summary is available.")
+                    else:
+                        st.dataframe(
+                            channel_rows.loc[
+                                :,
+                                [
+                                    column
+                                    for column in MARKET_CHANNEL_INTERPRETATION_COLUMNS
+                                    if column in channel_rows.columns
+                                ],
+                            ],
+                            width="stretch",
+                        )
+
+                st.markdown("##### What historically happened?")
+                what_happened = selected_channel_summary.copy()
+                what_happened["market_channel"] = (
+                    what_happened["market_channel"]
+                    .map(MARKET_CHANNEL_LABELS)
+                    .fillna(what_happened["market_channel"])
+                )
+                what_happened_cols = [
+                    "historical_regime",
+                    "market_channel",
+                    "historical_direction",
+                    "avg_change_bp",
+                    "median_change_bp",
+                    "count",
+                    "weak_evidence",
+                    "evidence_note",
+                ]
+                st.dataframe(
+                    what_happened.loc[
+                        :,
+                        [column for column in what_happened_cols if column in what_happened.columns],
+                    ].sort_values(["market_channel", "historical_regime"]),
+                    width="stretch",
+                )
 
         selected_rankings = market_tables.regime_pressure_rankings.loc[
             market_tables.regime_pressure_rankings["horizon_months"] == market_linkage_horizon
         ]
-        st.markdown(f"#### Regime x pressure rankings ({market_linkage_horizon_label})")
-        st.caption(
-            "Rankings compare historical_regime x historical_short_term_pressure groups "
-            "within each market variable at the selected horizon."
-        )
-        if selected_rankings.empty:
-            st.info("No regime x pressure rankings are available for the selected horizon.")
-        else:
-            rank_col1, rank_col2 = st.columns(2)
-            with rank_col1:
-                st.markdown("##### Largest average increases")
-                highest_cols = [
-                    "highest_change_rank",
-                    *MARKET_RANKING_COLUMNS,
-                ]
-                st.dataframe(
-                    selected_rankings.sort_values(["highest_change_rank", "market_variable"])
-                    .head(12)
-                    .loc[
-                        :,
-                        [column for column in highest_cols if column in selected_rankings.columns],
-                    ],
-                    width="stretch",
-                )
-            with rank_col2:
-                st.markdown("##### Largest average decreases")
-                lowest_cols = [
-                    "lowest_change_rank",
-                    *MARKET_RANKING_COLUMNS,
-                ]
-                st.dataframe(
-                    selected_rankings.sort_values(["lowest_change_rank", "market_variable"])
-                    .head(12)
-                    .loc[
-                        :,
-                        [column for column in lowest_cols if column in selected_rankings.columns],
-                    ],
-                    width="stretch",
-                )
-
-        st.markdown("#### Forward market-change summary by historical regime")
-        st.caption(
-            "Changes are t to t+h in basis points. Rows without full future market data "
-            "for that variable and horizon are excluded."
-        )
-        if market_tables.summary_by_regime.empty:
-            st.info("No regime summary is available with the current market data.")
-        else:
-            st.dataframe(market_tables.summary_by_regime, width="stretch")
-
-        st.markdown("#### Forward market-change summary by short-term pressure")
-        if market_tables.summary_by_pressure.empty:
-            st.info("No short-term pressure summary is available with the current market data.")
-        else:
-            st.dataframe(market_tables.summary_by_pressure, width="stretch")
-
-        st.markdown("#### Combined regime x short-term pressure")
-        if market_tables.summary_by_regime_and_pressure.empty:
-            st.info("No combined regime x pressure summary is available.")
-        else:
-            st.dataframe(
-                market_tables.summary_by_regime_and_pressure,
-                width="stretch",
+        with st.expander(f"Regime x pressure rankings ({market_linkage_horizon_label})"):
+            st.caption(
+                "Rankings compare historical_regime x historical_short_term_pressure groups "
+                "within each market variable at the selected horizon."
             )
+            if selected_rankings.empty:
+                st.info("No regime x pressure rankings are available for the selected horizon.")
+            else:
+                rank_col1, rank_col2 = st.columns(2)
+                with rank_col1:
+                    st.markdown("##### Largest average increases")
+                    highest_cols = [
+                        "highest_change_rank",
+                        *MARKET_RANKING_COLUMNS,
+                    ]
+                    st.dataframe(
+                        selected_rankings.sort_values(["highest_change_rank", "market_variable"])
+                        .head(12)
+                        .loc[
+                            :,
+                            [column for column in highest_cols if column in selected_rankings.columns],
+                        ],
+                        width="stretch",
+                    )
+                with rank_col2:
+                    st.markdown("##### Largest average decreases")
+                    lowest_cols = [
+                        "lowest_change_rank",
+                        *MARKET_RANKING_COLUMNS,
+                    ]
+                    st.dataframe(
+                        selected_rankings.sort_values(["lowest_change_rank", "market_variable"])
+                        .head(12)
+                        .loc[
+                            :,
+                            [column for column in lowest_cols if column in selected_rankings.columns],
+                        ],
+                        width="stretch",
+                    )
+
+        with st.expander("Forward market-change summary tables (by regime / pressure / combined)"):
+            st.markdown("##### Forward market-change summary by historical regime")
+            st.caption(
+                "Changes are t to t+h in basis points. Rows without full future market data "
+                "for that variable and horizon are excluded."
+            )
+            if market_tables.summary_by_regime.empty:
+                st.info("No regime summary is available with the current market data.")
+            else:
+                st.dataframe(market_tables.summary_by_regime, width="stretch")
+
+            st.markdown("##### Forward market-change summary by short-term pressure")
+            if market_tables.summary_by_pressure.empty:
+                st.info("No short-term pressure summary is available with the current market data.")
+            else:
+                st.dataframe(market_tables.summary_by_pressure, width="stretch")
+
+            st.markdown("##### Combined regime x short-term pressure")
+            if market_tables.summary_by_regime_and_pressure.empty:
+                st.info("No combined regime x pressure summary is available.")
+            else:
+                st.dataframe(
+                    market_tables.summary_by_regime_and_pressure,
+                    width="stretch",
+                )
 
         st.markdown("#### Signal-to-future-market-change correlations")
         st.caption(
@@ -954,7 +1076,52 @@ with tab_market_linkage:
         if market_tables.correlations.empty:
             st.info("No correlations are available with the current market data.")
         else:
-            st.dataframe(market_tables.correlations, width="stretch")
+            # Display reshape only: pivot the already-computed correlations for the
+            # selected horizon into a signal x market grid (values unchanged).
+            selected_corr = market_tables.correlations.loc[
+                market_tables.correlations["horizon_months"] == market_linkage_horizon
+            ]
+            if selected_corr.empty:
+                st.info("No correlations are available for the selected horizon.")
+            else:
+                corr_wide = selected_corr.pivot(
+                    index="signal_variable", columns="market_variable", values="correlation"
+                )
+                signal_order = [
+                    column
+                    for column in market_linkage_mod.DEFAULT_SIGNAL_COLUMNS
+                    if column in corr_wide.index
+                ]
+                market_order = [
+                    column
+                    for column in market_data_mod.MARKET_VALUE_COLUMNS
+                    if column in corr_wide.columns
+                ]
+                corr_wide = corr_wide.reindex(
+                    index=signal_order or None, columns=market_order or None
+                )
+                st.plotly_chart(
+                    plots_mod.heatmap_figure(
+                        corr_wide,
+                        title=(
+                            "Signal vs future market-change correlation "
+                            f"({market_linkage_horizon_label})"
+                        ),
+                        colorscale="RdBu",
+                        reversescale=True,
+                        zmid=0.0,
+                        zmin=-1.0,
+                        zmax=1.0,
+                        value_fmt=".2f",
+                        colorbar_title="r",
+                        xaxis_title="Market variable",
+                        yaxis_title="Signal",
+                        hover_value_label="correlation",
+                    ),
+                    width="stretch",
+                )
+            with st.expander("Correlation table (all horizons)"):
+                st.dataframe(market_tables.correlations, width="stretch")
 
 
 with tab_trader_research:

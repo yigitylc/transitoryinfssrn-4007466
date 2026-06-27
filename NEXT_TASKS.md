@@ -1,26 +1,35 @@
 # Next Tasks
 
-**Active gate: Dashboard UI/UX Polish — batch 1 DONE (committed `affbb0a`, NOT pushed), batch 2
-NEXT.** See `docs/DASHBOARD_UI_POLISH_PLAN.md` for the full plan and `ACTIVE_HANDOFF.md` §1/§4/§5
-for status.
+**Active gate: Dashboard UI/UX Polish — batch 1 committed (`affbb0a`, NOT pushed), batch 2 DONE
+(working tree, UNCOMMITTED — needs review/commit approval), batch 3 NEXT.** See
+`docs/DASHBOARD_UI_POLISH_PLAN.md` for the full plan and `ACTIVE_HANDOFF.md` §1/§4/§5 for status.
 
-Batch 1 ("Foundation + flagship") is committed as `affbb0a` (presentation-only; **no methodology,
-numbers, series, or logic changed**); local `main` is ahead of `origin/main` by `affbb0a` + the
-handoff refresh until pushed (`git push origin main` needs approval):
-- C1 shared Plotly theme `apply_macro_theme()` in `plots.py`; all 5 figures routed through it.
-- C2 glossary (`render_glossary`) + C5 sidebar "Current reading" mini-status.
-- Tab 1 Current Macro Signal rebuilt: headline, colored regime badge, semantic-delta cards,
-  epsilon-shaded CPI chart, zone-tinted TINF chart.
-- Tab 5 Trader Research: new `forward_change_range_figure()` range plot + bucket metric cards;
-  `section_notes` + `scope_caveats()` applied as the reusable C3/C4 template.
+Batch 2 ("table-heavy tabs") is implemented in the working tree (presentation-only; **no
+methodology, numbers, series, or logic changed**; every caveat's text preserved, only relocated
+into expanders). Touches `src/transitory_inflation/plots.py`, `app/streamlit_app.py`,
+`tests/test_plots.py`:
+- **Validation tab:** hit-rate bars by regime + by short-term pressure, a threshold-sensitivity
+  line chart, and a regime-transition heatmap; worked-example tables, rate tables, and the
+  sensitivity/transition tables moved behind expanders; intro folded into `section_notes` + a
+  "How to read this tab" expander + `scope_caveats()`.
+- **Market Linkage tab:** grouped forward-change bars (bp) by regime per channel and a
+  signal-vs-market correlation heatmap; availability / rankings / per-channel detail / forward
+  summary tables behind expanders; the stacked disclaimers folded into one "Scope & caveats".
+- **Four new figures in `plots.py`** (`hit_rate_bar_figure`, `threshold_sensitivity_figure`,
+  `heatmap_figure`, `forward_change_by_regime_channel_figure`), each with a return-type +
+  trace-count + empty-frame test (mirroring `forward_change_range_figure`).
 
-Gates: ruff clean · pytest **104 passed** (101 prior + 3 new plot tests) · compileall OK ·
-offline `AppTest` smoke renders all 9 tabs, 0 exceptions.
+Batch 1 ("Foundation + flagship") is committed as `affbb0a` (shared theme, glossary, rebuilt
+Current Macro Signal, Trader Research range plot); local `main` is ahead of `origin/main` until
+pushed (`git push origin main` needs approval).
 
-**Next:** push `affbb0a` + the handoff refresh when approved (`git push origin main`), then
-batch 2 — table-heavy tabs (Validation hit-rate bars / sensitivity line / transition heatmap;
-Market Linkage grouped bars / correlation heatmap / expanders). Reuse the batch-1 template; add a
-return-type + trace-count + empty-frame test per new figure.
+Gates (batch 2): ruff clean · pytest **112 passed** (104 prior + 8 new plot tests) · compileall OK ·
+offline `AppTest` smoke renders all 9 tabs (market seeded + fully-offline), 0 exceptions.
+
+**Next:** review batch 2; when approved, commit it (and push `affbb0a` + batch 2 together). Then
+batch 3 — evidence tabs (Benchmark diverging improvement bars + badges; Robustness win-rate bars,
+conditional formatting, expanders). Reuse the batch-1 template; add a return-type + trace-count +
+empty-frame test per new figure.
 
 ---
 

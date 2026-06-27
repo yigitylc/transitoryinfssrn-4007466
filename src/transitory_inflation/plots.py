@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -287,4 +289,245 @@ def decay_curve_figure(curve: pd.DataFrame) -> go.Figure:
         xaxis_title="Months ahead",
         yaxis_title="Percent",
         hovermode="x unified",
+    )
+
+
+# Batch-2 "table-heavy tab" figures (Validation + Market Linkage). Each plots
+# values the app already computes (validation-summary rates, threshold-sensitivity
+# rates, the regime-transition matrix, channel forward changes, and signal/market
+# correlations) — presentation only, no recomputation of any number or series.
+#
+# Channel categorical colors mirror the TINF-horizon figure's three-way use of the
+# palette (color identifies the channel; it is not a hot/cold sign read here).
+_CHANNEL_COLORS: dict[str, str] = {
+    "nominal_rates": HOT,
+    "breakevens": "#8e44ad",
+    "real_yields": COLD,
+}
+
+
+def hit_rate_bar_figure(
+    summary: pd.DataFrame,
+    group_col: str,
+    rate_specs: Sequence[tuple[str, str, str]],
+    *,
+    title: str | None = None,
+    group_order: Sequence[str] | None = None,
+) -> go.Figure:
+    """Grouped bar chart of historical outcome rates per bucket (regime or
+    short-term pressure). Each ``rate_specs`` entry is ``(column, label, color)``
+    and is drawn as one bar series of the 0-1 rates already in ``summary``, shown
+    as percentages.
+
+    Presentation only — plots existing validation-summary rates, no recomputation.
+    """
+
+    fig = go.Figure()
+    empty_title = (title or "Historical outcome rates") + " — no data"
+    usable = summary is not None and not summary.empty and group_col in summary.columns
+    present_specs = [spec for spec in rate_specs if spec[0] in summary.columns] if usable else []
+    if not present_specs:
+        return apply_macro_theme(fig, title=empty_title, yaxis_title="Historical rate", hovermode="closest")
+
+    data = summary.dropna(subset=[group_col]).copy()
+    data[group_col] = data[group_col].astype(str)
+    for column, label, color in present_specs:
+        fig.add_trace(
+            go.Bar(
+                x=data[group_col],
+                y=pd.to_numeric(data[column], errors="coerce"),
+                name=label,
+                marker_color=color,
+                hovertemplate=f"%{{x}}<br>{label}: %{{y:.0%}}<extra></extra>",
+            )
+        )
+    fig.update_layout(barmode="group")
+    fig.update_yaxes(tickformat=".0%", rangemode="tozero")
+    if group_order is not None:
+        present = set(data[group_col])
+        order = [str(value) for value in group_order if str(value) in present]
+        if order:
+            fig.update_xaxes(categoryorder="array", categoryarray=order)
+    return apply_macro_theme(
+        fig,
+        title=title or "Historical outcome rates by bucket",
+        yaxis_title="Historical rate",
+        hovermode="closest",
+    )
+
+
+def threshold_sensitivity_figure(
+    sensitivity: pd.DataFrame,
+    rate_specs: Sequence[tuple[str, str, str]],
+    *,
+    title: str | None = None,
+) -> go.Figure:
+    """Line chart of historical outcome rates across the fixed sensitivity
+    thresholds (one line per ``rate_specs`` ``(column, label, color)`` entry).
+
+    Presentation only — plots existing threshold-sensitivity rates.
+    """
+
+    fig = go.Figure()
+    empty_title = (title or "Threshold sensitivity") + " — no data"
+    usable = (
+        sensitivity is not None and not sensitivity.empty and "threshold_pp" in sensitivity.columns
+    )
+    present_specs = [spec for spec in rate_specs if spec[0] in sensitivity.columns] if usable else []
+    if not present_specs:
+        return apply_macro_theme(
+            fig, title=empty_title, xaxis_title="Outcome threshold (pp)", yaxis_title="Historical rate"
+        )
+
+    data = sensitivity.sort_values("threshold_pp")
+    x = pd.to_numeric(data["threshold_pp"], errors="coerce")
+    for column, label, color in present_specs:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=pd.to_numeric(data[column], errors="coerce"),
+                name=label,
+                mode="lines+markers",
+                line=dict(color=color, width=2),
+                marker=dict(color=color, size=7),
+                hovertemplate=f"threshold %{{x:.2f}}pp<br>{label}: %{{y:.0%}}<extra></extra>",
+            )
+        )
+    fig.update_yaxes(tickformat=".0%", rangemode="tozero")
+    return apply_macro_theme(
+        fig,
+        title=title or "Outcome rates vs threshold",
+        xaxis_title="Outcome threshold (pp)",
+        yaxis_title="Historical rate",
+        hovermode="x unified",
+    )
+
+
+def heatmap_figure(
+    matrix: pd.DataFrame,
+    *,
+    title: str | None = None,
+    colorscale: str = "RdBu",
+    reversescale: bool = False,
+    zmid: float | None = None,
+    zmin: float | None = None,
+    zmax: float | None = None,
+    value_fmt: str = ".2f",
+    colorbar_title: str | None = None,
+    xaxis_title: str | None = None,
+    yaxis_title: str | None = None,
+    hover_value_label: str = "value",
+) -> go.Figure:
+    """Generic labeled heatmap of a wide ``rows x columns -> z`` matrix. Backs both
+    the regime-transition matrix and the signal-vs-market correlation grid.
+
+    Presentation only — renders an already-computed matrix, never recomputes it.
+    """
+
+    fig = go.Figure()
+    empty_title = (title or "Heatmap") + " — no data"
+    if matrix is None or matrix.empty:
+        return apply_macro_theme(fig, title=empty_title, hovermode="closest")
+
+    fig.add_trace(
+        go.Heatmap(
+            z=matrix.to_numpy(dtype=float),
+            x=[str(column) for column in matrix.columns],
+            y=[str(index) for index in matrix.index],
+            colorscale=colorscale,
+            reversescale=reversescale,
+            zmid=zmid,
+            zmin=zmin,
+            zmax=zmax,
+            texttemplate=f"%{{z:{value_fmt}}}",
+            textfont=dict(size=11),
+            colorbar=dict(title=dict(text=colorbar_title)) if colorbar_title else None,
+            hovertemplate=(
+                f"%{{y}} → %{{x}}<br>{hover_value_label}: %{{z:{value_fmt}}}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_yaxes(autorange="reversed")
+    return apply_macro_theme(
+        fig, title=title, xaxis_title=xaxis_title, yaxis_title=yaxis_title, hovermode="closest"
+    )
+
+
+def forward_change_by_regime_channel_figure(
+    channel_summary: pd.DataFrame,
+    *,
+    value_col: str = "avg_change_bp",
+    channel_labels: dict[str, str] | None = None,
+    regime_order: Sequence[str] | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Grouped bar chart of forward rate change (bp) by historical regime, one bar
+    series per market channel (nominal / breakevens / real yields).
+
+    Presentation only — plots existing channel-summary forward changes.
+    """
+
+    fig = go.Figure()
+    empty_title = (title or "Forward change by regime per channel") + " — no data"
+    required = {"market_channel", "historical_regime", value_col}
+    usable = (
+        channel_summary is not None
+        and not channel_summary.empty
+        and required.issubset(channel_summary.columns)
+    )
+    data = channel_summary.dropna(subset=["historical_regime"]).copy() if usable else pd.DataFrame()
+    if data.empty:
+        return apply_macro_theme(
+            fig, title=empty_title, yaxis_title="Forward change, basis points", hovermode="closest"
+        )
+
+    data["historical_regime"] = data["historical_regime"].astype(str)
+    labels = channel_labels or {}
+    has_median = "median_change_bp" in data.columns
+    has_count = "count" in data.columns
+    # Stable channel order: nominal, breakevens, real yields, then any extras.
+    channels = set(data["market_channel"])
+    channel_keys = [key for key in _CHANNEL_COLORS if key in channels]
+    channel_keys += [key for key in data["market_channel"].unique() if key not in channel_keys]
+
+    for channel in channel_keys:
+        sub = data.loc[data["market_channel"] == channel]
+        if sub.empty:
+            continue
+        label = labels.get(channel, str(channel).replace("_", " ").title())
+        median = sub["median_change_bp"] if has_median else sub[value_col]
+        count = sub["count"] if has_count else pd.Series([np.nan] * len(sub), index=sub.index)
+        customdata = np.column_stack(
+            [
+                pd.to_numeric(median, errors="coerce").to_numpy(),
+                pd.to_numeric(count, errors="coerce").to_numpy(),
+            ]
+        )
+        fig.add_trace(
+            go.Bar(
+                x=sub["historical_regime"],
+                y=pd.to_numeric(sub[value_col], errors="coerce"),
+                name=label,
+                marker_color=_CHANNEL_COLORS.get(channel, NEUTRAL),
+                customdata=customdata,
+                hovertemplate=(
+                    f"%{{x}} · {label}<br>"
+                    "Avg: %{y:.1f} bp<br>"
+                    "Median: %{customdata[0]:.1f} bp<br>"
+                    "n=%{customdata[1]:.0f}<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(barmode="group")
+    fig.add_hline(y=0, line_dash="dot", line_color=NEUTRAL)
+    if regime_order is not None:
+        order = [str(regime) for regime in regime_order if str(regime) in set(data["historical_regime"])]
+        if order:
+            fig.update_xaxes(categoryorder="array", categoryarray=order)
+    return apply_macro_theme(
+        fig,
+        title=title or "Forward change by regime per channel",
+        yaxis_title="Forward change, basis points",
+        hovermode="closest",
     )
