@@ -1535,48 +1535,86 @@ with tab_report:
             )
         st.markdown(f"**{report.headline}**")
 
+        # Executive read: reuse tab 1's snapshot-card pattern over the same
+        # latest_signal_snapshot values the report builder uses internally, so the
+        # headline + current regime read as cards instead of prose. Presentation
+        # only — no number changes.
+        report_snapshot = latest_signal_snapshot(df)
+        if report_snapshot.get("available"):
+            st.markdown(
+                f"**Regime:** {regime_badge(report_snapshot['regime'])}  |  "
+                f"**Short-term pressure:** "
+                f"{validation_mod.pressure_label(report_snapshot['term_structure'])}  |  "
+                f"**As of:** {pd.to_datetime(report_snapshot['date']).date()}"
+            )
+            r_eps = float(report_snapshot["epsilon"])
+            r_pct = float(report_snapshot["tinf_4m_percentile"])
+            rcol1, rcol2, rcol3, rcol4 = st.columns(4)
+            # delta_color="off": regime reads (hot/cold), not good/bad outcomes.
+            rcol1.metric(
+                "CPI YoY", f"{report_snapshot['inflation_yoy']:.2f}%",
+                delta=f"{r_eps:+.2f}pp vs baseline", delta_color="off",
+            )
+            rcol2.metric("Baseline", f"{report_snapshot['baseline']:.2f}%")
+            rcol3.metric("TINF 4M", f"{report_snapshot['tinf_4m']:.2f} pp")
+            rcol4.metric(
+                "TINF 4M Percentile", f"{r_pct:.1f}%",
+                delta=f"{r_pct - 50:+.0f} vs median", delta_color="off",
+            )
+
+        st.divider()
         st.markdown("#### 1. Current Regime")
         st.markdown("\n".join(f"- {line}" for line in report.current_regime_lines))
         if not report.current_regime_table.empty:
-            st.dataframe(report.current_regime_table, width="stretch")
+            with st.expander("Current regime detail"):
+                st.dataframe(report.current_regime_table, width="stretch")
 
+        st.divider()
         st.markdown("#### 2. Signal Confidence")
         st.markdown("\n".join(f"- {line}" for line in report.signal_confidence_lines))
         if not report.benchmark_comparisons.empty:
-            st.dataframe(report.benchmark_comparisons, width="stretch")
+            with st.expander("Benchmark comparison detail"):
+                st.dataframe(report.benchmark_comparisons, width="stretch")
         if not report.benchmark_metrics.empty:
             with st.expander("Benchmark metric detail"):
                 st.dataframe(report.benchmark_metrics, width="stretch")
 
+        st.divider()
         st.markdown("#### 3. Robustness Summary")
         st.markdown("\n".join(f"- {line}" for line in report.robustness_lines))
         if not report.inflation_measure_availability.empty:
-            st.markdown("##### Inflation measure availability")
-            st.dataframe(report.inflation_measure_availability, width="stretch")
+            with st.expander("Inflation measure availability"):
+                st.dataframe(report.inflation_measure_availability, width="stretch")
         if not report.robustness_win_rates.empty:
-            st.markdown("##### Aggregate TINF/regime win rates")
-            st.dataframe(report.robustness_win_rates, width="stretch")
+            with st.expander("Aggregate TINF/regime win rates"):
+                st.dataframe(report.robustness_win_rates, width="stretch")
         if not report.robustness_verdict.empty:
             with st.expander("Robustness verdict detail"):
                 st.dataframe(report.robustness_verdict, width="stretch")
 
+        st.divider()
         st.markdown("#### 4. Historical Analogs")
         st.markdown("\n".join(f"- {line}" for line in report.historical_analog_lines))
         if report.historical_analogs.empty:
             st.info("No analog rows are available for the current signal state.")
         else:
-            st.dataframe(report.historical_analogs, width="stretch")
+            with st.expander("Historical analog detail"):
+                st.dataframe(report.historical_analogs, width="stretch")
 
+        st.divider()
         st.markdown("#### 5. Market Linkage Summary")
         st.markdown("\n".join(f"- {line}" for line in report.market_linkage_lines))
         if report.market_channel_summary.empty:
             st.info("No market channel summary is available for this report run.")
         else:
-            st.dataframe(report.market_channel_summary, width="stretch")
+            with st.expander("Market channel detail"):
+                st.dataframe(report.market_channel_summary, width="stretch")
 
+        st.divider()
         st.markdown("#### 6. Caveats / Model Risk")
         st.markdown("\n".join(f"- {line}" for line in report.caveats))
 
+        st.divider()
         st.markdown("#### 7. Watchlist / What to Monitor Next")
         st.markdown("\n".join(f"- {line}" for line in report.watchlist))
 
@@ -1606,7 +1644,26 @@ with tab_framework:
     )
 
     st.subheader("Correlation matrix")
-    st.dataframe(correlation_matrix(df, table_cols), width="stretch")
+    # Render the already-computed correlation matrix as a heatmap (same convention as
+    # the market-linkage correlation grid); keep the numeric table behind an expander.
+    corr = correlation_matrix(df, table_cols)
+    st.plotly_chart(
+        plots_mod.heatmap_figure(
+            corr,
+            title="Paper-framework correlation matrix",
+            colorscale="RdBu",
+            reversescale=True,
+            zmid=0.0,
+            zmin=-1.0,
+            zmax=1.0,
+            value_fmt=".2f",
+            colorbar_title="r",
+            hover_value_label="correlation",
+        ),
+        width="stretch",
+    )
+    with st.expander("Correlation table"):
+        st.dataframe(corr, width="stretch")
     section_notes(
         "How strongly the current YoY inflation level co-moves with each TINF horizon and the "
         "T-bill control, and how the TINF horizons co-move with each other, over the selected "
@@ -1662,6 +1719,25 @@ with tab_decay:
         rho_df, decay_df = decay_summaries_for_windows(
             df, windows=tuple(windows), value_col="tinf_4m"
         )
+
+        # Convergence headline from the first window whose formula is valid, surfaced
+        # as cards before the charts. Presentation only — values are the decay-summary
+        # table's own columns (decay_*_pct are already on a 0-100 scale).
+        valid_decay = decay_df.loc[decay_df["valid_formula"]].copy()
+        if not valid_decay.empty:
+            headline_row = valid_decay.iloc[0]
+            st.caption(
+                f"Convergence headline from the first valid window "
+                f"({int(headline_row['window'])}M)."
+            )
+            dcol1, dcol2, dcol3 = st.columns(3)
+            dcol1.metric("Decayed in 6m", f"{float(headline_row['decay_6m_pct']):.0f}%")
+            dcol2.metric("Decayed in 12m", f"{float(headline_row['decay_12m_pct']):.0f}%")
+            dcol3.metric(
+                "Time to 95% (t*)", f"{float(headline_row['t_star_months']):.0f} mo",
+                delta=f"{float(headline_row['t_star_years']):.1f} yr", delta_color="off",
+            )
+
         st.plotly_chart(plots_mod.rolling_rho_figure(rho_df), width="stretch")
         section_notes(
             "How persistent the transitory component has been through time: the AR(1) coefficient "
@@ -1691,7 +1767,7 @@ with tab_decay:
             "window you quote.",
         )
 
-        valid_decay = decay_df.loc[decay_df["valid_formula"]].copy()
+        # Reuse the valid-window frame computed above for the cards (no recompute).
         if not valid_decay.empty:
             selected_row = valid_decay.iloc[0]
             curve = decay_curve(float(selected_row["rho_T"]), float(selected_row["mu"]), months=48)
