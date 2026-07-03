@@ -10,6 +10,7 @@ from transitory_inflation.validation import (
     add_walk_forward_regime_labels,
     forward_outcome_summary_by_regime,
     forward_outcome_summary_by_regime_and_pressure,
+    forward_outcome_summary_by_short_term_pressure,
     regime_transition_matrix,
     threshold_sensitivity_summary,
     validation_examples,
@@ -181,6 +182,27 @@ def test_summary_excludes_rows_without_future_data_for_horizon() -> None:
     assert summary.loc[0, "count"] == 4
     assert "positive_shock_resolution_rate" in summary.columns
     assert "absolute_gap_persistent_rate" in summary.columns
+
+
+def test_single_key_summary_labels_are_plain_strings() -> None:
+    # Regression: pandas 3 groupby with a length-1 list yields 1-tuple keys; the
+    # summary must still emit plain string labels so string-equality filters and
+    # chart category orders keep working.
+    df = _validation_frame(periods=6)
+    df["historical_regime"] = "neutral"
+    df["historical_short_term_pressure"] = "mixed"
+    out = add_forward_outcomes(df, horizons=(2,))
+    out = add_outcome_labels(out, horizons=(2,))
+
+    regime_summary = forward_outcome_summary_by_regime(out, horizons=(2,))
+    pressure_summary = forward_outcome_summary_by_short_term_pressure(out, horizons=(2,))
+
+    assert regime_summary["historical_regime"].map(type).eq(str).all()
+    assert pressure_summary["historical_short_term_pressure"].map(type).eq(str).all()
+    assert not regime_summary.loc[regime_summary["historical_regime"] == "neutral"].empty
+    assert not pressure_summary.loc[
+        pressure_summary["historical_short_term_pressure"] == "mixed"
+    ].empty
 
 
 def test_combined_regime_pressure_summary_uses_historical_columns() -> None:

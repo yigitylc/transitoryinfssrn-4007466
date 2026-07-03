@@ -1,9 +1,19 @@
 # Next Tasks
 
-**Active gate: NONE — the Dashboard UI/UX Polish arc (batches 1–4) is COMPLETE, committed + pushed
-(`origin/main` = the docs-refresh on top of batch-4 feat `0d9ddb3`).** Project returns to
-maintenance. See `docs/DASHBOARD_UI_POLISH_PLAN.md` for the full plan and `ACTIVE_HANDOFF.md`
-§1/§4/§5 for status.
+**Active gate: push the 2026-07-02 audit-fix commit.** A full read-only audit (verdict:
+PASS WITH MINOR FIXES) found one visible bug that was already on `origin/main`: under
+pandas 3 the single-key validation summaries emitted tuple labels (`('neutral',)`), so the
+Validation tab's by-regime / by-pressure bar charts rendered tuple text and dropped the
+intended regime ordering (rates/counts were correct; combined and market-linkage summaries
+were unaffected). The fix commit contains: the one-line `isinstance` guard in
+`validation.py` (mirrors `market_linkage.py`) + a label regression test; removal of the
+app-top `importlib.reload` guard block that UI-polish batch 1 had accidentally reintroduced
+after P2-3 removed it; and this doc refresh. Gates green: ruff · pytest 118 · compileall ·
+offline AppTest smoke. **Awaiting explicit `git push origin main` approval.**
+
+The Dashboard UI/UX Polish arc (batches 1–4) is COMPLETE, committed + pushed. See
+`docs/DASHBOARD_UI_POLISH_PLAN.md` for the full plan and `ACTIVE_HANDOFF.md` §1/§4/§5 for
+status.
 
 Batch 4 ("report + light touches") is committed as `0d9ddb3` and pushed (presentation-only; **no
 methodology, numbers, series, or logic changed**; every caveat's text preserved, only relocated
@@ -53,10 +63,9 @@ Delivered and landed in `cbfb2a0`:
 Checks: ruff clean · pytest **101 passed** (92 prior + 9 new) · compileall OK · offline
 Streamlit `AppTest` smoke renders all 9 tabs incl. Trader Research, 0 exceptions.
 
-The full prior work chain and the Trader Research feature are committed and pushed (`origin/main =
-4b66470`); batch-1 UI polish (`affbb0a`) + this handoff refresh are committed **local-only** and
-await `git push origin main` approval. The active gate is that batch — see the top of this file.
-The only always-untracked path is `.claude/`.
+The full prior work chain — Trader Research (`cbfb2a0`) and UI-polish batches 1–4 through the
+batch-4 docs refresh (`dea3db2`) — is committed and pushed to `origin/main`. The only
+always-untracked path is `.claude/`.
 
 Out of scope until a fresh, separately-scoped decision:
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import sys
 from pathlib import Path
 
@@ -36,67 +35,6 @@ from transitory_inflation.models import (
     run_paper_style_regressions,
     summary_stats,
 )
-
-if (
-    not hasattr(macro_data, "load_macro_data_for_mode_with_status")
-    or not hasattr(macro_data, "latest_valid_observation_date")
-    or not hasattr(macro_data, "date_label")
-    or not hasattr(macro_data, "INFLATION_MEASURES")
-):
-    macro_data = importlib.reload(macro_data)
-if not hasattr(benchmark_mod, "benchmark_comparison_tables") or not hasattr(
-    benchmark_mod,
-    "BENCHMARK_VALIDATION_SIGNATURE_GUARD",
-):
-    benchmark_mod = importlib.reload(benchmark_mod)
-if not hasattr(market_data_mod, "load_market_data_for_mode_with_status") or not hasattr(
-    market_data_mod,
-    "MARKET_FRED_SERIES",
-):
-    market_data_mod = importlib.reload(market_data_mod)
-if not hasattr(market_linkage_mod, "build_market_linkage_tables") or not hasattr(
-    market_linkage_mod,
-    "channel_regime_summary",
-):
-    market_linkage_mod = importlib.reload(market_linkage_mod)
-_REQUIRED_PLOT_ATTRS = (
-    "HOT",
-    "COLD",
-    "NEUTRAL",
-    "cpi_vs_baseline_figure",
-    "tinf_term_structure_figure",
-    "hit_rate_bar_figure",
-    "threshold_sensitivity_figure",
-    "heatmap_figure",
-    "forward_change_by_regime_channel_figure",
-    "forward_change_range_figure",
-    "improvement_diverging_figure",
-    "rolling_rho_figure",
-    "decay_curve_figure",
-)
-if not all(hasattr(plots_mod, attr) for attr in _REQUIRED_PLOT_ATTRS):
-    plots_mod = importlib.reload(plots_mod)
-if not hasattr(report_mod, "build_macro_research_report") or not hasattr(
-    report_mod,
-    "MacroResearchReport",
-):
-    report_mod = importlib.reload(report_mod)
-if (
-    not hasattr(robustness_mod, "robustness_tables")
-    or not hasattr(robustness_mod, "inflation_measure_availability")
-    or not hasattr(robustness_mod, "ROBUSTNESS_BENCHMARK_SIGNATURE_GUARD")
-):
-    robustness_mod = importlib.reload(robustness_mod)
-if not hasattr(trader_research_mod, "build_trader_research_view") or not hasattr(
-    trader_research_mod,
-    "TraderResearchView",
-):
-    trader_research_mod = importlib.reload(trader_research_mod)
-if not hasattr(validation_mod, "pressure_label") or not hasattr(
-    validation_mod,
-    "forward_outcome_summary_by_regime_and_pressure",
-):
-    validation_mod = importlib.reload(validation_mod)
 
 st.set_page_config(page_title="Transitory Inflation Macro Research", layout="wide")
 st.title("Transitory Inflation Macro Research")

@@ -1,6 +1,6 @@
 # ACTIVE HANDOFF - Audit-Fix Cycle
 
-**As of:** 2026-06-27 · **Owner loop:** Dashboard UI/UX polish - batch 4 shipped (`0d9ddb3`); UI-polish arc complete
+**As of:** 2026-07-02 · **Owner loop:** full read-only audit → audit-fix commit (pandas-3 validation labels + app reload guards + doc refresh); awaiting push approval
 
 > **This is a LIVING document.** When a task completes, **update the relevant section
 > in place** (flip status, rewrite "Next action"); do **not** append a running log.
@@ -27,7 +27,27 @@ Project in one line: a Streamlit research tool operationalizing the Peron & Bona
 
 ## 1. Where we are right now (rewrite when state changes)
 
-**Active work: Dashboard UI/UX polish — batch 4 ("report + light touches") is COMMITTED as
+**Active work: 2026-07-02 audit-fix commit — COMMITTED locally, awaiting `git push` approval.**
+A full read-only audit (verdict: PASS WITH MINOR FIXES) found
+one visible bug already on `origin/main`: under **pandas 3**, `groupby(list-of-1)` yields
+1-tuple keys, and `validation._forward_outcome_summary_by_groups` re-wrapped them, so the
+single-key summaries (`forward_outcome_summary_by_regime` / `..._by_short_term_pressure`)
+emitted tuple labels (`('neutral',)`). Impact: Validation-tab by-regime / by-pressure bar
+charts showed tuple text as x-categories and silently dropped `REGIME_ORDER`/`PRESSURE_ORDER`;
+string-equality filters on those frames returned empty. Rates/counts were correct; the combined
+2-key summary and all market-linkage summaries (already guarded) were unaffected. The fix
+mirrors `market_linkage.py`'s `isinstance` guard and adds a label regression test
+(`test_single_key_summary_labels_are_plain_strings`). The same commit deletes the app-top
+`importlib.reload` guard block that batch 1 (`affbb0a`) had accidentally reintroduced after
+P2-3 (`e9462d0`) removed it — two of its conditions referenced dropped `*_SIGNATURE_GUARD`
+attrs and were permanently true, silently re-importing `benchmarks`/`robustness` every rerun —
+plus a doc refresh (this file, `NEXT_TASKS.md`, playbook §2/§3, project-context stage line,
+`.env.example` `BASELINE_METHOD` removal). Gates green: ruff clean · pytest **118 passed** ·
+compileall OK · offline AppTest smoke 0 exceptions with plain-string chart categories asserted.
+
+Previous arc, unchanged below for context:
+
+**Dashboard UI/UX polish — batch 4 ("report + light touches") is COMMITTED as
 `0d9ddb3` and PUSHED (`origin/main` = the docs-refresh on top of `0d9ddb3`); batches 1–3 preceded
 it, so the UI-polish arc is now COMPLETE.** Presentation-only; **no methodology, numbers, series,
 or logic changed; every caveat's text preserved, only relocated into expanders.** What batch 4
@@ -110,7 +130,7 @@ OK · offline `AppTest` smoke renders all 9 tabs incl. Trader Research, 0 except
 | P1-5 | Orphaned trader layer | **DONE (gated)** | pre-exists in HEAD; kept + future/experimental + not-wired notes on `REGIME_PLAYBOOK` and `build_trader_report`; already un-wired from app |
 | P2-1 | Eager recompute / heavy builders uncached | **DONE** | `@st.cache_data` wrappers in app for benchmarks/validation/threshold-sensitivity/market-linkage/robustness/report; non-hashable status dataclasses excluded via leading-`_` args |
 | P2-2 | Tab order inverts P2->P4 | **DONE** | Benchmarks now precede Market Linkage in `st.tabs(...)` (handles + labels swapped; `with`-blocks unchanged, routed by handle) |
-| P2-3 | `importlib.reload` guards | **DONE** | removed app-top guards + inline guards in `benchmarks.py`/`robustness.py`; dropped now-unused `importlib`/`inspect`/`*_SIGNATURE_GUARD`; 2 obsolete reload-recovery tests removed |
+| P2-3 | `importlib.reload` guards | **DONE (re-fixed 2026-07-02)** | removed in `e9462d0`; UI-polish batch 1 (`affbb0a`) accidentally reintroduced the app-top block (two conditions referenced dropped `*_SIGNATURE_GUARD` attrs → always-true → reload every rerun); deleted again in the 2026-07-02 audit-fix commit |
 | P2-4 | Duplicated helpers | **DONE** | `pressure_label` -> `validation.pressure_label`; `date_label` + `latest_valid_observation_date` -> `data` (latter made graceful on missing cols); app + report import them |
 | P2-5 | Horizon option sets inconsistent | **DONE** | market-linkage selectbox gains 36M (already computed); validation + benchmark gain 3M (validation frame built with the selected horizon as a label horizon) |
 | P2-6 | README drift | **DONE** | README now lists 5 inflation + 6 market series, `paper_replication`, and the P1-P5 tabs/phases |
@@ -134,9 +154,16 @@ What each P1 fix changed (so you don't need the chat):
 
 ## 4. Working tree + commit history (refresh when files change / after commit)
 
-**Status: batches 1–4 are COMMITTED and PUSHED to `origin/main` (batch 4 feat = `0d9ddb3`, plus
-this docs-refresh on top). The working tree is clean apart from the always-untracked `.claude/`.
-The UI-polish arc is complete; project returns to maintenance.** Never `git add -A`.
+**Status: the 2026-07-02 audit-fix commit is COMMITTED locally on top of `dea3db2`
+(= `origin/main`) and AWAITS PUSH APPROVAL. Files in it:
+`src/transitory_inflation/validation.py` (isinstance guard), `tests/test_validation.py`
+(label regression test), `app/streamlit_app.py` (reload-guard block deleted),
+`NEXT_TASKS.md`, `ACTIVE_HANDOFF.md`, `docs/10_AGENT_EXECUTION_PLAYBOOK.md`,
+`docs/00_PROJECT_CONTEXT.md`, `.env.example` (doc refresh). The working tree is otherwise
+clean apart from the always-untracked `.claude/`.** Never `git add -A`.
+
+Prior arc (all pushed): batches 1–4 (batch 4 feat = `0d9ddb3`, plus the docs-refresh
+`dea3db2` on top).
 
 **Batch 4 landed in `0d9ddb3`** (`app/streamlit_app.py` only — no `plots.py`/test change),
 followed by this handoff/NEXT_TASKS/plan refresh. The offline AppTest smoke is run ad hoc (a temp
@@ -207,21 +234,15 @@ the command defs in the repo. A single combined commit is also fine if preferred
 
 ## 5. Next action (REWRITE this each loop iteration)
 
-**This loop implemented Dashboard UI-polish batch 4** ("report + light touches"): Macro Research
-Report headline + current regime as snapshot metric cards, `st.divider()` between the 7 sections,
-all supporting DataFrames behind expanders (narrative bullets stay visible); Decay convergence
-metric cards (decayed 6m/12m, t*) from the first valid window; Paper Framework correlation matrix
-as a `heatmap_figure` with the table behind an expander (OLS/Ljung-Box left as tables, full
-per-item detail in §1 and `docs/DASHBOARD_UI_POLISH_PLAN.md`). Presentation-only — **no
-methodology/numbers/series/logic changed and every caveat's text kept, only relocated.** No new
-`plots.py` figure (reused `heatmap_figure`), so `tests/test_plots.py` is unchanged. Gates green
-(ruff · pytest **117 passed** · compileall · offline AppTest smoke 0 exceptions across all 9 tabs
-for both live-safe and ex-post baselines, with the new heatmap + cards asserted). **Batch 4 is
-COMMITTED as `0d9ddb3` and PUSHED; the UI-polish arc is complete.**
+**This loop ran the full read-only audit and implemented the audit-fix commit** (§1 has the
+full detail): pandas-3 tuple-label fix in `validation.py` + regression test, app reload-guard
+block deleted, docs refreshed. Methodology/numbers unchanged except that the Validation tab's
+by-regime / by-pressure charts and tables now show plain string labels with the intended
+category order (the underlying rates/counts were always correct).
 
-**Immediate next step:** none queued — the dashboard UI/UX polish arc (batches 1–4) is finished
-and the project returns to maintenance. Any further visual work, or either deferred item below,
-needs a fresh, separately-scoped user decision.
+**Immediate next step:** get explicit user approval to `git push origin main` for the
+audit-fix commit. After that, the project returns to maintenance. Any further visual work, or
+either deferred item below, needs a fresh, separately-scoped user decision.
 
 Deferred / out of scope until a fresh, separately-scoped user decision (unchanged by this loop):
 - a **predictive** linkage — out-of-sample scoring of market moves vs descriptive base rates;

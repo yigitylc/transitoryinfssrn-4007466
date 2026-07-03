@@ -18,4 +18,8 @@ Treat the paper as a reference, not as unquestionable truth. Replicate first, th
 
 ## Current project stage
 
-Starter scaffold. The agent should audit before making broad changes.
+Mature research implementation in maintenance: Phases 0-5 (stabilization,
+validation, benchmarks, robustness, market linkage, research report) plus the
+Trader Research tab and a dashboard UI-polish arc are implemented, committed,
+and pushed. See `ACTIVE_HANDOFF.md` for live status and `NEXT_TASKS.md` for
+the current gate. The agent should still audit before making broad changes.

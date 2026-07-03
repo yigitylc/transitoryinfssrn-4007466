@@ -376,7 +376,7 @@ def _forward_outcome_summary_by_groups(
         current = df.loc[valid].copy()
 
         for group_values, group in current.groupby(list(group_cols), dropna=True):
-            if len(group_cols) == 1:
+            if len(group_cols) == 1 and not isinstance(group_values, tuple):
                 group_values = (group_values,)
             row = dict(zip(group_cols, group_values, strict=True))
             row.update(

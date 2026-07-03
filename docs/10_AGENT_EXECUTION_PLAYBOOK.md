@@ -26,36 +26,46 @@ ex-post if they are clearly labeled. Live-signal choices must avoid lookahead.
 Validation may use future outcomes only after signal features are built, and
 only for scoring historical rows.
 
-## 2. Current State
+## 2. Current State (as of 2026-07-02)
 
-- A Streamlit dashboard exists.
+- Phases 0-5 are implemented, committed, and closed (see
+  `reports/PHASE_0_5_AUDIT_FINDINGS.md` and `ACTIVE_HANDOFF.md`).
+- The Streamlit dashboard has 9 tabs: Current Macro Signal, Historical Signal
+  Validation, Benchmark Comparison, Market Linkage, Trader Research, Paper
+  Framework, Decay / Convergence, Robustness, and Macro Research Report.
+- Positive-shock outcome logic (resolution vs downside overshoot vs
+  persistence) is implemented and test-enforced; absolute baseline convergence
+  remains a separate secondary diagnostic.
 - FRED data loading supports official API, public CSV, cached FRED, and demo
-  fallback paths.
-- Phase 1 historical validation exists but still needs production
-  stabilization.
-- The main current blocker is positive-shock logic and downside overshoot
-  classification.
-- The roadmap exists in `docs/09_PRODUCTION_ROADMAP.md`.
-- `NEXT_TASKS.md` tracks the current gate only.
+  fallback paths; the cache fallback rebuilds through the same
+  cleaning/imputation pipeline as live data (test-enforced), and data-source
+  status is always disclosed in the app.
+- Trader Research shipped as a descriptive, rates-only tab conditioned on the
+  live-safe walk-forward bucket (decision 2026-06-24); the older
+  `build_trader_report`/`REGIME_PLAYBOOK` layer stays un-wired and
+  experimental.
+- The project is in maintenance. The roadmap stays in
+  `docs/09_PRODUCTION_ROADMAP.md`; `NEXT_TASKS.md` tracks the current gate
+  only.
 
 ## 3. Current Limitations
 
-- Historical validation currently risks confusing absolute baseline distance
-  with positive inflation-shock resolution.
-- A move from positive epsilon to negative epsilon should not be classified as
-  persistent high inflation.
-- Absolute distance to baseline is useful for equilibrium/stability, but not
-  sufficient for false-transitory labeling.
-- Dashboard explanations need to be more explicit.
-- Cache fallback must be verified to pass through the same cleaning/imputation
-  pipeline as live FRED data.
-- Data-source status must be visible so stale data is not mistaken for live
-  data.
-- Phase 1 validation is diagnostic, not a complete forecast model.
-- Phase 2 benchmark comparison has not been implemented yet, so hit rates
-  should not be over-interpreted.
-- Market linkage should not begin until benchmark comparison shows signal
-  usefulness.
+- The live signal uses latest-revised FRED data: "live-safe" means no
+  full-sample lookahead, not a real-time data-vintage backtest.
+- The dashboard is descriptive decision support. TINF/regime does not robustly
+  dominate a simple AR(1) as a CPI point-forecast model, and the report layer
+  says so; no predictive/out-of-sample market scoring exists.
+- Market linkage and Trader Research are historical base rates, never trading
+  signals; small buckets are flagged `weak_evidence` (<30 observations).
+- Phase 1 validation is diagnostic, not a complete forecast model; hit rates
+  need the Phase 2 benchmark context to be interpreted.
+- The roadmap's "trailing-current TINF vs paper-lagged formula" robustness
+  dimension is **deferred, not implemented**: robustness covers inflation
+  measures, baselines, sample modes, horizons, and thresholds, but not the
+  lagged-TINF variant. Implementing it needs a fresh, separately-scoped
+  decision.
+- Percentiles and regime cutoffs shift with the selected sample mode;
+  `max_history` is a robustness view, not the default signal.
 
 ## 4. Methodology Rules
 
