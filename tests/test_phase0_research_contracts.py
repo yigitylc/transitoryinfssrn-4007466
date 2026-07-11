@@ -1,3 +1,9 @@
+"""Phase 0 research contracts and their implementation gate.
+
+Implemented contracts pass normally. Unresolved contracts use strict expected failures,
+so an XPASS fails the suite until its marker is deliberately removed.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -7,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from transitory_inflation import data as data_mod
 from transitory_inflation import features as features_mod
@@ -20,6 +27,63 @@ from transitory_inflation.validation import (
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 CONTRACT_PATH = FIXTURE_DIR / "paper_replication_contract_v1.json"
+
+PENDING_B1_REPLICATION = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "B1 replication: paper-inspired naming and a separate literal-lag "
+        "reconstruction path are pending"
+    ),
+)
+PENDING_B2_IMPUTATION = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "B2 imputation: observed-only CPI must remain missing and invariant "
+        "to future-neighbor values"
+    ),
+)
+PENDING_H1_CACHE_PROVENANCE = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "H1 cache provenance: reload must preserve original missingness and "
+        "ex-post imputation lineage"
+    ),
+)
+PENDING_H5_INFORMATION_DATE = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "H5 information date: CPI reference months must be distinct from "
+        "release and information timestamps"
+    ),
+)
+PENDING_H3_CLASSIFICATION_ANCHOR = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "H3 classification anchor: forecast and actual persistence labels "
+        "must share the origin baseline"
+    ),
+)
+PENDING_H2_COMMON_SAMPLE = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "H2 common sample: every benchmark model must use one universal "
+        "origin set per horizon"
+    ),
+)
+PENDING_H4_DENOMINATORS = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "H4 denominators: validation rates must expose metric-specific counts "
+        "and preserve the 29/30 evidence boundary"
+    ),
+)
+PENDING_H10_OVERLAP_UNCERTAINTY = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "H10 overlap uncertainty: overlapping horizons must suppress naive "
+        "independent-observation uncertainty"
+    ),
+)
 
 
 def _contract() -> dict[str, object]:
@@ -81,11 +145,13 @@ def test_frozen_candidate_fixture_is_415_rows_but_not_a_golden_replication() -> 
     assert contract["overall_status"] == "unverified_candidate"
 
 
+@PENDING_B1_REPLICATION
 def test_current_paper_surface_is_explicitly_paper_inspired() -> None:
     assert "paper_inspired_window" in SAMPLE_MODES
     assert "paper_replication" not in SAMPLE_MODES
 
 
+@PENDING_B1_REPLICATION
 def test_paper_reconstruction_uses_literal_lag_and_a_separate_feature_path() -> None:
     builder = getattr(features_mod, "add_paper_reconstruction_features", None)
     assert callable(builder), "B1 requires a separate paper reconstruction feature path"
@@ -103,6 +169,7 @@ def test_paper_reconstruction_uses_literal_lag_and_a_separate_feature_path() -> 
         assert out[f"tinf_{window}m"].iloc[target] == expected
 
 
+@PENDING_B2_IMPUTATION
 def test_observed_only_cpi_is_invariant_to_the_future_neighbor() -> None:
     signature = inspect.signature(data_mod.build_base_frame)
     assert "imputation_policy" in signature.parameters
@@ -129,6 +196,7 @@ def test_observed_only_cpi_is_invariant_to_the_future_neighbor() -> None:
     assert not gap["cpi_imputed"]
 
 
+@PENDING_H1_CACHE_PROVENANCE
 def test_cache_reload_preserves_original_missingness_and_ex_post_lineage(
     tmp_path: Path,
     monkeypatch,
@@ -156,6 +224,7 @@ def test_cache_reload_preserves_original_missingness_and_ex_post_lineage(
     assert pd.notna(gap["imputation_available_at"])
 
 
+@PENDING_H5_INFORMATION_DATE
 def test_reference_month_is_not_silently_used_as_information_date() -> None:
     dates = pd.date_range("2023-01-31", periods=15, freq="ME")
     release_dates = dates + pd.offsets.Day(13)
@@ -183,6 +252,7 @@ def test_reference_month_is_not_silently_used_as_information_date() -> None:
     assert row["information_timestamp"] >= row["release_timestamp"]
 
 
+@PENDING_H3_CLASSIFICATION_ANCHOR
 def test_perfect_forecast_and_actual_use_the_same_origin_baseline() -> None:
     periods = 50
     target_pos = 40
@@ -217,6 +287,7 @@ def test_perfect_forecast_and_actual_use_the_same_origin_baseline() -> None:
     assert bool(row["actual_persistent_high_inflation"])
 
 
+@PENDING_H2_COMMON_SAMPLE
 def test_benchmark_forecasts_use_one_universal_origin_set_for_all_models() -> None:
     forecasts = build_benchmark_forecasts(
         _benchmark_feature_frame(90),
@@ -234,6 +305,7 @@ def test_benchmark_forecasts_use_one_universal_origin_set_for_all_models() -> No
     assert {len(dates) for dates in dates_by_model.values()} == {48}
 
 
+@PENDING_H4_DENOMINATORS
 def test_validation_rates_expose_metric_specific_numerators_and_denominators() -> None:
     frame = pd.DataFrame(
         {
@@ -259,6 +331,7 @@ def test_validation_rates_expose_metric_specific_numerators_and_denominators() -
     assert row["positive_shock_persistent_rate_n_applicable"] == 1
 
 
+@PENDING_H4_DENOMINATORS
 def test_metric_evidence_strength_preserves_the_29_30_boundary() -> None:
     observed: list[tuple[int, str, bool]] = []
     for applicable in (29, 30):
@@ -286,6 +359,7 @@ def test_metric_evidence_strength_preserves_the_29_30_boundary() -> None:
     assert observed == [(29, "weak", True), (30, "descriptive", False)]
 
 
+@PENDING_H10_OVERLAP_UNCERTAINTY
 def test_overlapping_horizons_do_not_emit_naive_uncertainty() -> None:
     frame = pd.DataFrame(
         {
