@@ -4,6 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from transitory_inflation import report as report_mod
+from transitory_inflation.dashboard import (
+    CURRENT_SIGNAL_IMPUTATION_NOTICE,
+    build_dashboard_data_views,
+)
+from transitory_inflation.data import build_base_frame
 from transitory_inflation.features import add_transitory_inflation_features
 from transitory_inflation.report import (
     REGIME_PLAYBOOK,
@@ -198,3 +204,88 @@ def test_macro_research_report_flags_weak_historical_analog_evidence() -> None:
     assert not report.historical_analogs.empty
     assert report.historical_analogs["weak_evidence"].fillna(False).astype(bool).any()
     assert report.historical_analogs["evidence_note"].str.contains("Fewer than 30").any()
+
+
+def test_macro_report_routes_only_current_sections_to_ex_post_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    periods = 120
+    gap_pos = periods - 2
+    dates = pd.date_range("2015-01-31", periods=periods, freq="ME")
+    levels = 100.0 * (1.002 ** np.arange(periods, dtype=float))
+    levels[gap_pos] = np.nan
+    observed = build_base_frame(
+        pd.DataFrame({"date": dates, "CPIAUCSL": levels, "TB3MS": 3.0}),
+        imputation_policy="observed_only",
+    )
+    views = build_dashboard_data_views(
+        observed,
+        baseline_method="rolling_36_shifted",
+    )
+    captured: dict[str, object] = {}
+
+    original_benchmarks = report_mod._benchmark_tables
+    original_robustness = report_mod._robustness_tables
+    original_analogs = report_mod._historical_analog_table
+    original_market = report_mod._market_summary
+
+    def capture_benchmarks(featured: pd.DataFrame, **kwargs: object):
+        captured["benchmarks"] = featured
+        return original_benchmarks(featured, **kwargs)
+
+    def capture_robustness(sample_frames: dict[str, pd.DataFrame], **kwargs: object):
+        captured["robustness"] = sample_frames
+        return original_robustness(sample_frames, **kwargs)
+
+    def capture_analogs(
+        featured: pd.DataFrame,
+        snapshot: dict[str, object],
+        **kwargs: object,
+    ):
+        captured["analogs"] = featured
+        captured["analog_snapshot"] = snapshot
+        return original_analogs(featured, snapshot, **kwargs)
+
+    def capture_market(featured: pd.DataFrame, **kwargs: object):
+        captured["market"] = featured
+        return original_market(featured, **kwargs)
+
+    monkeypatch.setattr(report_mod, "_benchmark_tables", capture_benchmarks)
+    monkeypatch.setattr(report_mod, "_robustness_tables", capture_robustness)
+    monkeypatch.setattr(report_mod, "_historical_analog_table", capture_analogs)
+    monkeypatch.setattr(report_mod, "_market_summary", capture_market)
+
+    report = build_macro_research_report(
+        views.research_raw,
+        views.research_featured,
+        baseline_method="rolling_36_shifted",
+        sample_mode="live_dashboard",
+        benchmark_horizons=(3,),
+        market_horizons=(3,),
+        robustness_baselines=("rolling_36_shifted",),
+        current_raw=views.current_raw,
+        current_featured=views.current_featured,
+    )
+
+    assert report.available
+    assert report.as_of == str(dates[-1].date())
+    assert report.current_signal_notice == CURRENT_SIGNAL_IMPUTATION_NOTICE
+    assert report.current_regime_table.iloc[0]["imputation_policy"] == "ex_post_continuity"
+    assert report.current_regime_table.iloc[0]["current_signal_uses_imputed_input"]
+    for key in ("benchmarks", "analogs", "market"):
+        frame = captured[key]
+        assert isinstance(frame, pd.DataFrame)
+        assert frame["imputation_policy"].eq("observed_only").all()
+    robustness_frames = captured["robustness"]
+    assert isinstance(robustness_frames, dict)
+    assert all(
+        frame["imputation_policy"].eq("observed_only").all()
+        for frame in robustness_frames.values()
+    )
+    analog_snapshot = captured["analog_snapshot"]
+    assert isinstance(analog_snapshot, dict)
+    assert analog_snapshot["date"] < dates[-1]
+    if not report.historical_analogs.empty:
+        assert report.historical_analogs["conditioning_signal_date"].eq(
+            str(analog_snapshot["date"].date())
+        ).all()

@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
+from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,15 @@ FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 CACHED_BASE_MACRO_STEM = "fred_base_macro"
 BASE_MACRO_COLUMNS = ("date", "cpi_level", "tbill_3m", "inflation_yoy")
+MACRO_CACHE_SCHEMA_COLUMN = "macro_cache_schema_version"
+MACRO_CACHE_SCHEMA_VERSION = 2
+
+ImputationPolicy = Literal["observed_only", "ex_post_continuity"]
+VALID_IMPUTATION_POLICIES: tuple[ImputationPolicy, ...] = (
+    "observed_only",
+    "ex_post_continuity",
+)
+DEFAULT_IMPUTATION_POLICY: ImputationPolicy = "observed_only"
 
 # Months fetched before a sample's start_date so 12-month YoY inflation is
 # defined from the first sample row instead of 12 months later.
@@ -41,6 +51,48 @@ class InflationMeasure:
     yoy_col: str
     imputed_col: str
     paper_exact: bool = False
+
+    @property
+    def lineage_prefix(self) -> str:
+        return self.imputed_col.removesuffix("_imputed")
+
+    @property
+    def observed_level_col(self) -> str:
+        return f"{self.lineage_prefix}_observed_level"
+
+    @property
+    def originally_missing_col(self) -> str:
+        return f"{self.lineage_prefix}_originally_missing"
+
+    @property
+    def source_unavailable_col(self) -> str:
+        return f"{self.lineage_prefix}_source_unavailable"
+
+    @property
+    def imputation_method_col(self) -> str:
+        if self.key == "headline_cpi":
+            return "imputation_method"
+        return f"{self.lineage_prefix}_imputation_method"
+
+    @property
+    def imputation_available_at_col(self) -> str:
+        if self.key == "headline_cpi":
+            return "imputation_available_at"
+        return f"{self.lineage_prefix}_imputation_available_at"
+
+    @property
+    def imputation_availability_basis_col(self) -> str:
+        if self.key == "headline_cpi":
+            return "imputation_availability_basis"
+        return f"{self.lineage_prefix}_imputation_availability_basis"
+
+    @property
+    def yoy_uses_imputed_input_col(self) -> str:
+        return f"{self.yoy_col}_uses_imputed_input"
+
+    @property
+    def yoy_uses_missing_input_col(self) -> str:
+        return f"{self.yoy_col}_uses_missing_input"
 
 
 HEADLINE_INFLATION_MEASURE = "headline_cpi"
@@ -100,6 +152,46 @@ class MacroDataLoadResult:
     live_fetch_status: str
     cache_file_used: str | None = None
     api_key_configured: bool = False
+    imputation_policy: ImputationPolicy = DEFAULT_IMPUTATION_POLICY
+
+
+def resolve_imputation_policy(value: str) -> ImputationPolicy:
+    """Validate and normalize the CPI missing-data policy."""
+
+    policy = str(value)
+    if policy not in VALID_IMPUTATION_POLICIES:
+        raise ValueError(
+            f"Unknown imputation policy: {value}. "
+            f"Expected one of {list(VALID_IMPUTATION_POLICIES)}"
+        )
+    return cast(ImputationPolicy, policy)
+
+
+def _boolean_values(values: pd.Series) -> pd.Series:
+    """Coerce cache/source flag values without treating non-empty strings as true."""
+
+    if pd.api.types.is_bool_dtype(values.dtype):
+        return values.fillna(False).astype(bool)
+    normalized = values.astype("string").str.strip().str.lower()
+    return normalized.isin({"true", "1", "yes", "y"})
+
+
+def _missingness_flags(
+    observed_level: pd.Series,
+    explicit_originally_missing: pd.Series | None = None,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Separate within-coverage missing observations from pre-series unavailability."""
+
+    explicit = (
+        pd.Series(False, index=observed_level.index, dtype=bool)
+        if explicit_originally_missing is None
+        else explicit_originally_missing.fillna(False).astype(bool)
+    )
+    raw_observed = observed_level.mask(explicit)
+    coverage_started = raw_observed.notna().cummax()
+    originally_missing = explicit | (raw_observed.isna() & coverage_started)
+    source_unavailable = raw_observed.isna() & ~coverage_started & ~explicit
+    return raw_observed, originally_missing.astype(bool), source_unavailable.astype(bool)
 
 
 def fred_api_key() -> str | None:
@@ -325,45 +417,115 @@ def build_base_frame(
     merged: pd.DataFrame,
     start_date: str | None = None,
     end_date: str | None = None,
+    imputation_policy: ImputationPolicy | str = DEFAULT_IMPUTATION_POLICY,
 ) -> pd.DataFrame:
     """Build the canonical monthly base frame from merged raw FRED series.
 
-    Order of operations: monthly-last resample, rename, single-month CPI gap
-    bridging, YoY inflation in percentage points, then the inclusive
-    ``[start_date, end_date]`` trim. Rows before ``start_date`` (the warm-up
-    buffer) feed the 12-month YoY change but never appear in the output.
-
-    Inflation-index gap bridging: a single missing interior month is filled by
-    log-linear interpolation and flagged in the measure-specific imputation
-    column; otherwise one missing month makes every strict rolling window that
-    contains it NaN and can freeze the live signal for years. Multi-month gaps
-    and missing tail months are never imputed.
+    ``observed_only`` leaves every officially missing inflation-index level
+    missing. ``ex_post_continuity`` may log-linearly bridge one isolated
+    interior gap, but the raw observed level, original missingness, method, and
+    earliest known availability marker remain separate. Rows before
+    ``start_date`` feed the 12-month YoY change but never appear in the output.
     """
 
+    policy = resolve_imputation_policy(imputation_policy)
     out = monthly_last(merged)
     out = out.rename(columns={"TB3MS": "tbill_3m"})
+    out["imputation_policy"] = policy
 
     for measure in INFLATION_MEASURES.values():
         if measure.series_id in out.columns:
-            out[measure.level_col] = pd.to_numeric(out[measure.series_id], errors="coerce")
+            observed_level = pd.to_numeric(out[measure.series_id], errors="coerce")
+        elif measure.observed_level_col in out.columns:
+            observed_level = pd.to_numeric(out[measure.observed_level_col], errors="coerce")
         elif measure.level_col in out.columns:
-            out[measure.level_col] = pd.to_numeric(out[measure.level_col], errors="coerce")
+            observed_level = pd.to_numeric(out[measure.level_col], errors="coerce")
         else:
             continue
 
-        log_interp = np.exp(np.log(out[measure.level_col]).interpolate(limit_area="inside"))
-        isna = out[measure.level_col].isna()
+        explicit_missing = pd.Series(False, index=out.index, dtype=bool)
+        if measure.originally_missing_col in out.columns:
+            explicit_missing |= _boolean_values(out[measure.originally_missing_col])
+        observed_level, originally_missing, source_unavailable = _missingness_flags(
+            observed_level,
+            explicit_missing,
+        )
+
+        out[measure.observed_level_col] = observed_level
+        out[measure.originally_missing_col] = originally_missing.astype(bool)
+        out[measure.source_unavailable_col] = source_unavailable.astype(bool)
+        out[measure.level_col] = observed_level
+        out[measure.imputed_col] = False
+        out[measure.imputation_method_col] = pd.Series(
+            pd.NA,
+            index=out.index,
+            dtype="string",
+        )
+        out[measure.imputation_available_at_col] = pd.Series(
+            pd.NaT,
+            index=out.index,
+            dtype="datetime64[ns]",
+        )
+        out[measure.imputation_availability_basis_col] = pd.Series(
+            pd.NA,
+            index=out.index,
+            dtype="string",
+        )
+
+        safe_log_level = observed_level.where(observed_level > 0)
+        log_interp = np.exp(np.log(safe_log_level).interpolate(limit_area="inside"))
+        isna = observed_level.isna()
         single_gap = (
             isna
             & ~isna.shift(1, fill_value=False)
             & ~isna.shift(-1, fill_value=False)
         )
-        out[measure.imputed_col] = single_gap & log_interp.notna()
-        out[measure.level_col] = out[measure.level_col].where(
-            ~out[measure.imputed_col],
-            log_interp,
+        if policy == "ex_post_continuity":
+            imputed = single_gap & log_interp.notna()
+            out[measure.imputed_col] = imputed
+            out[measure.level_col] = observed_level.where(~imputed, log_interp)
+            out.loc[imputed, measure.imputation_method_col] = "log_linear_bridge"
+
+            release_col = f"{measure.lineage_prefix}_release_timestamp"
+            if release_col not in out.columns and "release_timestamp" in out.columns:
+                release_col = "release_timestamp"
+            next_reference_month = pd.to_datetime(out["date"], errors="coerce").shift(-1)
+            proxy_availability = next_reference_month + pd.offsets.MonthEnd(1)
+            if release_col in out.columns:
+                following_release = pd.to_datetime(
+                    out[release_col],
+                    errors="coerce",
+                ).shift(-1)
+                availability = following_release.fillna(proxy_availability)
+                basis = pd.Series(
+                    "following_reference_month_end_plus_one_month_proxy",
+                    index=out.index,
+                    dtype="string",
+                )
+                basis.loc[following_release.notna()] = "following_release_timestamp"
+            else:
+                availability = proxy_availability
+                basis = pd.Series(
+                    "following_reference_month_end_plus_one_month_proxy",
+                    index=out.index,
+                    dtype="string",
+                )
+
+            out.loc[imputed, measure.imputation_available_at_col] = availability.loc[imputed]
+            out.loc[imputed, measure.imputation_availability_basis_col] = basis.loc[imputed]
+
+        out[measure.yoy_col] = out[measure.level_col].pct_change(
+            12,
+            fill_method=None,
+        ) * 100
+        imputed_input = out[measure.imputed_col].fillna(False).astype(bool)
+        missing_input = out[measure.originally_missing_col].fillna(False).astype(bool)
+        out[measure.yoy_uses_imputed_input_col] = (
+            imputed_input | imputed_input.shift(12, fill_value=False)
         )
-        out[measure.yoy_col] = out[measure.level_col].pct_change(12) * 100
+        out[measure.yoy_uses_missing_input_col] = (
+            missing_input | missing_input.shift(12, fill_value=False)
+        )
 
     raw_series_cols = [
         measure.series_id
@@ -387,33 +549,51 @@ def load_base_macro_data_from_api(
     api_key: str,
     start_date: str | None = None,
     end_date: str | None = None,
+    imputation_policy: ImputationPolicy | str = DEFAULT_IMPUTATION_POLICY,
 ) -> pd.DataFrame:
     """Load core macro data through the official FRED API."""
 
+    policy = resolve_imputation_policy(imputation_policy)
     raw = merge_fred_series_api(
         BASE_FRED_SERIES,
         api_key=api_key,
         start_date=_fetch_start(start_date),
         end_date=end_date,
     )
-    return build_base_frame(raw, start_date=start_date, end_date=end_date)
+    return build_base_frame(
+        raw,
+        start_date=start_date,
+        end_date=end_date,
+        imputation_policy=policy,
+    )
 
 
 def load_base_macro_data_from_csv(
     start_date: str | None = None,
     end_date: str | None = None,
+    imputation_policy: ImputationPolicy | str = DEFAULT_IMPUTATION_POLICY,
 ) -> pd.DataFrame:
     """Load core macro data through public FRED CSV endpoints."""
 
+    policy = resolve_imputation_policy(imputation_policy)
     raw = merge_fred_series(
         BASE_FRED_SERIES,
         start_date=_fetch_start(start_date),
         end_date=end_date,
     )
-    return build_base_frame(raw, start_date=start_date, end_date=end_date)
+    return build_base_frame(
+        raw,
+        start_date=start_date,
+        end_date=end_date,
+        imputation_policy=policy,
+    )
 
 
-def load_base_macro_data(start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+def load_base_macro_data(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    imputation_policy: ImputationPolicy | str = DEFAULT_IMPUTATION_POLICY,
+) -> pd.DataFrame:
     """Load core macro data for an explicit inclusive date range.
 
     Prefer :func:`load_macro_data_for_mode` so date ranges stay tied to the
@@ -426,16 +606,24 @@ def load_base_macro_data(start_date: str | None = None, end_date: str | None = N
       2001-07; TB3MS covers the full paper sample (history starts 1934).
     """
 
-    return load_base_macro_data_from_csv(start_date=start_date, end_date=end_date)
+    return load_base_macro_data_from_csv(
+        start_date=start_date,
+        end_date=end_date,
+        imputation_policy=imputation_policy,
+    )
 
 
 def load_macro_data_for_mode(
     mode: SampleMode | str = DEFAULT_SAMPLE_MODE,
     allow_demo: bool = False,
+    imputation_policy: ImputationPolicy | str = DEFAULT_IMPUTATION_POLICY,
 ) -> pd.DataFrame:
     """Load core macro data for a named sample mode (see ``config.SAMPLE_MODES``)."""
 
-    result = load_macro_data_for_mode_with_status(mode)
+    result = load_macro_data_for_mode_with_status(
+        mode,
+        imputation_policy=imputation_policy,
+    )
     if result.data_source_used == "demo" and not allow_demo:
         raise RuntimeError(
             "Only emergency demo data is available. Use "
@@ -446,10 +634,12 @@ def load_macro_data_for_mode(
 
 def load_macro_data_for_mode_with_status(
     mode: SampleMode | str = DEFAULT_SAMPLE_MODE,
+    imputation_policy: ImputationPolicy | str = DEFAULT_IMPUTATION_POLICY,
 ) -> MacroDataLoadResult:
     """Load macro data with API -> CSV -> cache -> demo fallback order."""
 
     resolved = resolve_sample_mode(mode)
+    policy = resolve_imputation_policy(imputation_policy)
     status_parts: list[str] = []
     key = fred_api_key()
 
@@ -459,6 +649,7 @@ def load_macro_data_for_mode_with_status(
                 key,
                 start_date=resolved.start_date,
                 end_date=resolved.end_date,
+                imputation_policy=policy,
             )
             status_parts.append("fred_api: ok")
             return MacroDataLoadResult(
@@ -466,6 +657,7 @@ def load_macro_data_for_mode_with_status(
                 data_source_used="fred_api",
                 live_fetch_status="; ".join(status_parts),
                 api_key_configured=True,
+                imputation_policy=policy,
             )
         except Exception as exc:
             status_parts.append(f"fred_api: failed ({_safe_error(exc, key)})")
@@ -476,6 +668,7 @@ def load_macro_data_for_mode_with_status(
         data = load_base_macro_data_from_csv(
             start_date=resolved.start_date,
             end_date=resolved.end_date,
+            imputation_policy=policy,
         )
         status_parts.append("fred_csv: ok")
         return MacroDataLoadResult(
@@ -483,13 +676,17 @@ def load_macro_data_for_mode_with_status(
             data_source_used="fred_csv",
             live_fetch_status="; ".join(status_parts),
             api_key_configured=key is not None,
+            imputation_policy=policy,
         )
     except Exception as exc:
         status_parts.append(f"fred_csv: failed ({_safe_error(exc)})")
 
     try:
         cache_path = find_cached_macro_data_file(resolved)
-        data = load_cached_macro_data_for_mode(resolved)
+        data = load_cached_macro_data_for_mode(
+            resolved,
+            imputation_policy=policy,
+        )
         status_parts.append("cached_fred: ok")
         return MacroDataLoadResult(
             data=data,
@@ -497,6 +694,7 @@ def load_macro_data_for_mode_with_status(
             live_fetch_status="; ".join(status_parts),
             cache_file_used=cache_path.name,
             api_key_configured=key is not None,
+            imputation_policy=policy,
         )
     except Exception as exc:
         status_parts.append(f"cached_fred: failed ({_safe_error(exc)})")
@@ -504,12 +702,14 @@ def load_macro_data_for_mode_with_status(
     data = apply_sample_mode(make_demo_data(), resolved)
     if data.empty:
         data = make_demo_data()
+    data["imputation_policy"] = policy
     status_parts.append("demo: emergency fallback")
     return MacroDataLoadResult(
         data=data,
         data_source_used="demo",
         live_fetch_status="; ".join(status_parts),
         api_key_configured=key is not None,
+        imputation_policy=policy,
     )
 
 
@@ -540,48 +740,184 @@ def find_cached_macro_data_file(mode: SampleMode | str = DEFAULT_SAMPLE_MODE) ->
     )
 
 
-def load_cached_macro_data_for_mode(mode: SampleMode | str = DEFAULT_SAMPLE_MODE) -> pd.DataFrame:
+def build_macro_cache_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Return the versioned raw-authority frame written to the macro cache.
+
+    Processed continuity levels are never cache authority. When a processed
+    frame is supplied, the observed-level and original-missingness columns are
+    used to reconstruct FRED-shaped source columns before serialization.
+    """
+
+    if "date" not in df.columns:
+        raise KeyError("Macro cache data must include date")
+    if "TB3MS" in df.columns:
+        tbill = pd.to_numeric(df["TB3MS"], errors="coerce")
+    elif "tbill_3m" in df.columns:
+        tbill = pd.to_numeric(df["tbill_3m"], errors="coerce")
+    else:
+        raise KeyError("Macro cache data must include TB3MS or tbill_3m")
+
+    cache = pd.DataFrame(
+        {
+            "date": pd.to_datetime(df["date"]),
+            MACRO_CACHE_SCHEMA_COLUMN: MACRO_CACHE_SCHEMA_VERSION,
+        }
+    )
+    for measure in INFLATION_MEASURES.values():
+        if measure.series_id in df.columns:
+            observed_level = pd.to_numeric(df[measure.series_id], errors="coerce")
+        elif measure.observed_level_col in df.columns:
+            observed_level = pd.to_numeric(df[measure.observed_level_col], errors="coerce")
+        elif measure.level_col in df.columns:
+            observed_level = pd.to_numeric(df[measure.level_col], errors="coerce")
+        else:
+            continue
+
+        explicit_missing = pd.Series(False, index=df.index, dtype=bool)
+        if measure.originally_missing_col in df.columns:
+            explicit_missing |= _boolean_values(df[measure.originally_missing_col])
+        if measure.imputed_col in df.columns:
+            explicit_missing |= _boolean_values(df[measure.imputed_col])
+        observed_level, originally_missing, source_unavailable = _missingness_flags(
+            observed_level,
+            explicit_missing,
+        )
+
+        cache[measure.series_id] = observed_level
+        cache[measure.originally_missing_col] = originally_missing.astype(bool)
+        cache[measure.source_unavailable_col] = source_unavailable.astype(bool)
+
+    timestamp_cols = [
+        "release_timestamp",
+        *(
+            f"{measure.lineage_prefix}_release_timestamp"
+            for measure in INFLATION_MEASURES.values()
+        ),
+    ]
+    for column in timestamp_cols:
+        if column in df.columns:
+            cache[column] = pd.to_datetime(df[column], errors="coerce")
+
+    if "CPIAUCSL" not in cache.columns:
+        raise KeyError("Macro cache data must include a headline CPI level")
+    cache["TB3MS"] = tbill
+    return cache
+
+
+def _cached_macro_input_frame(cached: pd.DataFrame, path: Path) -> pd.DataFrame:
+    """Normalize versioned raw and provenance-aware legacy cache frames."""
+
+    has_schema_marker = MACRO_CACHE_SCHEMA_COLUMN in cached.columns
+    if has_schema_marker:
+        parsed_versions = pd.to_numeric(
+            cached[MACRO_CACHE_SCHEMA_COLUMN],
+            errors="coerce",
+        )
+        versions = parsed_versions.dropna()
+        if (
+            versions.empty
+            or parsed_versions.isna().any()
+            or not versions.eq(MACRO_CACHE_SCHEMA_VERSION).all()
+        ):
+            found = sorted(set(versions.astype(int))) if not versions.empty else ["unknown"]
+            raise ValueError(
+                f"Unsupported macro cache schema in {path}: {found}; "
+                f"expected {MACRO_CACHE_SCHEMA_VERSION}"
+            )
+
+    raw_shape = {"date", "CPIAUCSL", "TB3MS"}.issubset(cached.columns)
+    normalized_shape = {"date", "cpi_level", "tbill_3m"}.issubset(cached.columns)
+    if not raw_shape and not normalized_shape:
+        expected = " or ".join(str(columns) for columns in CACHED_INPUT_COLUMN_SETS)
+        raise ValueError(f"Cached macro data {path} must include one of: {expected}")
+    if has_schema_marker and not raw_shape:
+        raise ValueError(
+            f"Versioned macro cache {path} must use the raw-authority CPIAUCSL/TB3MS schema"
+        )
+
+    if raw_shape:
+        tbill = pd.to_numeric(cached["TB3MS"], errors="coerce")
+    else:
+        tbill = pd.to_numeric(cached["tbill_3m"], errors="coerce")
+
+    merged = pd.DataFrame(
+        {
+            "date": pd.to_datetime(cached["date"]),
+            "TB3MS": tbill,
+        }
+    )
+    if has_schema_marker:
+        merged[MACRO_CACHE_SCHEMA_COLUMN] = MACRO_CACHE_SCHEMA_VERSION
+
+    for measure in INFLATION_MEASURES.values():
+        if measure.series_id in cached.columns:
+            observed_level = pd.to_numeric(cached[measure.series_id], errors="coerce")
+        elif measure.observed_level_col in cached.columns:
+            observed_level = pd.to_numeric(cached[measure.observed_level_col], errors="coerce")
+        elif measure.level_col in cached.columns:
+            observed_level = pd.to_numeric(cached[measure.level_col], errors="coerce")
+            provenance_columns = {
+                measure.observed_level_col,
+                measure.originally_missing_col,
+                measure.imputed_col,
+            }
+            if not (provenance_columns & set(cached.columns)):
+                raise ValueError(
+                    f"Legacy normalized macro cache {path} lacks a trusted schema marker "
+                    f"and missingness provenance for {measure.level_col}; refresh the raw cache"
+                )
+        else:
+            continue
+
+        explicit_missing = pd.Series(False, index=cached.index, dtype=bool)
+        if measure.originally_missing_col in cached.columns:
+            explicit_missing |= _boolean_values(cached[measure.originally_missing_col])
+        if measure.imputed_col in cached.columns:
+            explicit_missing |= _boolean_values(cached[measure.imputed_col])
+        observed_level, originally_missing, source_unavailable = _missingness_flags(
+            observed_level,
+            explicit_missing,
+        )
+
+        merged[measure.series_id] = observed_level
+        merged[measure.originally_missing_col] = originally_missing.astype(bool)
+        merged[measure.source_unavailable_col] = source_unavailable.astype(bool)
+
+        release_col = f"{measure.lineage_prefix}_release_timestamp"
+        if release_col in cached.columns:
+            merged[release_col] = pd.to_datetime(cached[release_col], errors="coerce")
+
+    if "release_timestamp" in cached.columns:
+        merged["release_timestamp"] = pd.to_datetime(
+            cached["release_timestamp"],
+            errors="coerce",
+        )
+    return merged
+
+
+def load_cached_macro_data_for_mode(
+    mode: SampleMode | str = DEFAULT_SAMPLE_MODE,
+    imputation_policy: ImputationPolicy | str = DEFAULT_IMPUTATION_POLICY,
+) -> pd.DataFrame:
     """Load cached raw macro data for a named sample mode.
 
     This is an offline fallback for dashboards/tests when FRED cannot be
-    reached. Cached CPI levels and rates are treated as raw inputs and rebuilt
-    through the same monthly, imputation, YoY, and sample-slicing path as live
-    FRED data. Derived cached columns such as ``inflation_yoy`` or
-    ``cpi_imputed`` are never trusted.
+    reached. Versioned caches store original source levels and explicit
+    missingness. Flagged legacy processed caches are migrated by restoring
+    estimated rows to missing before the requested policy is reapplied.
     """
 
+    policy = resolve_imputation_policy(imputation_policy)
     path = find_cached_macro_data_file(mode)
     cached = pd.read_csv(path)
-    if {"date", "CPIAUCSL", "TB3MS"}.issubset(cached.columns):
-        optional_raw_series = [
-            measure.series_id
-            for measure in INFLATION_MEASURES.values()
-            if measure.series_id in cached.columns and measure.series_id != "CPIAUCSL"
-        ]
-        merged = cached[["date", "CPIAUCSL", "TB3MS", *optional_raw_series]].copy()
-    elif {"date", "cpi_level", "tbill_3m"}.issubset(cached.columns):
-        optional_level_cols = [
-            measure.level_col
-            for measure in INFLATION_MEASURES.values()
-            if measure.level_col in cached.columns and measure.level_col != "cpi_level"
-        ]
-        merged = cached[["date", "cpi_level", "tbill_3m", *optional_level_cols]].rename(
-            columns={"cpi_level": "CPIAUCSL", "tbill_3m": "TB3MS"}
-        )
-    else:
-        expected = " or ".join(str(columns) for columns in CACHED_INPUT_COLUMN_SETS)
-        raise ValueError(f"Cached macro data {path} must include one of: {expected}")
-
-    merged["date"] = pd.to_datetime(merged["date"])
-    for column in merged.columns:
-        if column != "date":
-            merged[column] = pd.to_numeric(merged[column], errors="coerce")
+    merged = _cached_macro_input_frame(cached, path)
 
     resolved = resolve_sample_mode(mode)
     return build_base_frame(
         merged,
         start_date=resolved.start_date,
         end_date=resolved.end_date,
+        imputation_policy=policy,
     )
 
 
@@ -615,10 +951,23 @@ def make_demo_data(periods: int = 260, seed: int = 7) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "date": dates,
+            "cpi_observed_level": cpi_level,
             "cpi_level": cpi_level,
+            "cpi_originally_missing": False,
+            "cpi_source_unavailable": False,
             "cpi_imputed": False,
+            "imputation_method": pd.Series(pd.NA, index=range(periods), dtype="string"),
+            "imputation_available_at": pd.NaT,
+            "imputation_availability_basis": pd.Series(
+                pd.NA,
+                index=range(periods),
+                dtype="string",
+            ),
             "tbill_3m": 0.25 + np.maximum(inflation_yoy - 2.0, 0) * 0.25,
             "inflation_yoy": inflation_yoy,
+            "inflation_yoy_uses_imputed_input": False,
+            "inflation_yoy_uses_missing_input": False,
+            "imputation_policy": DEFAULT_IMPUTATION_POLICY,
             "is_demo_data": True,
         }
     )

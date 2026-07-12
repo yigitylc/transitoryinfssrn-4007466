@@ -9,6 +9,7 @@ from . import benchmarks as benchmark_mod
 from . import market_linkage as market_linkage_mod
 from . import robustness as robustness_mod
 from . import validation as validation_mod
+from .dashboard import current_signal_imputation_notice
 from .data import (
     HEADLINE_INFLATION_MEASURE,
     INFLATION_MEASURES,
@@ -187,6 +188,7 @@ class MacroResearchReport:
     reason: str | None = None
     as_of: str | None = None
     headline: str = ""
+    current_signal_notice: str | None = None
     current_regime_lines: tuple[str, ...] = field(default_factory=tuple)
     signal_confidence_lines: tuple[str, ...] = field(default_factory=tuple)
     robustness_lines: tuple[str, ...] = field(default_factory=tuple)
@@ -433,6 +435,7 @@ def _historical_analog_table(
         inflation_count = int(len(inflation_rows))
         inflation_summary = {
             "analog_group": analog_group,
+            "conditioning_signal_date": date_label(snapshot["date"]),
             "historical_regime": current_regime,
             "historical_short_term_pressure": current_pressure,
             "historical_tinf_state": current_tinf_state,
@@ -499,10 +502,11 @@ def _historical_analog_lines(analogs: pd.DataFrame) -> tuple[str, ...]:
     if analogs.empty:
         return ("No historical analog table is available for the current regime/pressure state.",)
     group_name = str(analogs["analog_group"].iloc[0])
+    conditioning_date = str(analogs["conditioning_signal_date"].iloc[0])
     counts = pd.to_numeric(analogs["future_inflation_count"], errors="coerce").dropna()
     weak_rows = int(analogs["weak_evidence"].fillna(False).astype(bool).sum())
     lines = [
-        f"Analog group: {group_name}.",
+        f"Observed-only analog conditioning signal as of {conditioning_date}: {group_name}.",
         f"Future CPI and epsilon changes are summarized across {int(counts.max()) if len(counts) else 0} "
         "matching historical signal dates at the richest horizon sample.",
     ]
@@ -553,16 +557,15 @@ def _current_regime_section(
     if not snapshot.get("available"):
         return (snapshot.get("reason", "No complete current signal is available."),), pd.DataFrame()
 
-    latest_cpi_observation = latest_valid_observation_date(raw, "cpi_level")
+    measure = INFLATION_MEASURES[HEADLINE_INFLATION_MEASURE]
+    official_level_col = (
+        measure.observed_level_col if measure.observed_level_col in raw.columns else measure.level_col
+    )
+    latest_cpi_observation = latest_valid_observation_date(raw, official_level_col)
     latest_cpi_yoy = latest_valid_observation_date(raw, "inflation_yoy")
     raw_end = pd.to_datetime(raw["date"].max()).date() if "date" in raw.columns and not raw.empty else "unknown"
-    imputation_applied = (
-        bool(raw["cpi_imputed"].fillna(False).astype(bool).any())
-        if "cpi_imputed" in raw.columns
-        else False
-    )
+    imputation_applied = bool(snapshot.get("uses_imputed_input", False))
     pressure = validation_mod.pressure_label(str(snapshot.get("term_structure", "mixed")))
-    measure = INFLATION_MEASURES[HEADLINE_INFLATION_MEASURE]
     table = pd.DataFrame(
         [
             {
@@ -584,6 +587,11 @@ def _current_regime_section(
                 "latest_cpi_observation_date": date_label(latest_cpi_observation),
                 "latest_valid_cpi_yoy_date": date_label(latest_cpi_yoy),
                 "cpi_imputation_applied": imputation_applied,
+                "imputation_policy": snapshot.get("imputation_policy", "unspecified"),
+                "current_signal_uses_imputed_input": imputation_applied,
+                "current_signal_observed_only_eligible": bool(
+                    snapshot.get("observed_only_eligible", True)
+                ),
             }
         ]
     )
@@ -637,7 +645,7 @@ def _caveats(
     sample_mode: str,
     macro_status: object | None,
     market_status: object | None,
-    imputation_applied: bool,
+    signal_notice: str | None,
 ) -> tuple[str, ...]:
     meta = BASELINE_META[baseline_method]
     caveats = [
@@ -660,8 +668,8 @@ def _caveats(
         f"Macro data source used: {_status_get(macro_status, 'data_source_used', 'unknown')}; "
         f"market data source used: {_status_get(market_status, 'market_data_source_used', 'unknown')}.",
     ]
-    if imputation_applied:
-        caveats.append("CPI imputation is applied and must be disclosed when interpreting affected readings.")
+    if signal_notice:
+        caveats.append(signal_notice)
     else:
         caveats.append("No CPI imputation is flagged in the current loaded sample.")
     return tuple(caveats)
@@ -681,20 +689,30 @@ def build_macro_research_report(
     threshold_pp: float = DEFAULT_REPORT_THRESHOLD_PP,
     robustness_baselines: tuple[str, ...] = robustness_mod.DEFAULT_ROBUSTNESS_BASELINES,
     robustness_inflation_measures: tuple[str, ...] = DEFAULT_REPORT_INFLATION_MEASURES,
+    current_raw: pd.DataFrame | None = None,
+    current_featured: pd.DataFrame | None = None,
 ) -> MacroResearchReport:
-    """Build the Phase 5 macro research report without changing upstream methods."""
+    """Build the report with separate current-monitoring and research authorities."""
 
-    snapshot = latest_signal_snapshot(featured)
-    if not snapshot.get("available"):
+    if "imputation_policy" in raw.columns:
+        research_policies = set(raw["imputation_policy"].dropna().astype(str))
+        if research_policies and research_policies != {"observed_only"}:
+            raise ValueError("Macro report research inputs must use observed_only data")
+
+    current_raw = raw if current_raw is None else current_raw
+    current_featured = featured if current_featured is None else current_featured
+    current_snapshot = latest_signal_snapshot(current_featured)
+    research_snapshot = latest_signal_snapshot(featured)
+    if not current_snapshot.get("available"):
         return MacroResearchReport(
             available=False,
-            reason=snapshot.get("reason", "No complete current signal is available."),
+            reason=current_snapshot.get("reason", "No complete current signal is available."),
         )
 
     current_lines, current_table = _current_regime_section(
-        raw,
-        featured,
-        snapshot,
+        current_raw,
+        current_featured,
+        current_snapshot,
         baseline_method,
         sample_mode,
         macro_status,
@@ -720,7 +738,7 @@ def build_macro_research_report(
 
     analogs = _historical_analog_table(
         featured,
-        snapshot,
+        research_snapshot,
         market_monthly=market_monthly,
         horizons=market_horizons,
         threshold_pp=threshold_pp,
@@ -731,22 +749,20 @@ def build_macro_research_report(
         market_monthly=market_monthly,
         horizons=market_horizons,
     )
-    imputation_applied = (
-        bool(raw["cpi_imputed"].fillna(False).astype(bool).any())
-        if "cpi_imputed" in raw.columns
-        else False
-    )
-    as_of = date_label(snapshot["date"])
+    signal_notice = current_signal_imputation_notice(current_snapshot)
+    as_of = date_label(current_snapshot["date"])
     headline = (
-        f"As of {as_of}: {snapshot['regime']} inflation regime, "
-        f"short-term pressure {validation_mod.pressure_label(str(snapshot.get('term_structure', 'mixed')))}, "
-        f"TINF 4M {float(snapshot['tinf_4m']):+.2f}pp."
+        f"As of {as_of}: {current_snapshot['regime']} inflation regime, "
+        f"short-term pressure "
+        f"{validation_mod.pressure_label(str(current_snapshot.get('term_structure', 'mixed')))}, "
+        f"TINF 4M {float(current_snapshot['tinf_4m']):+.2f}pp."
     )
 
     return MacroResearchReport(
         available=True,
         as_of=as_of,
         headline=headline,
+        current_signal_notice=signal_notice,
         current_regime_lines=current_lines,
         signal_confidence_lines=signal_confidence_lines,
         robustness_lines=robustness_lines,
@@ -757,9 +773,9 @@ def build_macro_research_report(
             sample_mode,
             macro_status=macro_status,
             market_status=market_status,
-            imputation_applied=imputation_applied,
+            signal_notice=signal_notice,
         ),
-        watchlist=_watchlist(raw, featured, baseline_method),
+        watchlist=_watchlist(current_raw, current_featured, baseline_method),
         current_regime_table=current_table,
         benchmark_metrics=benchmark_metrics,
         benchmark_comparisons=benchmark_comparisons,

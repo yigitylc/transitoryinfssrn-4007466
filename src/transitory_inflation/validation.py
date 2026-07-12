@@ -54,6 +54,8 @@ SUMMARY_COLUMNS: tuple[str, ...] = (
     "absolute_gap_persistent_rate",
     "persistent_rate",
     "reacceleration_rate",
+    "uses_imputed_input",
+    "uses_missing_input",
 )
 
 
@@ -81,6 +83,50 @@ def _nullable_bool(condition: pd.Series, valid: pd.Series) -> pd.Series:
     result = pd.Series(pd.NA, index=condition.index, dtype="boolean")
     result.loc[valid] = condition.loc[valid].astype(bool).to_numpy()
     return result
+
+
+def _lineage_flag(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(False, index=df.index, dtype=bool)
+    return df[column].fillna(False).astype(bool)
+
+
+def _mask_nonobserved_signal_inputs(
+    df: pd.DataFrame,
+    inflation_col: str,
+) -> pd.DataFrame:
+    """Blank lineage-contaminated signal values without removing calendar rows."""
+
+    out = df.copy()
+    if "signal_observed_only_eligible" in out.columns:
+        eligible = out["signal_observed_only_eligible"].fillna(False).astype(bool)
+    elif {
+        "signal_uses_imputed_input",
+        "signal_uses_missing_input",
+    } & set(out.columns):
+        eligible = ~(
+            _lineage_flag(out, "signal_uses_imputed_input")
+            | _lineage_flag(out, "signal_uses_missing_input")
+        )
+    else:
+        return out
+
+    invalid = ~eligible
+    value_cols = [
+        column
+        for column in out.columns
+        if column in {inflation_col, "baseline", "epsilon"}
+        or (
+            column.startswith("tinf_")
+            and "_uses_" not in column
+            and column != "tinf_term_structure"
+        )
+    ]
+    if value_cols:
+        out.loc[invalid, value_cols] = float("nan")
+    if "tinf_term_structure" in out.columns:
+        out.loc[invalid, "tinf_term_structure"] = pd.NA
+    return out
 
 
 def _hit_rate(values: pd.Series) -> float:
@@ -171,12 +217,58 @@ def add_forward_outcomes(
     _require_columns(df, [inflation_col, epsilon_col, tinf_col])
     out = df.copy()
     current_abs_gap = out[epsilon_col].abs()
+    origin_imputed = _lineage_flag(out, "signal_uses_imputed_input")
+    origin_missing = _lineage_flag(out, "signal_uses_missing_input")
 
     for horizon in horizons:
         suffix = _suffix(horizon)
-        cpi_fwd = out[inflation_col].shift(-horizon)
-        epsilon_fwd = out[epsilon_col].shift(-horizon)
-        tinf_fwd = out[tinf_col].shift(-horizon)
+        cpi_fwd_imputed = _lineage_flag(
+            out,
+            f"{inflation_col}_uses_imputed_input",
+        ).shift(-horizon, fill_value=False)
+        epsilon_fwd_imputed = _lineage_flag(
+            out,
+            f"{epsilon_col}_uses_imputed_input",
+        ).shift(-horizon, fill_value=False)
+        tinf_fwd_imputed = _lineage_flag(
+            out,
+            f"{tinf_col}_uses_imputed_input",
+        ).shift(-horizon, fill_value=False)
+        cpi_fwd_missing = _lineage_flag(
+            out,
+            f"{inflation_col}_uses_missing_input",
+        ).shift(-horizon, fill_value=False)
+        epsilon_fwd_missing = _lineage_flag(
+            out,
+            f"{epsilon_col}_uses_missing_input",
+        ).shift(-horizon, fill_value=False)
+        tinf_fwd_missing = _lineage_flag(
+            out,
+            f"{tinf_col}_uses_missing_input",
+        ).shift(-horizon, fill_value=False)
+
+        out[f"cpi_yoy_fwd_{suffix}_uses_imputed_input"] = cpi_fwd_imputed
+        out[f"epsilon_fwd_{suffix}_uses_imputed_input"] = epsilon_fwd_imputed
+        out[f"tinf_4m_fwd_{suffix}_uses_imputed_input"] = tinf_fwd_imputed
+        out[f"cpi_yoy_fwd_{suffix}_uses_missing_input"] = cpi_fwd_missing
+        out[f"epsilon_fwd_{suffix}_uses_missing_input"] = epsilon_fwd_missing
+        out[f"tinf_4m_fwd_{suffix}_uses_missing_input"] = tinf_fwd_missing
+
+        out[f"outcome_{suffix}_uses_imputed_input"] = (
+            origin_imputed | cpi_fwd_imputed | epsilon_fwd_imputed | tinf_fwd_imputed
+        )
+        out[f"outcome_{suffix}_uses_missing_input"] = (
+            origin_missing | cpi_fwd_missing | epsilon_fwd_missing | tinf_fwd_missing
+        )
+        eligible = ~(
+            out[f"outcome_{suffix}_uses_imputed_input"]
+            | out[f"outcome_{suffix}_uses_missing_input"]
+        )
+        out[f"observed_only_eligible_{suffix}"] = eligible
+
+        cpi_fwd = out[inflation_col].shift(-horizon).where(eligible)
+        epsilon_fwd = out[epsilon_col].shift(-horizon).where(eligible)
+        tinf_fwd = out[tinf_col].shift(-horizon).where(eligible)
 
         out[f"cpi_yoy_fwd_{suffix}"] = cpi_fwd
         out[f"cpi_yoy_change_{suffix}"] = cpi_fwd - out[inflation_col]
@@ -316,7 +408,8 @@ def build_historical_validation_frame(
 ) -> pd.DataFrame:
     """Build the full validation frame from an already-computed signal frame."""
 
-    out = add_short_term_pressure_labels(df)
+    out = _mask_nonobserved_signal_inputs(df, inflation_col=inflation_col)
+    out = add_short_term_pressure_labels(out)
     out = add_walk_forward_regime_labels(out)
     out = add_forward_outcomes(
         out,
@@ -418,6 +511,12 @@ def _forward_outcome_summary_by_groups(
                     ),
                     "persistent_rate": _hit_rate(group[f"persistent_{suffix}"]),
                     "reacceleration_rate": _hit_rate(group[f"reaccelerated_{suffix}"]),
+                    "uses_imputed_input": bool(
+                        _lineage_flag(group, f"outcome_{suffix}_uses_imputed_input").any()
+                    ),
+                    "uses_missing_input": bool(
+                        _lineage_flag(group, f"outcome_{suffix}_uses_missing_input").any()
+                    ),
                 }
             )
             rows.append(row)
@@ -537,6 +636,18 @@ def threshold_sensitivity_summary(
                 ),
                 "persistent_rate": _hit_rate(current[f"persistent_{suffix}"]),
                 "reacceleration_rate": _hit_rate(current[f"reaccelerated_{suffix}"]),
+                "uses_imputed_input": bool(
+                    _lineage_flag(
+                        current,
+                        f"outcome_{suffix}_uses_imputed_input",
+                    ).any()
+                ),
+                "uses_missing_input": bool(
+                    _lineage_flag(
+                        current,
+                        f"outcome_{suffix}_uses_missing_input",
+                    ).any()
+                ),
             }
         )
 

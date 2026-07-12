@@ -169,7 +169,6 @@ def test_paper_reconstruction_uses_literal_lag_and_a_separate_feature_path() -> 
         assert out[f"tinf_{window}m"].iloc[target] == expected
 
 
-@PENDING_B2_IMPUTATION
 def test_observed_only_cpi_is_invariant_to_the_future_neighbor() -> None:
     signature = inspect.signature(data_mod.build_base_frame)
     assert "imputation_policy" in signature.parameters
@@ -196,7 +195,6 @@ def test_observed_only_cpi_is_invariant_to_the_future_neighbor() -> None:
     assert not gap["cpi_imputed"]
 
 
-@PENDING_H1_CACHE_PROVENANCE
 def test_cache_reload_preserves_original_missingness_and_ex_post_lineage(
     tmp_path: Path,
     monkeypatch,
@@ -377,3 +375,26 @@ def test_overlapping_horizons_do_not_emit_naive_uncertainty() -> None:
     assert bool(row["overlapping_outcomes"])
     assert row["non_overlapping_count"] == 2
     assert row["uncertainty_status"] == "unavailable"
+
+
+def test_unrelated_phase0_findings_remain_strict_xfail_gates() -> None:
+    expected_pending_tests = {
+        "test_current_paper_surface_is_explicitly_paper_inspired",
+        "test_paper_reconstruction_uses_literal_lag_and_a_separate_feature_path",
+        "test_reference_month_is_not_silently_used_as_information_date",
+        "test_perfect_forecast_and_actual_use_the_same_origin_baseline",
+        "test_benchmark_forecasts_use_one_universal_origin_set_for_all_models",
+        "test_validation_rates_expose_metric_specific_numerators_and_denominators",
+        "test_metric_evidence_strength_preserves_the_29_30_boundary",
+        "test_overlapping_horizons_do_not_emit_naive_uncertainty",
+    }
+
+    for test_name in expected_pending_tests:
+        test_function = globals()[test_name]
+        xfail_marks = [
+            mark
+            for mark in getattr(test_function, "pytestmark", ())
+            if mark.name == "xfail"
+        ]
+        assert len(xfail_marks) == 1, f"{test_name} must retain one xfail marker"
+        assert xfail_marks[0].kwargs.get("strict") is True

@@ -94,6 +94,42 @@ def consecutive_true_count(flag: pd.Series) -> pd.Series:
     return pd.Series(out, index=flag.index, name="run_length_above")
 
 
+def _lineage_flag(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(False, index=df.index, dtype=bool)
+    return df[column].fillna(False).astype(bool)
+
+
+def _baseline_lineage(
+    flag: pd.Series,
+    method: str,
+    rolling_window: int = 36,
+) -> pd.Series:
+    """Propagate a CPI-input flag through the selected baseline dependency set."""
+
+    numeric = flag.fillna(False).astype(int)
+    if method == "full_sample":
+        return pd.Series(bool(numeric.any()), index=flag.index, dtype=bool)
+    if method == "rolling_36_unshifted":
+        return numeric.rolling(rolling_window, min_periods=1).max().astype(bool)
+    if method == "rolling_36_shifted":
+        return (
+            numeric.rolling(rolling_window, min_periods=1)
+            .max()
+            .shift(1, fill_value=0)
+            .astype(bool)
+        )
+    if method == "expanding_shifted":
+        return numeric.expanding(min_periods=1).max().shift(1, fill_value=0).astype(bool)
+    if method == "fed_target":
+        return pd.Series(False, index=flag.index, dtype=bool)
+    raise ValueError(f"Unknown baseline method: {method}")
+
+
+def _rolling_lineage(flag: pd.Series, window: int) -> pd.Series:
+    return flag.astype(int).rolling(window, min_periods=1).max().astype(bool)
+
+
 def add_transitory_inflation_features(
     df: pd.DataFrame,
     inflation_col: str = "inflation_yoy",
@@ -113,8 +149,63 @@ def add_transitory_inflation_features(
     out["baseline"] = compute_baseline(out[inflation_col], baseline_method)
     out["epsilon"] = out[inflation_col] - out["baseline"]
 
+    inflation_imputed = _lineage_flag(
+        out,
+        f"{inflation_col}_uses_imputed_input",
+    )
+    inflation_missing = _lineage_flag(
+        out,
+        f"{inflation_col}_uses_missing_input",
+    )
+    out["baseline_uses_imputed_input"] = _baseline_lineage(
+        inflation_imputed,
+        baseline_method,
+    )
+    out["baseline_uses_missing_input"] = _baseline_lineage(
+        inflation_missing,
+        baseline_method,
+    )
+    out["epsilon_uses_imputed_input"] = (
+        inflation_imputed | out["baseline_uses_imputed_input"]
+    )
+    out["epsilon_uses_missing_input"] = (
+        inflation_missing | out["baseline_uses_missing_input"]
+    )
+
     for window in tinf_windows:
         out[f"tinf_{window}m"] = out["epsilon"].rolling(window, min_periods=window).mean()
+        out[f"tinf_{window}m_uses_imputed_input"] = _rolling_lineage(
+            out["epsilon_uses_imputed_input"],
+            window,
+        )
+        out[f"tinf_{window}m_uses_missing_input"] = _rolling_lineage(
+            out["epsilon_uses_missing_input"],
+            window,
+        )
+
+    imputed_lineage_cols = [
+        f"{inflation_col}_uses_imputed_input",
+        "baseline_uses_imputed_input",
+        "epsilon_uses_imputed_input",
+        *(f"tinf_{window}m_uses_imputed_input" for window in tinf_windows),
+    ]
+    missing_lineage_cols = [
+        f"{inflation_col}_uses_missing_input",
+        "baseline_uses_missing_input",
+        "epsilon_uses_missing_input",
+        *(f"tinf_{window}m_uses_missing_input" for window in tinf_windows),
+    ]
+    out["signal_uses_imputed_input"] = pd.concat(
+        [_lineage_flag(out, column) for column in imputed_lineage_cols],
+        axis=1,
+    ).any(axis=1)
+    out["signal_uses_missing_input"] = pd.concat(
+        [_lineage_flag(out, column) for column in missing_lineage_cols],
+        axis=1,
+    ).any(axis=1)
+    out["signal_observed_only_eligible"] = ~(
+        out["signal_uses_imputed_input"] | out["signal_uses_missing_input"]
+    )
 
     out["above_baseline"] = out["epsilon"] > 0
     out["run_length_above"] = consecutive_true_count(out["above_baseline"])
@@ -150,6 +241,41 @@ def latest_signal_snapshot(df: pd.DataFrame) -> dict[str, object]:
     prev = clean.iloc[-2] if len(clean) >= 2 else latest
     rising = latest["tinf_4m"] > prev["tinf_4m"]
 
+    component_imputation_lineage = {
+        "inflation_yoy_uses_imputed_input": bool(
+            latest.get("inflation_yoy_uses_imputed_input", False)
+        ),
+        "baseline_uses_imputed_input": bool(
+            latest.get("baseline_uses_imputed_input", False)
+        ),
+        "epsilon_uses_imputed_input": bool(
+            latest.get("epsilon_uses_imputed_input", False)
+        ),
+        "tinf_4m_uses_imputed_input": bool(
+            latest.get("tinf_4m_uses_imputed_input", False)
+        ),
+        "tinf_8m_uses_imputed_input": bool(
+            latest.get("tinf_8m_uses_imputed_input", False)
+        ),
+        "tinf_12m_uses_imputed_input": bool(
+            latest.get("tinf_12m_uses_imputed_input", False)
+        ),
+    }
+    # Percentiles and the regime thresholds are full-sample descriptive reads.
+    # Conservatively retain lineage when any TINF observation contributing to
+    # their reference distribution depends on an estimated CPI input.
+    distribution_uses_imputed_input = bool(
+        _lineage_flag(clean, "tinf_4m_uses_imputed_input").any()
+    )
+    component_imputation_lineage["percentile_uses_imputed_input"] = (
+        distribution_uses_imputed_input
+    )
+    component_imputation_lineage["regime_uses_imputed_input"] = (
+        distribution_uses_imputed_input
+    )
+    uses_imputed_input = any(component_imputation_lineage.values())
+    uses_missing_input = bool(latest.get("signal_uses_missing_input", False))
+
     if latest["tinf_4m"] > tinf_hist.quantile(0.75):
         regime = "elevated rising" if rising else "elevated falling"
     elif latest["tinf_4m"] < tinf_hist.quantile(0.25):
@@ -169,4 +295,9 @@ def latest_signal_snapshot(df: pd.DataFrame) -> dict[str, object]:
         "tinf_4m_percentile": percentile,
         "regime": regime,
         "term_structure": latest.get("tinf_term_structure", "n/a"),
+        **component_imputation_lineage,
+        "uses_imputed_input": uses_imputed_input,
+        "uses_missing_input": uses_missing_input,
+        "observed_only_eligible": not (uses_imputed_input or uses_missing_input),
+        "imputation_policy": latest.get("imputation_policy", "unspecified"),
     }

@@ -12,8 +12,11 @@ from transitory_inflation.data import (
     BASE_FRED_SERIES,
     FRED_API_URL,
     INFLATION_MEASURES,
+    MACRO_CACHE_SCHEMA_COLUMN,
+    MACRO_CACHE_SCHEMA_VERSION,
     apply_sample_mode,
     build_base_frame,
+    build_macro_cache_frame,
     find_cached_macro_data_file,
     latest_valid_observation_date,
     load_cached_macro_data_for_mode,
@@ -96,19 +99,88 @@ def test_build_base_frame_end_date_trims_inclusively() -> None:
     assert out["date"].iloc[0] == pd.Timestamp("1982-01-31")
 
 
-def test_build_base_frame_bridges_single_month_cpi_gap_log_linearly() -> None:
+def test_build_base_frame_defaults_to_observed_only_with_explicit_lineage() -> None:
+    dates = pd.date_range("2018-01-31", periods=30, freq="ME")
+    levels = 100.0 + np.arange(30, dtype=float)
+    gap_pos = 16
+    levels[gap_pos] = np.nan
+
+    out = build_base_frame(
+        pd.DataFrame({"date": dates, "CPIAUCSL": levels, "TB3MS": 1.0})
+    )
+
+    gap = out.iloc[gap_pos]
+    lagged_effect = out.iloc[gap_pos + 12]
+    assert out["imputation_policy"].eq("observed_only").all()
+    assert gap["cpi_originally_missing"]
+    assert pd.isna(gap["cpi_observed_level"])
+    assert pd.isna(gap["cpi_level"])
+    assert not gap["cpi_imputed"]
+    assert pd.isna(gap["inflation_yoy"])
+    assert gap["inflation_yoy_uses_missing_input"]
+    assert not gap["inflation_yoy_uses_imputed_input"]
+    assert pd.isna(lagged_effect["inflation_yoy"])
+    assert lagged_effect["inflation_yoy_uses_missing_input"]
+
+
+def test_pre_series_rows_are_unavailable_not_officially_missing_inputs() -> None:
+    dates = pd.date_range("2010-01-31", periods=30, freq="ME")
+    levels = np.concatenate([np.full(5, np.nan), 100.0 + np.arange(25, dtype=float)])
+
+    out = build_base_frame(
+        pd.DataFrame({"date": dates, "CPIAUCSL": levels, "TB3MS": 1.0})
+    )
+
+    assert out.loc[:4, "cpi_source_unavailable"].all()
+    assert not out.loc[:4, "cpi_originally_missing"].any()
+    assert not out.loc[:4, "inflation_yoy_uses_missing_input"].any()
+    assert not out.loc[5:, "cpi_source_unavailable"].any()
+
+
+def test_build_base_frame_rejects_unknown_imputation_policy() -> None:
+    merged = pd.DataFrame(
+        {
+            "date": pd.date_range("2020-01-31", periods=2, freq="ME"),
+            "CPIAUCSL": [100.0, 101.0],
+            "TB3MS": 1.0,
+        }
+    )
+
+    with pytest.raises(ValueError, match="Unknown imputation policy"):
+        build_base_frame(merged, imputation_policy="one_sided_nowcast")
+    with pytest.raises(ValueError, match="Unknown imputation policy"):
+        load_cached_macro_data_for_mode(
+            "max_history",
+            imputation_policy="one_sided_nowcast",
+        )
+
+
+def test_build_base_frame_ex_post_bridges_single_month_cpi_gap_log_linearly() -> None:
     # Mirrors the canceled 2025-10 CPI release: one interior month missing.
     dates = pd.date_range("1981-01-01", "1983-12-01", freq="MS")
     cpi = 100.0 * (1.005 ** np.arange(len(dates), dtype=float))
     cpi[22] = np.nan  # 1982-11, interior single-month gap
 
     merged = pd.DataFrame({"date": dates, "CPIAUCSL": cpi, "TB3MS": 5.0})
-    out = build_base_frame(merged, start_date="1982-01-01", end_date=None)
+    out = build_base_frame(
+        merged,
+        start_date="1982-01-01",
+        end_date=None,
+        imputation_policy="ex_post_continuity",
+    )
 
     gap_row = out.loc[out["date"] == pd.Timestamp("1982-11-30")].iloc[0]
     # Log-linear bridge = geometric mean of neighbors, which under constant
     # growth recovers the true level exactly.
     assert gap_row["cpi_imputed"]
+    assert gap_row["cpi_originally_missing"]
+    assert pd.isna(gap_row["cpi_observed_level"])
+    assert gap_row["imputation_method"] == "log_linear_bridge"
+    assert pd.notna(gap_row["imputation_available_at"])
+    assert (
+        gap_row["imputation_availability_basis"]
+        == "following_reference_month_end_plus_one_month_proxy"
+    )
     assert abs(gap_row["cpi_level"] - 100.0 * 1.005**22) < 1e-9
     assert int(out["cpi_imputed"].sum()) == 1
     assert out["inflation_yoy"].notna().all()
@@ -165,7 +237,7 @@ def test_build_base_frame_adds_alternative_inflation_measure_columns() -> None:
     assert out["core_pce_yoy"].notna().all()
 
 
-def test_build_base_frame_imputes_alternative_measure_single_gap_not_tail() -> None:
+def test_build_base_frame_ex_post_imputes_alternative_measure_single_gap_not_tail() -> None:
     dates = pd.date_range("1981-01-01", "1983-12-01", freq="MS")
     trend = np.arange(len(dates), dtype=float)
     core_cpi = 95.0 * (1.004**trend)
@@ -182,7 +254,12 @@ def test_build_base_frame_imputes_alternative_measure_single_gap_not_tail() -> N
         }
     )
 
-    out = build_base_frame(merged, start_date="1982-01-01", end_date=None)
+    out = build_base_frame(
+        merged,
+        start_date="1982-01-01",
+        end_date=None,
+        imputation_policy="ex_post_continuity",
+    )
 
     core_gap_row = out.loc[out["date"] == pd.Timestamp("1982-11-30")].iloc[0]
     pce_tail_row = out.loc[out["date"] == pd.Timestamp("1983-12-31")].iloc[0]
@@ -248,6 +325,58 @@ class _FakeResponse:
         return self._payload
 
 
+def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _workspace_temp_dir() as cache_dir:
+        cache_path = Path(cache_dir)
+        monkeypatch.setattr("transitory_inflation.data.RAW_DATA_DIR", cache_path)
+        dates = pd.date_range("2018-01-31", periods=30, freq="ME")
+        levels = 100.0 + np.arange(30, dtype=float)
+        gap_pos = 16
+        levels[gap_pos] = np.nan
+        releases = dates + pd.offsets.Day(15)
+        processed = build_base_frame(
+            pd.DataFrame(
+                {
+                    "date": dates,
+                    "CPIAUCSL": levels,
+                    "TB3MS": 1.0,
+                    "release_timestamp": releases,
+                }
+            ),
+            imputation_policy="ex_post_continuity",
+        )
+
+        cache = build_macro_cache_frame(processed)
+        assert cache[MACRO_CACHE_SCHEMA_COLUMN].eq(MACRO_CACHE_SCHEMA_VERSION).all()
+        assert pd.isna(cache.loc[gap_pos, "CPIAUCSL"])
+        assert cache.loc[gap_pos, "cpi_originally_missing"]
+        assert "cpi_level" not in cache.columns
+        assert "cpi_imputed" not in cache.columns
+        assert cache.loc[gap_pos + 1, "release_timestamp"] == releases[gap_pos + 1]
+        cache.to_csv(cache_path / "fred_base_macro_max_history.csv", index=False)
+
+        observed = load_cached_macro_data_for_mode("max_history")
+        continuity = load_cached_macro_data_for_mode(
+            "max_history",
+            imputation_policy="ex_post_continuity",
+        )
+
+        assert observed.loc[gap_pos, "cpi_originally_missing"]
+        assert pd.isna(observed.loc[gap_pos, "cpi_level"])
+        assert not observed.loc[gap_pos, "cpi_imputed"]
+        assert continuity.loc[gap_pos, "cpi_originally_missing"]
+        assert continuity.loc[gap_pos, "cpi_imputed"]
+        assert pd.notna(continuity.loc[gap_pos, "cpi_level"])
+        assert continuity.loc[gap_pos, "imputation_method"] == "log_linear_bridge"
+        assert continuity.loc[gap_pos, "imputation_available_at"] == releases[gap_pos + 1]
+        assert (
+            continuity.loc[gap_pos, "imputation_availability_basis"]
+            == "following_release_timestamp"
+        )
+
+
 def test_cached_macro_loader_uses_max_history_superset(monkeypatch: pytest.MonkeyPatch) -> None:
     with _workspace_temp_dir() as cache_dir:
         cache_path = Path(cache_dir)
@@ -256,9 +385,8 @@ def test_cached_macro_loader_uses_max_history_superset(monkeypatch: pytest.Monke
         cache = pd.DataFrame(
             {
                 "date": dates,
-                "cpi_level": np.arange(len(dates), dtype=float) + 100,
-                "tbill_3m": 4.0,
-                "inflation_yoy": np.arange(len(dates), dtype=float) / 10,
+                "CPIAUCSL": np.arange(len(dates), dtype=float) + 100,
+                "TB3MS": 4.0,
             }
         )
         cache.to_csv(cache_path / "fred_base_macro_max_history.csv", index=False)
@@ -295,7 +423,52 @@ def test_cached_macro_loader_prefers_exact_mode_cache(monkeypatch: pytest.Monkey
             == "fred_base_macro_live_dashboard.csv"
         )
         assert out["cpi_imputed"].tolist() == [False, False, False]
+        assert out["cpi_originally_missing"].tolist() == [False, True, False]
+        assert pd.isna(out.loc[1, "cpi_level"])
         assert not out["inflation_yoy"].equals(exact["inflation_yoy"])
+
+
+def test_legacy_processed_cache_without_missingness_provenance_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _workspace_temp_dir() as cache_dir:
+        cache_path = Path(cache_dir)
+        monkeypatch.setattr("transitory_inflation.data.RAW_DATA_DIR", cache_path)
+        ambiguous = pd.DataFrame(
+            {
+                "date": pd.date_range("2020-01-31", periods=15, freq="ME"),
+                "cpi_level": np.arange(15, dtype=float) + 100,
+                "tbill_3m": 4.0,
+            }
+        )
+        ambiguous.to_csv(cache_path / "fred_base_macro_max_history.csv", index=False)
+
+        with pytest.raises(
+            ValueError,
+            match="lacks a trusted schema marker and missingness provenance",
+        ):
+            load_cached_macro_data_for_mode("max_history")
+
+
+def test_versioned_normalized_cache_cannot_claim_raw_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _workspace_temp_dir() as cache_dir:
+        cache_path = Path(cache_dir)
+        monkeypatch.setattr("transitory_inflation.data.RAW_DATA_DIR", cache_path)
+        invalid = pd.DataFrame(
+            {
+                "date": pd.date_range("2020-01-31", periods=15, freq="ME"),
+                MACRO_CACHE_SCHEMA_COLUMN: MACRO_CACHE_SCHEMA_VERSION,
+                "cpi_level": np.arange(15, dtype=float) + 100,
+                "tbill_3m": 4.0,
+                "cpi_imputed": False,
+            }
+        )
+        invalid.to_csv(cache_path / "fred_base_macro_max_history.csv", index=False)
+
+        with pytest.raises(ValueError, match="must use the raw-authority"):
+            load_cached_macro_data_for_mode("max_history")
 
 
 def test_cache_fallback_rebuilds_raw_cache_and_bridges_isolated_cpi_gap(
@@ -328,9 +501,13 @@ def test_cache_fallback_rebuilds_raw_cache_and_bridges_isolated_cpi_gap(
 
         monkeypatch.setattr("transitory_inflation.data.requests.get", fake_get)
 
-        result = load_macro_data_for_mode_with_status("max_history")
+        result = load_macro_data_for_mode_with_status(
+            "max_history",
+            imputation_policy="ex_post_continuity",
+        )
 
         assert result.data_source_used == "cached_fred"
+        assert result.imputation_policy == "ex_post_continuity"
         assert "is_demo_data" not in result.data.columns
         assert result.cache_file_used == "fred_base_macro_max_history.csv"
 
@@ -431,7 +608,9 @@ def test_api_failure_falls_back_to_csv_without_exposing_key(
     assert "[redacted]" in result.live_fetch_status
 
 
-def test_api_loaded_data_still_applies_cpi_imputation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_api_loaded_data_applies_cpi_imputation_only_when_ex_post_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("FRED_API_KEY", "secret-test-key")
 
     def fake_get(url: str, **kwargs: object) -> _FakeResponse:
@@ -446,8 +625,16 @@ def test_api_loaded_data_still_applies_cpi_imputation(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr("transitory_inflation.data.requests.get", fake_get)
 
-    result = load_macro_data_for_mode_with_status("max_history")
+    observed = load_macro_data_for_mode_with_status("max_history")
+    result = load_macro_data_for_mode_with_status(
+        "max_history",
+        imputation_policy="ex_post_continuity",
+    )
 
+    observed_gap = observed.data.iloc[6]
+    assert observed_gap["cpi_originally_missing"]
+    assert pd.isna(observed_gap["cpi_level"])
+    assert not observed_gap["cpi_imputed"]
     assert result.data_source_used == "fred_api"
     assert result.data["cpi_imputed"].any()
 
@@ -469,7 +656,10 @@ def test_api_loaded_data_applies_alternative_measure_imputation(
 
     monkeypatch.setattr("transitory_inflation.data.requests.get", fake_get)
 
-    result = load_macro_data_for_mode_with_status("max_history")
+    result = load_macro_data_for_mode_with_status(
+        "max_history",
+        imputation_policy="ex_post_continuity",
+    )
 
     assert result.data_source_used == "fred_api"
     assert result.data["core_cpi_imputed"].any()
@@ -513,9 +703,8 @@ def test_cache_fallback_still_works_when_api_and_csv_fail(
         cache = pd.DataFrame(
             {
                 "date": pd.date_range("2020-01-31", periods=15, freq="ME"),
-                "cpi_level": np.arange(15, dtype=float) + 100,
-                "tbill_3m": 4.0,
-                "inflation_yoy": np.arange(15, dtype=float) / 10,
+                "CPIAUCSL": np.arange(15, dtype=float) + 100,
+                "TB3MS": 4.0,
             }
         )
         cache.to_csv(cache_path / "fred_base_macro_max_history.csv", index=False)

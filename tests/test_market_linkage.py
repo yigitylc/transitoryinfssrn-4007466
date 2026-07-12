@@ -84,6 +84,29 @@ def test_future_market_values_do_not_alter_tinf_or_regime_labels() -> None:
         assert panel[column].equals(changed[column])
 
 
+def test_market_linkage_masks_imputed_signal_rows_without_compressing_horizons() -> None:
+    signal = _signal_frame(periods=60)
+    contaminated_pos = 40
+    signal.loc[contaminated_pos, "signal_uses_imputed_input"] = True
+    signal.loc[contaminated_pos, "signal_observed_only_eligible"] = False
+    market = pd.DataFrame(
+        {
+            "date": signal["date"],
+            "yield_2y": np.arange(len(signal), dtype=float),
+        }
+    )
+
+    panel = build_market_linkage_panel(signal, market, horizons=(2,))
+
+    assert pd.isna(panel.loc[contaminated_pos, "tinf_4m"])
+    assert pd.isna(panel.loc[contaminated_pos, "historical_regime"])
+    assert pd.isna(panel.loc[contaminated_pos, "historical_short_term_pressure"])
+    assert panel.loc[contaminated_pos - 1, "yield_2y_fwd_2m"] == market.loc[
+        contaminated_pos + 1,
+        "yield_2y",
+    ]
+
+
 def test_market_summary_excludes_rows_without_full_forward_market_data() -> None:
     signal = pd.DataFrame(
         {

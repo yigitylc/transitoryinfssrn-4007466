@@ -13,6 +13,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from transitory_inflation import benchmarks as benchmark_mod
+from transitory_inflation import dashboard as dashboard_mod
 from transitory_inflation import data as macro_data
 from transitory_inflation import market_data as market_data_mod
 from transitory_inflation import market_linkage as market_linkage_mod
@@ -389,6 +390,8 @@ def get_robustness_tables(
 def get_macro_research_report(
     raw: pd.DataFrame,
     featured: pd.DataFrame,
+    current_raw: pd.DataFrame,
+    current_featured: pd.DataFrame,
     baseline_method: str,
     sample_mode: str,
     market_monthly: pd.DataFrame | None,
@@ -403,6 +406,8 @@ def get_macro_research_report(
         macro_status=_macro_status,
         market_monthly=market_monthly,
         market_status=_market_status,
+        current_raw=current_raw,
+        current_featured=current_featured,
     )
 
 
@@ -450,8 +455,16 @@ st.info(
 if meta.warning:
     st.warning(meta.warning)
 
-df = add_transitory_inflation_features(raw, baseline_method=baseline_method)
-status_snapshot = latest_signal_snapshot(df)
+dashboard_views = dashboard_mod.build_dashboard_data_views(
+    raw,
+    baseline_method=baseline_method,
+)
+raw = dashboard_views.research_raw
+df = dashboard_views.research_featured
+current_raw = dashboard_views.current_raw
+current_df = dashboard_views.current_featured
+status_snapshot = dashboard_views.current_snapshot
+current_signal_notice = dashboard_mod.current_signal_imputation_notice(status_snapshot)
 latest_signal_date = (
     macro_data.date_label(pd.to_datetime(status_snapshot["date"]))
     if status_snapshot.get("available")
@@ -469,9 +482,11 @@ with st.sidebar:
         )
     else:
         st.caption("No complete signal yet for this mode/baseline.")
-latest_cpi_observation = macro_data.latest_valid_observation_date(raw, "cpi_level")
-imputation_applied = bool(
-    "cpi_imputed" in raw.columns and raw["cpi_imputed"].fillna(False).astype(bool).any()
+    if current_signal_notice:
+        st.caption(current_signal_notice)
+latest_cpi_observation = macro_data.latest_valid_observation_date(raw, "cpi_observed_level")
+current_imputation_applied = bool(
+    status_snapshot.get("available") and status_snapshot.get("uses_imputed_input")
 )
 st.caption(
     "Data status: "
@@ -482,18 +497,9 @@ st.caption(
     f"latest_cpi_observation_date={macro_data.date_label(latest_cpi_observation)}; "
     f"latest_valid_cpi_yoy_date={span_end}; "
     f"latest_valid_signal_date={latest_signal_date}; "
-    f"cpi_imputation_applied={imputation_applied}."
+    f"research_imputation_policy={load_result.imputation_policy}; "
+    f"current_descriptive_imputation_applied={current_imputation_applied}."
 )
-
-if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
-    imputed_months = ", ".join(
-        d.strftime("%Y-%m") for d in pd.to_datetime(raw.loc[raw["cpi_imputed"], "date"])
-    )
-    st.caption(
-        f"Data status: CPI level log-linearly imputed for {imputed_months} "
-        "(no CPI was published for these months). "
-        "YoY and TINF values touching them are partly estimates."
-    )
 
 # Benchmarks (Phase 2) precede Market Linkage (Phase 4) to match the roadmap's
 # "no linkage until Phase 2 confirms usefulness" narrative. The `with tab_*:`
@@ -523,7 +529,9 @@ if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
 )
 
 with tab_signal:
-    snapshot = latest_signal_snapshot(df)
+    snapshot = latest_signal_snapshot(current_df)
+    if current_signal_notice:
+        st.warning(current_signal_notice)
     if not snapshot.get("available"):
         st.warning(snapshot.get("reason", "No signal available."))
     else:
@@ -566,7 +574,7 @@ with tab_signal:
             "regimes and will shift both.",
         )
 
-    st.plotly_chart(plots_mod.cpi_vs_baseline_figure(df), width="stretch")
+    st.plotly_chart(plots_mod.cpi_vs_baseline_figure(current_df), width="stretch")
     section_notes(
         "How CPI YoY inflation has tracked the selected mean-reversion baseline over the whole loaded "
         "sample: when inflation crossed above or below it, how long those episodes lasted, and how "
@@ -579,7 +587,7 @@ with tab_signal:
         "while the full-sample baseline is flat and ex-post only.",
     )
 
-    st.plotly_chart(plots_mod.tinf_term_structure_figure(df), width="stretch")
+    st.plotly_chart(plots_mod.tinf_term_structure_figure(current_df), width="stretch")
     section_notes(
         "Whether the transitory component is building or fading across horizons: the same deviation "
         "series averaged over 4, 8, and 12 months, so recent pressure (4M) can be compared against "
@@ -1457,6 +1465,8 @@ with tab_report:
     report = get_macro_research_report(
         raw,
         df,
+        current_raw,
+        current_df,
         baseline_method,
         sample_mode,
         report_market_result.data,
@@ -1471,13 +1481,15 @@ with tab_report:
                 "Selected baseline is ex-post. This report describes history, not a live signal — "
                 "switch to a live-safe baseline for current-signal use."
             )
+        if report.current_signal_notice:
+            st.warning(report.current_signal_notice)
         st.markdown(f"**{report.headline}**")
 
         # Executive read: reuse tab 1's snapshot-card pattern over the same
         # latest_signal_snapshot values the report builder uses internally, so the
         # headline + current regime read as cards instead of prose. Presentation
         # only — no number changes.
-        report_snapshot = latest_signal_snapshot(df)
+        report_snapshot = latest_signal_snapshot(current_df)
         if report_snapshot.get("available"):
             st.markdown(
                 f"**Regime:** {regime_badge(report_snapshot['regime'])}  |  "

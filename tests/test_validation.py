@@ -4,10 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from transitory_inflation.data import build_base_frame
+from transitory_inflation.features import add_transitory_inflation_features
 from transitory_inflation.validation import (
     add_forward_outcomes,
     add_outcome_labels,
     add_walk_forward_regime_labels,
+    build_historical_validation_frame,
     forward_outcome_summary_by_regime,
     forward_outcome_summary_by_regime_and_pressure,
     forward_outcome_summary_by_short_term_pressure,
@@ -49,6 +52,91 @@ def test_forward_horizon_terminal_rows_are_nan() -> None:
     assert out.loc[5:, "cpi_yoy_fwd_3m"].isna().all()
     assert out.loc[5:, "epsilon_fwd_3m"].isna().all()
     assert out.loc[5:, "tinf_4m_fwd_3m"].isna().all()
+
+
+def test_forward_outcomes_exclude_imputed_origins_and_targets_with_lineage() -> None:
+    df = _validation_frame(periods=7)
+    df["historical_regime"] = "neutral"
+    df["signal_uses_imputed_input"] = False
+    df["signal_uses_missing_input"] = False
+    for column in (
+        "inflation_yoy_uses_imputed_input",
+        "epsilon_uses_imputed_input",
+        "tinf_4m_uses_imputed_input",
+        "inflation_yoy_uses_missing_input",
+        "epsilon_uses_missing_input",
+        "tinf_4m_uses_missing_input",
+    ):
+        df[column] = False
+    df.loc[1, "signal_uses_imputed_input"] = True
+    df.loc[
+        3,
+        [
+            "inflation_yoy_uses_imputed_input",
+            "epsilon_uses_imputed_input",
+            "tinf_4m_uses_imputed_input",
+        ],
+    ] = True
+
+    out = add_forward_outcomes(df, horizons=(2,))
+    assert out.loc[1, "outcome_2m_uses_imputed_input"]
+    assert not out.loc[1, "observed_only_eligible_2m"]
+    assert pd.isna(out.loc[1, "cpi_yoy_fwd_2m"])
+    assert not out.loc[0, "outcome_2m_uses_imputed_input"]
+    assert out.loc[0, "cpi_yoy_fwd_2m"] == df.loc[2, "inflation_yoy"]
+
+    labelled = add_outcome_labels(out, horizons=(2,))
+    summary = forward_outcome_summary_by_regime(labelled, horizons=(2,))
+    assert not summary.iloc[0]["uses_imputed_input"]
+    assert not summary.iloc[0]["uses_missing_input"]
+
+
+def test_observed_validation_values_match_ex_post_values_after_lineage_exclusions() -> None:
+    dates = pd.date_range("2010-01-31", periods=120, freq="ME")
+    levels = 100.0 * (1.002 ** np.arange(120, dtype=float))
+    levels[60] = np.nan
+    raw = pd.DataFrame({"date": dates, "CPIAUCSL": levels, "TB3MS": 1.0})
+    observed = add_transitory_inflation_features(
+        build_base_frame(raw, imputation_policy="observed_only"),
+        baseline_method="fed_target",
+    )
+    continuity = add_transitory_inflation_features(
+        build_base_frame(raw, imputation_policy="ex_post_continuity"),
+        baseline_method="fed_target",
+    )
+
+    observed_validation = build_historical_validation_frame(
+        observed,
+        forward_horizons=(1,),
+        label_horizons=(1,),
+    )
+    continuity_validation = build_historical_validation_frame(
+        continuity,
+        forward_horizons=(1,),
+        label_horizons=(1,),
+    )
+    columns = [
+        "inflation_yoy",
+        "epsilon",
+        "tinf_4m",
+        "historical_regime",
+        "cpi_yoy_fwd_1m",
+        "epsilon_fwd_1m",
+    ]
+    pd.testing.assert_frame_equal(
+        observed_validation[columns],
+        continuity_validation[columns],
+    )
+
+    observed_summary = forward_outcome_summary_by_regime(
+        add_outcome_labels(observed_validation, horizons=(1,)),
+        horizons=(1,),
+    )
+    continuity_summary = forward_outcome_summary_by_regime(
+        add_outcome_labels(continuity_validation, horizons=(1,)),
+        horizons=(1,),
+    )
+    pd.testing.assert_frame_equal(observed_summary, continuity_summary)
 
 
 def test_normalization_labels_follow_configured_thresholds() -> None:

@@ -161,10 +161,39 @@ def build_market_linkage_panel(
     signal = signal_features.copy()
     signal["date"] = _month_end_dates(signal["date"])
 
-    if "historical_short_term_pressure" not in signal.columns:
+    has_lineage = bool(
+        {
+            "signal_observed_only_eligible",
+            "signal_uses_imputed_input",
+            "signal_uses_missing_input",
+        }
+        & set(signal.columns)
+    )
+    if "signal_observed_only_eligible" in signal.columns:
+        eligible = signal["signal_observed_only_eligible"].fillna(False).astype(bool)
+    else:
+        imputed = signal.get(
+            "signal_uses_imputed_input",
+            pd.Series(False, index=signal.index, dtype=bool),
+        ).fillna(False).astype(bool)
+        missing = signal.get(
+            "signal_uses_missing_input",
+            pd.Series(False, index=signal.index, dtype=bool),
+        ).fillna(False).astype(bool)
+        eligible = ~(imputed | missing)
+
+    invalid = ~eligible
+    signal.loc[invalid, list(DEFAULT_SIGNAL_COLUMNS)] = float("nan")
+    for label_col in ("historical_regime", "historical_short_term_pressure"):
+        if label_col in signal.columns:
+            signal.loc[invalid, label_col] = pd.NA
+
+    if has_lineage or "historical_short_term_pressure" not in signal.columns:
         signal = add_short_term_pressure_labels(signal)
-    if "historical_regime" not in signal.columns:
+    if has_lineage or "historical_regime" not in signal.columns:
         signal = add_walk_forward_regime_labels(signal)
+    if has_lineage:
+        signal.loc[invalid, ["historical_regime", "historical_short_term_pressure"]] = pd.NA
 
     if "date" not in market_monthly.columns:
         return add_forward_market_changes(signal, horizons=horizons, market_columns=())
