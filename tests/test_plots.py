@@ -61,7 +61,18 @@ def _demo_outcome_summary() -> pd.DataFrame:
             "horizon_months": [12, 12],
             "count": [40, 35],
             "positive_shock_resolution_rate": [0.30, 0.80],
+            "positive_shock_resolution_rate_numerator": [12, 4],
+            "positive_shock_resolution_rate_n_applicable": [40, 5],
+            "positive_shock_resolution_rate_evidence_strength": ["descriptive", "sparse"],
+            "positive_shock_resolution_rate_weak_evidence": [False, True],
             "baseline_normalization_hit_rate": [0.50, 0.60],
+            "baseline_normalization_hit_rate_numerator": [20, 21],
+            "baseline_normalization_hit_rate_n_applicable": [40, 35],
+            "baseline_normalization_hit_rate_evidence_strength": [
+                "descriptive",
+                "descriptive",
+            ],
+            "baseline_normalization_hit_rate_weak_evidence": [False, False],
         }
     )
 
@@ -75,7 +86,25 @@ def _demo_sensitivity() -> pd.DataFrame:
             "horizon_months": [12, 12, 12, 12],
             "count": [50, 45, 40, 35],
             "positive_shock_resolution_rate": [0.40, 0.50, 0.60, 0.70],
+            "positive_shock_resolution_rate_numerator": [20, 20, 24, 7],
+            "positive_shock_resolution_rate_n_applicable": [50, 40, 40, 10],
+            "positive_shock_resolution_rate_evidence_strength": [
+                "descriptive",
+                "descriptive",
+                "descriptive",
+                "weak",
+            ],
+            "positive_shock_resolution_rate_weak_evidence": [False, False, False, True],
             "baseline_normalization_hit_rate": [0.55, 0.50, 0.45, 0.40],
+            "baseline_normalization_hit_rate_numerator": [22, 20, 18, 12],
+            "baseline_normalization_hit_rate_n_applicable": [40, 40, 40, 30],
+            "baseline_normalization_hit_rate_evidence_strength": [
+                "descriptive",
+                "descriptive",
+                "descriptive",
+                "descriptive",
+            ],
+            "baseline_normalization_hit_rate_weak_evidence": [False, False, False, False],
         }
     )
 
@@ -207,6 +236,9 @@ def test_hit_rate_bar_figure_returns_figure() -> None:
     assert len(fig.data) == 2
     assert fig.layout.barmode == "group"
     assert {"Resolved", "Converged"} <= {trace.name for trace in fig.data}
+    resolved = next(trace for trace in fig.data if trace.name == "Resolved")
+    assert resolved.customdata[1].tolist() == [4, 5, "sparse", "yes"]
+    assert "Applicable n" in resolved.hovertemplate
 
 
 def test_hit_rate_bar_figure_empty_branch() -> None:
@@ -222,6 +254,9 @@ def test_threshold_sensitivity_figure_returns_figure() -> None:
     # One line per (present) rate spec.
     assert len(fig.data) == 2
     assert "Resolved" in {trace.name for trace in fig.data}
+    resolved = next(trace for trace in fig.data if trace.name == "Resolved")
+    assert resolved.customdata[-1].tolist() == [7, 10, "weak", "yes"]
+    assert "Applicable n" in resolved.hovertemplate
 
 
 def test_threshold_sensitivity_figure_empty_branch() -> None:

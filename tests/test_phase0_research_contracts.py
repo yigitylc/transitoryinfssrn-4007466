@@ -303,7 +303,6 @@ def test_benchmark_forecasts_use_one_universal_origin_set_for_all_models() -> No
     assert {len(dates) for dates in dates_by_model.values()} == {48}
 
 
-@PENDING_H4_DENOMINATORS
 def test_validation_rates_expose_metric_specific_numerators_and_denominators() -> None:
     frame = pd.DataFrame(
         {
@@ -329,7 +328,6 @@ def test_validation_rates_expose_metric_specific_numerators_and_denominators() -
     assert row["positive_shock_persistent_rate_n_applicable"] == 1
 
 
-@PENDING_H4_DENOMINATORS
 def test_metric_evidence_strength_preserves_the_29_30_boundary() -> None:
     observed: list[tuple[int, str, bool]] = []
     for applicable in (29, 30):
@@ -384,8 +382,6 @@ def test_unrelated_phase0_findings_remain_strict_xfail_gates() -> None:
         "test_reference_month_is_not_silently_used_as_information_date",
         "test_perfect_forecast_and_actual_use_the_same_origin_baseline",
         "test_benchmark_forecasts_use_one_universal_origin_set_for_all_models",
-        "test_validation_rates_expose_metric_specific_numerators_and_denominators",
-        "test_metric_evidence_strength_preserves_the_29_30_boundary",
         "test_overlapping_horizons_do_not_emit_naive_uncertainty",
     }
 

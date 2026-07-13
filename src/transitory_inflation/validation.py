@@ -38,22 +38,39 @@ def pressure_label(term_structure: object) -> str:
 TRANSITORY_SIGNAL_REGIMES: tuple[str, ...] = ("elevated falling",)
 PERSISTENT_SIGNAL_REGIMES: tuple[str, ...] = ("elevated rising",)
 
+BINARY_RATE_SPECS: tuple[tuple[str, str], ...] = (
+    ("baseline_normalization_hit_rate", "baseline_normalized"),
+    ("fed_target_normalization_hit_rate", "fed_target_normalized"),
+    ("partial_decay_50_hit_rate", "partial_decay_50"),
+    ("partial_decay_80_hit_rate", "partial_decay_80"),
+    ("positive_shock_resolution_rate", "positive_shock_resolved"),
+    ("positive_shock_downside_overshoot_rate", "positive_shock_downside_overshoot"),
+    ("positive_shock_persistent_rate", "positive_shock_persistent"),
+    ("absolute_gap_persistent_rate", "absolute_gap_persistent"),
+    ("persistent_rate", "persistent"),
+    ("reacceleration_rate", "reaccelerated"),
+)
+BINARY_RATE_METADATA_SUFFIXES: tuple[str, ...] = (
+    "numerator",
+    "n_applicable",
+    "evidence_strength",
+    "weak_evidence",
+)
+
 SUMMARY_COLUMNS: tuple[str, ...] = (
     "horizon_months",
     "count",
     "avg_future_cpi_yoy_change",
     "median_future_cpi_yoy_change",
     "avg_future_epsilon_change",
-    "baseline_normalization_hit_rate",
-    "fed_target_normalization_hit_rate",
-    "partial_decay_50_hit_rate",
-    "partial_decay_80_hit_rate",
-    "positive_shock_resolution_rate",
-    "positive_shock_downside_overshoot_rate",
-    "positive_shock_persistent_rate",
-    "absolute_gap_persistent_rate",
-    "persistent_rate",
-    "reacceleration_rate",
+    *(
+        column
+        for rate_name, _ in BINARY_RATE_SPECS
+        for column in (
+            rate_name,
+            *(f"{rate_name}_{suffix}" for suffix in BINARY_RATE_METADATA_SUFFIXES),
+        )
+    ),
     "uses_imputed_input",
     "uses_missing_input",
 )
@@ -129,11 +146,35 @@ def _mask_nonobserved_signal_inputs(
     return out
 
 
-def _hit_rate(values: pd.Series) -> float:
+def _evidence_strength(n_applicable: int) -> str:
+    if n_applicable == 0:
+        return "unavailable"
+    if n_applicable < 10:
+        return "sparse"
+    if n_applicable < 30:
+        return "weak"
+    return "descriptive"
+
+
+def _binary_rate_metrics(values: pd.Series, rate_name: str) -> dict[str, object]:
     clean = values.dropna()
-    if clean.empty:
-        return float("nan")
-    return float(clean.astype(float).mean())
+    n_applicable = int(len(clean))
+    numerator = int(clean.astype(bool).sum())
+    rate = float(numerator / n_applicable) if n_applicable else float("nan")
+    return {
+        rate_name: rate,
+        f"{rate_name}_numerator": numerator,
+        f"{rate_name}_n_applicable": n_applicable,
+        f"{rate_name}_evidence_strength": _evidence_strength(n_applicable),
+        f"{rate_name}_weak_evidence": n_applicable < 30,
+    }
+
+
+def _binary_rate_summary(df: pd.DataFrame, suffix: str) -> dict[str, object]:
+    summary: dict[str, object] = {}
+    for rate_name, source_stem in BINARY_RATE_SPECS:
+        summary.update(_binary_rate_metrics(df[f"{source_stem}_{suffix}"], rate_name))
+    return summary
 
 
 def _ordered_labels(values: Iterable[object], preferred_order: tuple[str, ...]) -> list[str]:
@@ -485,32 +526,7 @@ def _forward_outcome_summary_by_groups(
                     "avg_future_epsilon_change": float(
                         group[f"epsilon_change_{suffix}"].mean()
                     ),
-                    "baseline_normalization_hit_rate": _hit_rate(
-                        group[f"baseline_normalized_{suffix}"]
-                    ),
-                    "fed_target_normalization_hit_rate": _hit_rate(
-                        group[f"fed_target_normalized_{suffix}"]
-                    ),
-                    "partial_decay_50_hit_rate": _hit_rate(
-                        group[f"partial_decay_50_{suffix}"]
-                    ),
-                    "partial_decay_80_hit_rate": _hit_rate(
-                        group[f"partial_decay_80_{suffix}"]
-                    ),
-                    "positive_shock_resolution_rate": _hit_rate(
-                        group[f"positive_shock_resolved_{suffix}"]
-                    ),
-                    "positive_shock_downside_overshoot_rate": _hit_rate(
-                        group[f"positive_shock_downside_overshoot_{suffix}"]
-                    ),
-                    "positive_shock_persistent_rate": _hit_rate(
-                        group[f"positive_shock_persistent_{suffix}"]
-                    ),
-                    "absolute_gap_persistent_rate": _hit_rate(
-                        group[f"absolute_gap_persistent_{suffix}"]
-                    ),
-                    "persistent_rate": _hit_rate(group[f"persistent_{suffix}"]),
-                    "reacceleration_rate": _hit_rate(group[f"reaccelerated_{suffix}"]),
+                    **_binary_rate_summary(group, suffix),
                     "uses_imputed_input": bool(
                         _lineage_flag(group, f"outcome_{suffix}_uses_imputed_input").any()
                     ),
@@ -614,28 +630,7 @@ def threshold_sensitivity_summary(
                     current[f"cpi_yoy_change_{suffix}"].median()
                 ),
                 "avg_future_epsilon_change": float(current[f"epsilon_change_{suffix}"].mean()),
-                "baseline_normalization_hit_rate": _hit_rate(
-                    current[f"baseline_normalized_{suffix}"]
-                ),
-                "fed_target_normalization_hit_rate": _hit_rate(
-                    current[f"fed_target_normalized_{suffix}"]
-                ),
-                "partial_decay_50_hit_rate": _hit_rate(current[f"partial_decay_50_{suffix}"]),
-                "partial_decay_80_hit_rate": _hit_rate(current[f"partial_decay_80_{suffix}"]),
-                "positive_shock_resolution_rate": _hit_rate(
-                    current[f"positive_shock_resolved_{suffix}"]
-                ),
-                "positive_shock_downside_overshoot_rate": _hit_rate(
-                    current[f"positive_shock_downside_overshoot_{suffix}"]
-                ),
-                "positive_shock_persistent_rate": _hit_rate(
-                    current[f"positive_shock_persistent_{suffix}"]
-                ),
-                "absolute_gap_persistent_rate": _hit_rate(
-                    current[f"absolute_gap_persistent_{suffix}"]
-                ),
-                "persistent_rate": _hit_rate(current[f"persistent_{suffix}"]),
-                "reacceleration_rate": _hit_rate(current[f"reaccelerated_{suffix}"]),
+                **_binary_rate_summary(current, suffix),
                 "uses_imputed_input": bool(
                     _lineage_flag(
                         current,

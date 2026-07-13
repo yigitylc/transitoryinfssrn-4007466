@@ -698,8 +698,9 @@ with tab_validation:
     st.caption(
         "This table crosses the historical regime with short-term pressure. It is often the "
         "most useful Phase 1 cut because it separates elevated-and-rising inflation pressure "
-        "from elevated-but-cooling pressure. Counts matter: small groups can produce unstable "
-        "rates."
+        "from elevated-but-cooling pressure. The count column is the generic number of complete "
+        "future-CPI rows; each binary rate reports its own numerator, applicable denominator, "
+        "evidence strength, and weak-evidence status."
     )
     st.dataframe(combined_summary, width="stretch")
 
@@ -707,7 +708,8 @@ with tab_validation:
     st.caption(
         "Bars show three historical outcome rates per bucket at the selected horizon: "
         "positive-shock resolved (cold), baseline convergence (gray), and positive-shock "
-        "persisted (hot). Same rates as the tables below; small buckets give unstable rates."
+        "persisted (hot). Hover discloses each percentage's numerator, applicable denominator, "
+        "evidence strength, and weak-evidence status; the same metadata appear in the tables."
     )
     rate_chart_col1, rate_chart_col2 = st.columns(2)
     with rate_chart_col1:
@@ -749,7 +751,8 @@ with tab_validation:
     st.caption(
         "This recomputes outcome labels at fixed thresholds of 0.25, 0.50, 0.75, "
         "and 1.00 pp. It is sensitivity analysis only, not threshold optimization. Phase 2 "
-        "benchmark comparison is still required before treating hit rates as forecast skill."
+        "benchmark comparison is still required before treating hit rates as forecast skill. "
+        "Hover discloses the applicable denominator and evidence state for every percentage."
     )
     if sensitivity_summary.empty:
         st.info("No threshold-sensitivity rows are available for the selected horizon.")

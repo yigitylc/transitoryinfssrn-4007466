@@ -7,6 +7,7 @@ import pytest
 from transitory_inflation.data import build_base_frame
 from transitory_inflation.features import add_transitory_inflation_features
 from transitory_inflation.validation import (
+    BINARY_RATE_SPECS,
     add_forward_outcomes,
     add_outcome_labels,
     add_walk_forward_regime_labels,
@@ -272,6 +273,97 @@ def test_summary_excludes_rows_without_future_data_for_horizon() -> None:
     assert "absolute_gap_persistent_rate" in summary.columns
 
 
+def test_every_binary_summary_rate_exposes_consistent_evidence_metadata() -> None:
+    df = _validation_frame(periods=6)
+    df["historical_regime"] = "neutral"
+    out = add_forward_outcomes(df, horizons=(2,))
+    out = add_outcome_labels(out, horizons=(2,))
+
+    row = forward_outcome_summary_by_regime(out, horizons=(2,)).iloc[0]
+    expected_rates = {
+        "baseline_normalization_hit_rate",
+        "fed_target_normalization_hit_rate",
+        "partial_decay_50_hit_rate",
+        "partial_decay_80_hit_rate",
+        "positive_shock_resolution_rate",
+        "positive_shock_downside_overshoot_rate",
+        "positive_shock_persistent_rate",
+        "absolute_gap_persistent_rate",
+        "persistent_rate",
+        "reacceleration_rate",
+    }
+    assert {rate_name for rate_name, _ in BINARY_RATE_SPECS} == expected_rates
+
+    for rate_name in expected_rates:
+        numerator = int(row[f"{rate_name}_numerator"])
+        n_applicable = int(row[f"{rate_name}_n_applicable"])
+        assert n_applicable == row["count"] == 4
+        assert row[rate_name] == pytest.approx(numerator / n_applicable)
+        assert row[f"{rate_name}_evidence_strength"] == "sparse"
+        assert bool(row[f"{rate_name}_weak_evidence"])
+
+
+def test_unavailable_binary_rate_is_nan_with_zero_applicable_observations() -> None:
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2020-01-31", periods=5, freq="ME"),
+            "historical_regime": "neutral",
+            "inflation_yoy": 2.0,
+            "epsilon": 0.0,
+            "tinf_4m": 0.0,
+        }
+    )
+    out = add_forward_outcomes(df, horizons=(1,))
+    out = add_outcome_labels(out, horizons=(1,))
+
+    row = forward_outcome_summary_by_regime(out, horizons=(1,)).iloc[0]
+    rate_name = "positive_shock_persistent_rate"
+    assert row["count"] == 4
+    assert pd.isna(row[rate_name])
+    assert row[f"{rate_name}_numerator"] == 0
+    assert row[f"{rate_name}_n_applicable"] == 0
+    assert row[f"{rate_name}_evidence_strength"] == "unavailable"
+    assert bool(row[f"{rate_name}_weak_evidence"])
+
+
+@pytest.mark.parametrize(
+    ("applicable", "expected_strength", "expected_weak"),
+    [
+        (0, "unavailable", True),
+        (1, "sparse", True),
+        (9, "sparse", True),
+        (10, "weak", True),
+        (29, "weak", True),
+        (30, "descriptive", False),
+    ],
+)
+def test_binary_rate_evidence_strength_boundaries(
+    applicable: int,
+    expected_strength: str,
+    expected_weak: bool,
+) -> None:
+    periods = 31
+    epsilon = np.zeros(periods, dtype=float)
+    epsilon[:applicable] = 1.0
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2000-01-31", periods=periods, freq="ME"),
+            "historical_regime": "neutral",
+            "inflation_yoy": 3.0,
+            "epsilon": epsilon,
+            "tinf_4m": 1.0,
+        }
+    )
+    out = add_forward_outcomes(df, horizons=(1,))
+    out = add_outcome_labels(out, horizons=(1,), epsilon_threshold_pp=0.50)
+
+    row = forward_outcome_summary_by_regime(out, horizons=(1,)).iloc[0]
+    rate_name = "positive_shock_persistent_rate"
+    assert row[f"{rate_name}_n_applicable"] == applicable
+    assert row[f"{rate_name}_evidence_strength"] == expected_strength
+    assert bool(row[f"{rate_name}_weak_evidence"]) is expected_weak
+
+
 def test_single_key_summary_labels_are_plain_strings() -> None:
     # Regression: pandas 3 groupby with a length-1 list yields 1-tuple keys; the
     # summary must still emit plain string labels so string-equality filters and
@@ -332,6 +424,14 @@ def test_threshold_sensitivity_calculates_all_phase_one_thresholds() -> None:
     assert summary["threshold_pp"].tolist() == [0.25, 0.50, 0.75, 1.00]
     assert summary["count"].tolist() == [7, 7, 7, 7]
     assert "positive_shock_resolution_rate" in summary.columns
+    for rate_name, _ in BINARY_RATE_SPECS:
+        assert {
+            f"{rate_name}_numerator",
+            f"{rate_name}_n_applicable",
+            f"{rate_name}_evidence_strength",
+            f"{rate_name}_weak_evidence",
+        } <= set(summary.columns)
+        assert summary[f"{rate_name}_n_applicable"].tolist() == [7, 7, 7, 7]
     phase_two_columns = {"mae", "rmse", "forecast", "confusion_matrix"}
     assert summary.columns.intersection(phase_two_columns).empty
 

@@ -306,6 +306,25 @@ _CHANNEL_COLORS: dict[str, str] = {
 }
 
 
+def _rate_hover_metadata(data: pd.DataFrame, rate_column: str) -> np.ndarray | None:
+    metadata_columns = [
+        f"{rate_column}_numerator",
+        f"{rate_column}_n_applicable",
+        f"{rate_column}_evidence_strength",
+        f"{rate_column}_weak_evidence",
+    ]
+    if not set(metadata_columns).issubset(data.columns):
+        return None
+
+    customdata = np.empty((len(data), 4), dtype=object)
+    customdata[:, 0] = pd.to_numeric(data[metadata_columns[0]], errors="coerce")
+    customdata[:, 1] = pd.to_numeric(data[metadata_columns[1]], errors="coerce")
+    customdata[:, 2] = data[metadata_columns[2]].fillna("unavailable").astype(str)
+    weak = data[metadata_columns[3]].fillna(True).astype(bool)
+    customdata[:, 3] = np.where(weak, "yes", "no")
+    return customdata
+
+
 def hit_rate_bar_figure(
     summary: pd.DataFrame,
     group_col: str,
@@ -336,13 +355,24 @@ def hit_rate_bar_figure(
     data = summary.dropna(subset=[group_col]).copy()
     data[group_col] = data[group_col].astype(str)
     for column, label, color in present_specs:
+        customdata = _rate_hover_metadata(data, column)
+        hovertemplate = f"%{{x}}<br>{label}: %{{y:.0%}}<extra></extra>"
+        if customdata is not None:
+            hovertemplate = (
+                f"%{{x}}<br>{label}: %{{y:.0%}}<br>"
+                "Numerator: %{customdata[0]:.0f}<br>"
+                "Applicable n: %{customdata[1]:.0f}<br>"
+                "Evidence: %{customdata[2]}<br>"
+                "Weak evidence: %{customdata[3]}<extra></extra>"
+            )
         fig.add_trace(
             go.Bar(
                 x=data[group_col],
                 y=pd.to_numeric(data[column], errors="coerce"),
                 name=label,
                 marker_color=color,
-                hovertemplate=f"%{{x}}<br>{label}: %{{y:.0%}}<extra></extra>",
+                customdata=customdata,
+                hovertemplate=hovertemplate,
             )
         )
     fig.update_layout(barmode="group")
@@ -388,6 +418,16 @@ def threshold_sensitivity_figure(
     data = sensitivity.sort_values("threshold_pp")
     x = pd.to_numeric(data["threshold_pp"], errors="coerce")
     for column, label, color in present_specs:
+        customdata = _rate_hover_metadata(data, column)
+        hovertemplate = f"threshold %{{x:.2f}}pp<br>{label}: %{{y:.0%}}<extra></extra>"
+        if customdata is not None:
+            hovertemplate = (
+                f"threshold %{{x:.2f}}pp<br>{label}: %{{y:.0%}}<br>"
+                "Numerator: %{customdata[0]:.0f}<br>"
+                "Applicable n: %{customdata[1]:.0f}<br>"
+                "Evidence: %{customdata[2]}<br>"
+                "Weak evidence: %{customdata[3]}<extra></extra>"
+            )
         fig.add_trace(
             go.Scatter(
                 x=x,
@@ -396,7 +436,8 @@ def threshold_sensitivity_figure(
                 mode="lines+markers",
                 line=dict(color=color, width=2),
                 marker=dict(color=color, size=7),
-                hovertemplate=f"threshold %{{x:.2f}}pp<br>{label}: %{{y:.0%}}<extra></extra>",
+                customdata=customdata,
+                hovertemplate=hovertemplate,
             )
         )
     fig.update_yaxes(tickformat=".0%", rangemode="tozero")
