@@ -28,6 +28,21 @@ def _feature_frame(periods: int = 90) -> pd.DataFrame:
     return add_transitory_inflation_features(raw, baseline_method="fed_target")
 
 
+def _classification_frame(periods: int = 50) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2018-01-31", periods=periods, freq="ME"),
+            "inflation_yoy": 3.0,
+            "baseline": 2.0,
+            "epsilon": 1.0,
+            "tinf_4m": np.linspace(0.5, 1.5, periods),
+            "tinf_8m": np.linspace(0.4, 1.4, periods),
+            "tinf_12m": np.linspace(0.3, 1.3, periods),
+            "tinf_term_structure": "mixed",
+        }
+    )
+
+
 def test_benchmark_outputs_include_required_models_and_tables() -> None:
     df = _feature_frame()
 
@@ -97,6 +112,63 @@ def test_confusion_summary_counts_positive_shock_persistence() -> None:
     assert row["false_positive"] == 1
     assert row["true_negative"] == 1
     assert row["false_negative"] == 1
+
+
+def test_ineligible_origin_has_nullable_predicted_and_realized_labels() -> None:
+    frame = _classification_frame()
+    target_pos = 40
+    frame.loc[target_pos, ["inflation_yoy", "epsilon"]] = [2.49, 0.49]
+    frame.loc[target_pos + 1, ["inflation_yoy", "baseline", "epsilon"]] = [4.0, 3.0, 1.0]
+
+    forecasts = build_benchmark_forecasts(
+        frame,
+        horizon=1,
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+    row = forecasts.loc[
+        (forecasts["model"] == "no_change")
+        & (forecasts["date"] == frame.loc[target_pos, "date"])
+    ].iloc[0]
+
+    assert not row["eligible_positive_shock"]
+    assert pd.isna(row["forecast_persistent_high_inflation"])
+    assert pd.isna(row["actual_persistent_high_inflation"])
+
+    model_rows = forecasts.loc[forecasts["model"] == "no_change"]
+    classified = model_rows[
+        ["forecast_persistent_high_inflation", "actual_persistent_high_inflation"]
+    ].dropna()
+    metrics = benchmark_metric_summary(forecasts)
+    metric_row = metrics.loc[metrics["model"] == "no_change"].iloc[0]
+    assert metric_row["classification_count"] == len(classified)
+    assert len(classified) == int(model_rows["eligible_positive_shock"].fillna(False).sum())
+
+
+def test_predicted_and_realized_persistence_share_anchor_and_strict_threshold() -> None:
+    frame = _classification_frame()
+    boundary_pos = 40
+    above_pos = 42
+    frame.loc[boundary_pos : boundary_pos + 1, ["inflation_yoy", "epsilon"]] = [2.5, 0.5]
+    frame.loc[above_pos : above_pos + 1, ["inflation_yoy", "epsilon"]] = [2.5001, 0.5001]
+    frame.loc[[boundary_pos + 1, above_pos + 1], "baseline"] = 3.0
+    frame.loc[[boundary_pos + 1, above_pos + 1], "epsilon"] = [-0.5, -0.4999]
+
+    forecasts = build_benchmark_forecasts(
+        frame,
+        horizon=1,
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+    rows = forecasts.loc[
+        (forecasts["model"] == "no_change")
+        & forecasts["date"].isin(frame.loc[[boundary_pos, above_pos], "date"])
+    ].sort_values("date")
+
+    assert rows["eligible_positive_shock"].tolist() == [True, True]
+    assert rows["forecast_persistent_high_inflation"].tolist() == [False, True]
+    assert rows["actual_persistent_high_inflation"].tolist() == [False, True]
+    assert rows["actual_gap_from_origin_baseline"].tolist() == pytest.approx([0.5, 0.5001])
 
 
 def test_forecasts_do_not_change_when_future_rows_after_t_are_perturbed() -> None:

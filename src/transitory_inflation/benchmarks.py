@@ -41,11 +41,18 @@ def _safe_rate(numerator: int, denominator: int) -> float:
     return float(numerator / denominator)
 
 
+def _nullable_bool(condition: pd.Series, valid: pd.Series) -> pd.Series:
+    result = pd.Series(pd.NA, index=condition.index, dtype="boolean")
+    result.loc[valid] = condition.loc[valid].astype(bool).to_numpy()
+    return result
+
+
 def _historical_validation_frame(
     df: pd.DataFrame,
     horizon: int,
     threshold_pp: float,
     inflation_col: str,
+    baseline_col: str,
 ) -> pd.DataFrame:
     """Build the single-horizon validation frame used to score benchmarks."""
 
@@ -56,6 +63,7 @@ def _historical_validation_frame(
         epsilon_threshold_pp=threshold_pp,
         fed_target_threshold_pp=threshold_pp,
         inflation_col=inflation_col,
+        baseline_col=baseline_col,
     )
 
 
@@ -163,12 +171,24 @@ def build_benchmark_forecasts(
         horizon=horizon,
         threshold_pp=threshold_pp,
         inflation_col=inflation_col,
+        baseline_col=baseline_col,
     )
     suffix = _suffix(horizon)
     actual_col = f"cpi_yoy_fwd_{suffix}"
     change_col = f"cpi_yoy_change_{suffix}"
     persistent_col = f"positive_shock_persistent_{suffix}"
-    _require_columns(validation_df, [actual_col, change_col, persistent_col, regime_col])
+    realized_gap_col = f"realized_gap_from_origin_baseline_{suffix}"
+    _require_columns(
+        validation_df,
+        [
+            actual_col,
+            change_col,
+            persistent_col,
+            realized_gap_col,
+            "positive_shock_eligible",
+            regime_col,
+        ],
+    )
 
     current = validation_df[inflation_col]
     forecasts_by_model = {
@@ -197,9 +217,11 @@ def build_benchmark_forecasts(
             "current_cpi_yoy": current,
             "baseline": validation_df[baseline_col],
             "epsilon": validation_df["epsilon"],
+            "eligible_positive_shock": validation_df["positive_shock_eligible"],
             "historical_regime": validation_df[regime_col],
             "actual_cpi_yoy": validation_df[actual_col],
             "actual_cpi_yoy_change": validation_df[change_col],
+            "actual_gap_from_origin_baseline": validation_df[realized_gap_col],
             "actual_persistent_high_inflation": validation_df[persistent_col],
         }
     )
@@ -210,9 +232,15 @@ def build_benchmark_forecasts(
         model_frame["forecast_cpi_yoy"] = forecast
         model_frame["forecast_cpi_yoy_change"] = forecast - current
         model_frame["forecast_error"] = forecast - validation_df[actual_col]
-        model_frame["forecast_persistent_high_inflation"] = (
-            forecast - validation_df[baseline_col]
-        ) > threshold_pp
+        forecast_gap = forecast - validation_df[baseline_col]
+        classification_valid = (
+            forecast.notna()
+            & model_frame["eligible_positive_shock"].fillna(False).astype(bool)
+        )
+        model_frame["forecast_persistent_high_inflation"] = _nullable_bool(
+            forecast_gap > threshold_pp,
+            classification_valid,
+        )
         valid = model_frame["actual_cpi_yoy"].notna() & model_frame["forecast_cpi_yoy"].notna()
         rows.append(model_frame.loc[valid])
 
@@ -227,12 +255,14 @@ def build_benchmark_forecasts(
         "current_cpi_yoy",
         "baseline",
         "epsilon",
+        "eligible_positive_shock",
         "historical_regime",
         "forecast_cpi_yoy",
         "actual_cpi_yoy",
         "forecast_error",
         "forecast_cpi_yoy_change",
         "actual_cpi_yoy_change",
+        "actual_gap_from_origin_baseline",
         "forecast_persistent_high_inflation",
         "actual_persistent_high_inflation",
     ]

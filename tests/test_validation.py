@@ -198,6 +198,26 @@ def test_positive_shock_still_above_threshold_is_persistent() -> None:
     assert out.loc[0, "persistent_1m"]
 
 
+def test_positive_shock_persistence_freezes_origin_baseline() -> None:
+    df = pd.DataFrame(
+        {
+            "inflation_yoy": [3.0, 3.0],
+            "baseline": [2.0, 3.0],
+            "epsilon": [1.0, 0.0],
+            "tinf_4m": [1.0, 0.0],
+        }
+    )
+
+    out = add_forward_outcomes(df, horizons=(1,))
+    out = add_outcome_labels(out, horizons=(1,), epsilon_threshold_pp=0.50)
+
+    assert out.loc[0, "persistence_origin_baseline"] == 2.0
+    assert out.loc[0, "realized_gap_from_origin_baseline_1m"] == 1.0
+    assert out.loc[0, "ex_post_gap_from_future_baseline_1m"] == 0.0
+    assert out.loc[0, "positive_shock_persistent_1m"]
+    assert out.loc[0, "baseline_normalized_1m"]
+
+
 def test_non_positive_start_does_not_create_positive_shock_labels() -> None:
     df = pd.DataFrame(
         {
@@ -214,6 +234,7 @@ def test_non_positive_start_does_not_create_positive_shock_labels() -> None:
     assert pd.isna(out.loc[0, "positive_shock_downside_overshoot_1m"])
     assert pd.isna(out.loc[0, "positive_shock_persistent_1m"])
     assert pd.isna(out.loc[0, "persistent_1m"])
+    assert not out.loc[0, "positive_shock_eligible"]
 
 
 def test_decay_ratio_uses_absolute_positive_and_negative_gaps() -> None:

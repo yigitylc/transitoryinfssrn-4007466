@@ -335,17 +335,20 @@ def add_outcome_labels(
     reacceleration_threshold_pp: float | None = None,
     epsilon_col: str = "epsilon",
     inflation_col: str = "inflation_yoy",
+    baseline_col: str = "baseline",
 ) -> pd.DataFrame:
     """Add mechanical transitory/persistent outcome labels.
 
-    A future month is baseline-normalized when abs(epsilon[t+h]) is within the
-    threshold. Positive-shock labels ask whether a current above-baseline
-    inflation shock faded. If a positive shock crosses below baseline, it is
-    resolved with downside overshoot, not persistent high inflation. Absolute
-    gap labels remain available as a secondary equilibrium/stability
-    diagnostic. Decay labels require a meaningful current gap; rows where
-    abs(epsilon[t]) is below the threshold are left nullable rather than being
-    treated as failed decay events.
+    Positive-shock persistence freezes the origin baseline: eligibility uses
+    inflation[t] - baseline[t] >= threshold and the realized label uses
+    inflation[t+h] - baseline[t] > threshold. A future baseline remains only
+    in explicitly ex-post normalization, absolute-gap, and decay diagnostics.
+    If ``baseline_col`` is absent, the equivalent origin baseline is recovered
+    as inflation - epsilon for compatibility with legacy validation inputs.
+    Ineligible positive-shock origins receive nullable persistence labels.
+    Decay labels require a meaningful current gap; rows where abs(epsilon[t])
+    is below the threshold are left nullable rather than being treated as
+    failed decay events.
     Reacceleration is intentionally simple in Phase 1: CPI YoY rises by at
     least the configured threshold over the horizon.
     """
@@ -358,6 +361,21 @@ def add_outcome_labels(
     )
     _require_columns(df, [epsilon_col, inflation_col])
     out = df.copy()
+
+    if baseline_col in out.columns:
+        origin_baseline = pd.to_numeric(out[baseline_col], errors="coerce")
+    else:
+        origin_baseline = pd.to_numeric(out[inflation_col], errors="coerce") - pd.to_numeric(
+            out[epsilon_col], errors="coerce"
+        )
+    origin_gap = pd.to_numeric(out[inflation_col], errors="coerce") - origin_baseline
+    origin_valid = origin_gap.notna()
+    positive_shock_eligible = _nullable_bool(
+        origin_gap >= epsilon_threshold_pp,
+        origin_valid,
+    )
+    out["persistence_origin_baseline"] = origin_baseline
+    out["positive_shock_eligible"] = positive_shock_eligible
 
     missing_outcomes = [
         f"epsilon_fwd_{_suffix(horizon)}"
@@ -375,7 +393,7 @@ def add_outcome_labels(
 
     current_abs_gap = out[epsilon_col].abs()
     meaningful_gap = current_abs_gap >= epsilon_threshold_pp
-    positive_shock = out[epsilon_col] >= epsilon_threshold_pp
+    positive_shock = positive_shock_eligible.fillna(False).astype(bool)
 
     for horizon in horizons:
         suffix = _suffix(horizon)
@@ -384,6 +402,10 @@ def add_outcome_labels(
         cpi_change_col = f"cpi_yoy_change_{suffix}"
 
         future_valid = out[epsilon_fwd_col].notna() & out[cpi_fwd_col].notna()
+        realized_origin_gap = out[cpi_fwd_col] - origin_baseline
+        persistence_valid = realized_origin_gap.notna() & positive_shock
+        out[f"realized_gap_from_origin_baseline_{suffix}"] = realized_origin_gap
+        out[f"ex_post_gap_from_future_baseline_{suffix}"] = out[epsilon_fwd_col]
         ratio = out[epsilon_fwd_col].abs().div(current_abs_gap)
         ratio = ratio.where(meaningful_gap)
         out[f"gap_decay_ratio_{suffix}"] = ratio.replace([np.inf, -np.inf], np.nan)
@@ -393,9 +415,9 @@ def add_outcome_labels(
         decay_50_condition = out[epsilon_fwd_col].abs() <= 0.50 * current_abs_gap
         decay_80_condition = out[epsilon_fwd_col].abs() <= 0.20 * current_abs_gap
         reaccelerated_condition = out[cpi_change_col] >= reacceleration_threshold_pp
-        positive_shock_resolved_condition = out[epsilon_fwd_col] <= epsilon_threshold_pp
-        downside_overshoot_condition = out[epsilon_fwd_col] <= -epsilon_threshold_pp
-        positive_shock_persistent_condition = out[epsilon_fwd_col] > epsilon_threshold_pp
+        positive_shock_resolved_condition = realized_origin_gap <= epsilon_threshold_pp
+        downside_overshoot_condition = realized_origin_gap <= -epsilon_threshold_pp
+        positive_shock_persistent_condition = realized_origin_gap > epsilon_threshold_pp
 
         baseline_normalized = _nullable_bool(baseline_condition, future_valid)
         partial_decay_50 = _nullable_bool(decay_50_condition, future_valid & meaningful_gap)
@@ -420,15 +442,15 @@ def add_outcome_labels(
         )
         out[f"positive_shock_resolved_{suffix}"] = _nullable_bool(
             positive_shock_resolved_condition,
-            future_valid & positive_shock,
+            persistence_valid,
         )
         out[f"positive_shock_downside_overshoot_{suffix}"] = _nullable_bool(
             downside_overshoot_condition,
-            future_valid & positive_shock,
+            persistence_valid,
         )
         out[f"positive_shock_persistent_{suffix}"] = _nullable_bool(
             positive_shock_persistent_condition,
-            future_valid & positive_shock,
+            persistence_valid,
         )
         out[f"persistent_{suffix}"] = out[f"positive_shock_persistent_{suffix}"]
         out[f"reaccelerated_{suffix}"] = _nullable_bool(
@@ -446,6 +468,7 @@ def build_historical_validation_frame(
     fed_target_threshold_pp: float = DEFAULT_FED_TARGET_THRESHOLD_PP,
     fed_target: float = DEFAULT_FED_TARGET,
     inflation_col: str = "inflation_yoy",
+    baseline_col: str = "baseline",
 ) -> pd.DataFrame:
     """Build the full validation frame from an already-computed signal frame."""
 
@@ -465,6 +488,7 @@ def build_historical_validation_frame(
         fed_target_threshold_pp=fed_target_threshold_pp,
         fed_target=fed_target,
         inflation_col=inflation_col,
+        baseline_col=baseline_col,
     )
 
 

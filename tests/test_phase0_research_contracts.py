@@ -56,13 +56,6 @@ PENDING_H5_INFORMATION_DATE = pytest.mark.xfail(
         "release and information timestamps"
     ),
 )
-PENDING_H3_CLASSIFICATION_ANCHOR = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "H3 classification anchor: forecast and actual persistence labels "
-        "must share the origin baseline"
-    ),
-)
 PENDING_H2_COMMON_SAMPLE = pytest.mark.xfail(
     strict=True,
     reason=(
@@ -250,7 +243,6 @@ def test_reference_month_is_not_silently_used_as_information_date() -> None:
     assert row["information_timestamp"] >= row["release_timestamp"]
 
 
-@PENDING_H3_CLASSIFICATION_ANCHOR
 def test_perfect_forecast_and_actual_use_the_same_origin_baseline() -> None:
     periods = 50
     target_pos = 40
@@ -380,7 +372,6 @@ def test_unrelated_phase0_findings_remain_strict_xfail_gates() -> None:
         "test_current_paper_surface_is_explicitly_paper_inspired",
         "test_paper_reconstruction_uses_literal_lag_and_a_separate_feature_path",
         "test_reference_month_is_not_silently_used_as_information_date",
-        "test_perfect_forecast_and_actual_use_the_same_origin_baseline",
         "test_benchmark_forecasts_use_one_universal_origin_set_for_all_models",
         "test_overlapping_horizons_do_not_emit_naive_uncertainty",
     }

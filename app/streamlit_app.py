@@ -269,11 +269,15 @@ MARKET_RANKING_COLUMNS = [
     "weak_evidence",
 ]
 # Validation outcome rates to chart, as (column, label, hot/cold color). These are
-# existing forward-outcome rates: resolved (faded -> cold), baseline convergence
-# (neutral), persisted (still elevated -> hot). Presentation only.
+# existing forward-outcome rates: resolved (faded -> cold), ex-post future-baseline
+# convergence (neutral), persisted (still elevated -> hot). Presentation only.
 VALIDATION_RATE_SPECS = (
     ("positive_shock_resolution_rate", "Positive-shock resolved", plots_mod.COLD),
-    ("baseline_normalization_hit_rate", "Baseline convergence", plots_mod.NEUTRAL),
+    (
+        "baseline_normalization_hit_rate",
+        "Ex-post future-baseline convergence",
+        plots_mod.NEUTRAL,
+    ),
     ("positive_shock_persistent_rate", "Positive-shock persisted", plots_mod.HOT),
 )
 # Robustness win-rate series, as (column-stem, label, color). Colors identify the
@@ -620,14 +624,15 @@ with tab_validation:
             "overshot lower."
         )
         st.markdown(
-            "Absolute baseline convergence asks whether inflation ended close to baseline, "
-            "regardless of direction. A negative overshoot may fail this test because inflation "
-            "is still far from baseline, but it is not persistent high inflation."
+            "Ex-post future-baseline convergence asks whether inflation ended close to "
+            "baseline_(t+h), regardless of direction. A negative overshoot may fail this test "
+            "because inflation is still far from that future baseline, but it is not persistent "
+            "high inflation."
         )
         st.markdown(
             "For trading interpretation, positive-shock resolution is usually more actionable. "
-            "For equilibrium or policy-stability interpretation, absolute baseline convergence "
-            "remains useful. Counts matter: small groups can produce unstable hit rates, and "
+            "For equilibrium or policy-stability interpretation, ex-post future-baseline "
+            "convergence remains useful. Counts matter: small groups can produce unstable hit rates, and "
             "Phase 2 benchmark comparison is still needed before treating hit rates as signal skill."
         )
     scope_caveats(
@@ -707,8 +712,9 @@ with tab_validation:
     st.markdown(f"#### Outcome rates by bucket ({validation_horizon} months)")
     st.caption(
         "Bars show three historical outcome rates per bucket at the selected horizon: "
-        "positive-shock resolved (cold), baseline convergence (gray), and positive-shock "
-        "persisted (hot). Hover discloses each percentage's numerator, applicable denominator, "
+        "positive-shock resolved (cold), ex-post future-baseline convergence (gray), and "
+        "positive-shock persisted (hot). Hover discloses each percentage's numerator, "
+        "applicable denominator, "
         "evidence strength, and weak-evidence status; the same metadata appear in the tables."
     )
     rate_chart_col1, rate_chart_col2 = st.columns(2)
@@ -1437,8 +1443,9 @@ with tab_benchmarks:
         with st.expander("Classification summary"):
             st.caption(
                 "Positive class: persistent high inflation after a current positive inflation shock. "
-                "Forecast classifications compare each model forecast with the current-month baseline "
-                "and the selected threshold. Note: mean reversion forecasts the baseline, so by "
+                "Eligible origins, forecasts, and realized outcomes all use the frozen current-month "
+                "baseline and selected threshold; ineligible origins are excluded. Note: mean reversion "
+                "forecasts the baseline, so by "
                 "construction it can never be classified persistent (its confusion row is all-negative) "
                 "- read it as a structural floor, not a failure to detect."
             )
