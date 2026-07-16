@@ -17,6 +17,8 @@ import pytest
 
 from transitory_inflation import data as data_mod
 from transitory_inflation import features as features_mod
+from transitory_inflation import market_data as market_data_mod
+from transitory_inflation import market_linkage as market_linkage_mod
 from transitory_inflation.benchmarks import BENCHMARK_MODELS, build_benchmark_forecasts
 from transitory_inflation.config import SAMPLE_MODES
 from transitory_inflation.validation import (
@@ -47,13 +49,6 @@ PENDING_H1_CACHE_PROVENANCE = pytest.mark.xfail(
     reason=(
         "H1 cache provenance: reload must preserve original missingness and "
         "ex-post imputation lineage"
-    ),
-)
-PENDING_H5_INFORMATION_DATE = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "H5 information date: CPI reference months must be distinct from "
-        "release and information timestamps"
     ),
 )
 PENDING_H2_COMMON_SAMPLE = pytest.mark.xfail(
@@ -188,6 +183,52 @@ def test_observed_only_cpi_is_invariant_to_the_future_neighbor() -> None:
     assert not gap["cpi_imputed"]
 
 
+def test_monthly_macro_normalization_keeps_one_physical_duplicate_row() -> None:
+    dates = pd.date_range("2022-01-31", periods=15, freq="ME")
+    regular = pd.DataFrame(
+        {
+            "date": dates[:-1],
+            "CPIAUCSL": 100.0 + np.arange(len(dates) - 1, dtype=float),
+            "TB3MS": 1.0,
+            "release_timestamp": (
+                dates[:-1] + pd.offsets.Day(13) + pd.offsets.Hour(13)
+            ).tz_localize("UTC"),
+            "release_timestamp_provenance": (
+                data_mod.RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+            ),
+            "timing_status": data_mod.TIMING_STATUS_RELEASE_ALIGNED,
+        }
+    )
+    duplicate_rows = pd.DataFrame(
+        {
+            "date": [dates[-1], dates[-1]],
+            "CPIAUCSL": [114.0, np.nan],
+            "TB3MS": [np.nan, 9.0],
+            "release_timestamp": [
+                pd.Timestamp("2023-04-13 13:00:00+00:00"),
+                pd.NaT,
+            ],
+            "release_timestamp_provenance": [
+                data_mod.RELEASE_TIMESTAMP_PROVENANCE_ACTUAL,
+                pd.NA,
+            ],
+            "timing_status": [
+                data_mod.TIMING_STATUS_RELEASE_ALIGNED,
+                data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY,
+            ],
+        }
+    )
+
+    out = data_mod.build_base_frame(pd.concat([regular, duplicate_rows], ignore_index=True))
+    selected = out.loc[out["date"] == dates[-1]].iloc[0]
+
+    assert pd.isna(selected["cpi_level"])
+    assert selected["tbill_3m"] == 9.0
+    assert pd.isna(selected["release_timestamp"])
+    assert selected["release_timing_status"] == data_mod.TIMING_STATUS_UNAVAILABLE
+    assert selected["timing_status"] == data_mod.TIMING_STATUS_UNAVAILABLE
+
+
 def test_cache_reload_preserves_original_missingness_and_ex_post_lineage(
     tmp_path: Path,
     monkeypatch,
@@ -215,16 +256,256 @@ def test_cache_reload_preserves_original_missingness_and_ex_post_lineage(
     assert pd.notna(gap["imputation_available_at"])
 
 
-@PENDING_H5_INFORMATION_DATE
+@pytest.mark.parametrize("timezone_aware", [True, False])
+def test_cached_release_timestamp_timezone_trust_survives_round_trip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timezone_aware: bool,
+) -> None:
+    dates = pd.date_range("2022-01-31", periods=18, freq="ME")
+    release_clock = dates + pd.offsets.Day(13) + pd.offsets.Hour(13)
+    release_strings = [
+        timestamp.strftime("%Y-%m-%dT%H:%M:%S")
+        + ("+00:00" if timezone_aware else "")
+        for timestamp in release_clock
+    ]
+    cached = pd.DataFrame(
+        {
+            "date": dates,
+            "CPIAUCSL": 100.0 + np.arange(len(dates), dtype=float),
+            "TB3MS": 1.0,
+            "release_timestamp": release_strings,
+            "release_timestamp_provenance": (
+                data_mod.RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+            ),
+            "timing_status": data_mod.TIMING_STATUS_RELEASE_ALIGNED,
+        }
+    )
+
+    writable_cache = data_mod.build_macro_cache_frame(cached)
+    assert bool(writable_cache["release_timestamp"].notna().all()) is timezone_aware
+
+    path = tmp_path / "raw_macro_with_release_timing.csv"
+    writable_cache.to_csv(path, index=False)
+    monkeypatch.setattr(data_mod, "find_cached_macro_data_file", lambda mode: path)
+
+    out = data_mod.load_cached_macro_data_for_mode("max_history")
+    latest = out.iloc[-1]
+    if timezone_aware:
+        assert latest["release_timestamp"] == pd.Timestamp(release_strings[-1])
+        assert latest["information_timestamp"] == pd.Timestamp(release_strings[-1])
+        assert latest["timing_status"] == data_mod.TIMING_STATUS_RELEASE_ALIGNED
+    else:
+        assert pd.isna(latest["release_timestamp"])
+        assert pd.isna(latest["information_timestamp"])
+        assert latest["timing_status"] == data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY
+
+
+@pytest.mark.parametrize(
+    ("incoming_status", "expected_cache_status"),
+    [
+        (
+            data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY,
+            data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY,
+        ),
+        ("proxy", "proxy"),
+        ("unknown", "unknown"),
+        (data_mod.TIMING_STATUS_UNAVAILABLE, data_mod.TIMING_STATUS_UNAVAILABLE),
+        (None, data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY),
+    ],
+)
+def test_cache_round_trip_never_promotes_nonexact_release_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    incoming_status: str | None,
+    expected_cache_status: str,
+) -> None:
+    dates = pd.date_range("2022-01-31", periods=18, freq="ME")
+    raw = pd.DataFrame(
+        {
+            "date": dates,
+            "CPIAUCSL": 100.0 + np.arange(len(dates), dtype=float),
+            "TB3MS": 1.0,
+            "release_timestamp": (
+                dates + pd.offsets.Day(13) + pd.offsets.Hour(13)
+            ).tz_localize("UTC"),
+            "release_timestamp_provenance": (
+                data_mod.RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+            ),
+            "timing_status": incoming_status,
+        }
+    )
+
+    cache = data_mod.build_macro_cache_frame(raw)
+    assert cache["release_timestamp"].isna().all()
+    assert cache["release_timing_status"].eq(expected_cache_status).all()
+
+    path = tmp_path / "raw_macro_with_nonexact_timing.csv"
+    cache.to_csv(path, index=False)
+    monkeypatch.setattr(data_mod, "find_cached_macro_data_file", lambda mode: path)
+
+    latest = data_mod.load_cached_macro_data_for_mode("max_history").iloc[-1]
+    assert pd.isna(latest["release_timestamp"])
+    assert latest["release_timing_status"] == expected_cache_status
+    assert pd.isna(latest["information_timestamp"])
+    assert latest["inflation_yoy_timing_status"] == (
+        data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY
+    )
+    assert latest["timing_status"] == data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY
+
+
+def test_measure_timing_and_provenance_remain_independent_through_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dates = pd.date_range("2020-01-31", periods=24, freq="ME")
+    headline_releases = (
+        dates + pd.offsets.Day(13) + pd.offsets.Hour(13)
+    ).tz_localize("UTC")
+    core_releases = (
+        dates + pd.offsets.Day(15) + pd.offsets.Hour(14)
+    ).tz_localize("UTC")
+    pce_releases = (
+        dates + pd.offsets.Day(20) + pd.offsets.Hour(15)
+    ).tz_localize("UTC")
+    raw = pd.DataFrame(
+        {
+            "date": dates,
+            "CPIAUCSL": 100.0 + np.arange(len(dates), dtype=float),
+            "CPILFESL": 105.0 + np.arange(len(dates), dtype=float),
+            "PCEPI": 110.0 + np.arange(len(dates), dtype=float),
+            "TB3MS": 1.0,
+            "release_timestamp": headline_releases,
+            "release_timestamp_provenance": (
+                data_mod.RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+            ),
+            "release_timing_status": data_mod.TIMING_STATUS_RELEASE_ALIGNED,
+            "core_cpi_release_timestamp": core_releases,
+            "core_cpi_release_timestamp_provenance": (
+                data_mod.RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+            ),
+            "core_cpi_release_timing_status": (
+                data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY
+            ),
+            "pce_release_timestamp": pce_releases,
+            "pce_release_timestamp_provenance": (
+                data_mod.RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+            ),
+            "pce_release_timing_status": data_mod.TIMING_STATUS_RELEASE_ALIGNED,
+        }
+    )
+
+    cache = data_mod.build_macro_cache_frame(raw)
+    assert cache["release_timestamp"].notna().all()
+    assert cache["core_cpi_release_timestamp"].isna().all()
+    assert cache["core_cpi_release_timing_status"].eq(
+        data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY
+    ).all()
+    assert cache["pce_release_timestamp"].notna().all()
+
+    path = tmp_path / "raw_macro_with_measure_timing.csv"
+    cache.to_csv(path, index=False)
+    monkeypatch.setattr(data_mod, "find_cached_macro_data_file", lambda mode: path)
+
+    latest = data_mod.load_cached_macro_data_for_mode("max_history").iloc[-1]
+    assert latest["inflation_yoy_information_timestamp"] == headline_releases[-1]
+    assert latest["inflation_yoy_timing_status"] == (
+        data_mod.TIMING_STATUS_RELEASE_ALIGNED
+    )
+    assert pd.isna(latest["core_cpi_yoy_information_timestamp"])
+    assert latest["core_cpi_yoy_timing_status"] == (
+        data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY
+    )
+    assert latest["pce_yoy_information_timestamp"] == pce_releases[-1]
+    assert latest["pce_yoy_timing_status"] == data_mod.TIMING_STATUS_RELEASE_ALIGNED
+    assert latest["information_timestamp"] == headline_releases[-1]
+
+
+def test_nonexact_timing_survives_cache_features_and_market_linkage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dates = pd.date_range("2018-01-31", periods=60, freq="ME")
+    raw = pd.DataFrame(
+        {
+            "date": dates,
+            "CPIAUCSL": 100.0 * np.cumprod(1.0 + np.linspace(0.001, 0.004, 60)),
+            "TB3MS": 1.0,
+            "release_timestamp": (
+                dates + pd.offsets.Day(13) + pd.offsets.Hour(13)
+            ).tz_localize("UTC"),
+            "release_timestamp_provenance": (
+                data_mod.RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+            ),
+            "release_timing_status": "proxy",
+        }
+    )
+    cache = data_mod.build_macro_cache_frame(raw)
+    assert cache["release_timing_status"].eq("proxy").all()
+    assert cache["release_timestamp"].isna().all()
+
+    path = tmp_path / "nonexact_macro_cache.csv"
+    cache.to_csv(path, index=False)
+    monkeypatch.setattr(data_mod, "find_cached_macro_data_file", lambda mode: path)
+    cached_base = data_mod.load_cached_macro_data_for_mode("max_history")
+    featured = features_mod.add_transitory_inflation_features(
+        cached_base,
+        baseline_method="fed_target",
+    )
+
+    market_dates = pd.date_range("2018-02-28", periods=62, freq="ME")
+    market_raw = pd.DataFrame(
+        {
+            "date": market_dates,
+            "yield_2y": np.linspace(1.0, 3.0, len(market_dates)),
+            market_data_mod.MARKET_TIMESTAMP_COLUMN: (
+                market_dates + pd.offsets.Hour(20)
+            ).tz_localize("UTC"),
+            market_data_mod.MARKET_TIMESTAMP_PROVENANCE_COLUMN: (
+                market_data_mod.MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+            ),
+            market_data_mod.MARKET_TIMESTAMP_STATUS_COLUMN: (
+                market_data_mod.MARKET_TIMESTAMP_STATUS_EXACT
+            ),
+        }
+    )
+    market = market_data_mod.build_market_close_frame(market_raw)
+    panel = market_linkage_mod.build_market_linkage_panel(
+        featured,
+        market,
+        horizons=(1,),
+    )
+    latest = panel.dropna(subset=["tinf_12m", "yield_2y"]).iloc[-1]
+
+    assert latest["release_timing_status"] == "proxy"
+    assert latest["inflation_yoy_timing_status"] == (
+        data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY
+    )
+    assert pd.isna(latest["information_timestamp"])
+    assert latest["timing_status"] == data_mod.TIMING_STATUS_REFERENCE_MONTH_ONLY
+    assert latest["yield_2y_origin_basis"] == (
+        market_linkage_mod.MARKET_ORIGIN_CONSERVATIVE_PROXY
+    )
+    assert latest["yield_2y_timing_status"] == (
+        market_linkage_mod.MARKET_TIMING_CONSERVATIVE_PROXY
+    )
+
+
 def test_reference_month_is_not_silently_used_as_information_date() -> None:
     dates = pd.date_range("2023-01-31", periods=15, freq="ME")
-    release_dates = dates + pd.offsets.Day(13)
+    release_dates = (
+        dates + pd.offsets.Day(13) + pd.offsets.Hour(13)
+    ).tz_localize("UTC")
     merged = pd.DataFrame(
         {
             "date": dates,
             "CPIAUCSL": 100.0 + np.arange(15, dtype=float),
             "TB3MS": 1.0,
             "release_timestamp": release_dates,
+            "release_timestamp_provenance": (
+                data_mod.RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+            ),
+            "timing_status": data_mod.TIMING_STATUS_RELEASE_ALIGNED,
         }
     )
 
@@ -233,6 +514,7 @@ def test_reference_month_is_not_silently_used_as_information_date() -> None:
         "reference_month",
         "release_timestamp",
         "information_timestamp",
+        "information_timestamp_provenance",
         "vintage_timestamp",
         "retrieved_at",
         "timing_status",
@@ -371,7 +653,6 @@ def test_unrelated_phase0_findings_remain_strict_xfail_gates() -> None:
     expected_pending_tests = {
         "test_current_paper_surface_is_explicitly_paper_inspired",
         "test_paper_reconstruction_uses_literal_lag_and_a_separate_feature_path",
-        "test_reference_month_is_not_silently_used_as_information_date",
         "test_benchmark_forecasts_use_one_universal_origin_set_for_all_models",
         "test_overlapping_horizons_do_not_emit_naive_uncertainty",
     }

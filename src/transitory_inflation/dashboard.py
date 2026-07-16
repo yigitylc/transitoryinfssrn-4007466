@@ -10,7 +10,9 @@ from .features import add_transitory_inflation_features, latest_signal_snapshot
 CURRENT_SIGNAL_IMPUTATION_NOTICE = (
     "This descriptive current signal uses an ex-post continuity estimate for an officially "
     "missing CPI input. It is not an official CPI observation and is excluded from "
-    "observed-only historical testing."
+    "observed-only historical testing. Its exact information time is known only when the "
+    "following CPI observation has actual release metadata; otherwise timing remains an "
+    "explicit reference-month-only proxy."
 )
 
 

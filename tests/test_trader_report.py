@@ -11,6 +11,21 @@ from transitory_inflation.dashboard import (
 )
 from transitory_inflation.data import build_base_frame
 from transitory_inflation.features import add_transitory_inflation_features
+from transitory_inflation.market_data import (
+    MARKET_TIMESTAMP_COLUMN,
+    MARKET_TIMESTAMP_PROVENANCE_ACTUAL,
+    MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+    MARKET_TIMESTAMP_STATUS_COLUMN,
+    MARKET_TIMESTAMP_STATUS_EXACT,
+    MARKET_VALUE_COLUMNS,
+    build_market_close_frame,
+)
+from transitory_inflation.market_linkage import (
+    MARKET_ORIGIN_INFORMATION_TIMESTAMP,
+    MARKET_ORIGIN_UNAVAILABLE,
+    MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED,
+    MARKET_TIMING_UNAVAILABLE,
+)
 from transitory_inflation.report import (
     REGIME_PLAYBOOK,
     MacroResearchReport,
@@ -127,13 +142,23 @@ def test_macro_research_report_builds_required_phase_five_sections() -> None:
     assert report.market_linkage_lines
     assert report.caveats
     assert report.watchlist
-    assert {"latest_valid_signal_date", "data_source_used", "current_regime"}.issubset(
-        report.current_regime_table.columns
-    )
+    assert {
+        "latest_valid_signal_date",
+        "reference_month",
+        "release_timestamp",
+        "information_timestamp",
+        "release_timestamp_provenance",
+        "information_timestamp_provenance",
+        "timing_status",
+        "data_vintage_status",
+        "data_source_used",
+        "current_regime",
+    }.issubset(report.current_regime_table.columns)
     assert {"ar1", "cpi_persistence"} <= set(report.benchmark_comparisons["comparison_model"])
     assert any("AR(1)" in line for line in report.signal_confidence_lines)
     assert any("point-forecast" in line for line in report.caveats)
     assert any("not a trading signal" in line for line in report.caveats)
+    assert any("conservative month-end t+1" in line for line in report.market_linkage_lines)
 
 
 def test_macro_research_report_discloses_data_vintage_caveat() -> None:
@@ -153,6 +178,182 @@ def test_macro_research_report_discloses_data_vintage_caveat() -> None:
     assert any("vintage" in line.lower() for line in report.caveats)
     assert any("latest-revised" in line.lower() for line in report.caveats)
     assert any("walk-forward" in line.lower() for line in report.caveats)
+    timing_caveats = " ".join(report.caveats).lower()
+    assert "reference-month-only" in timing_caveats
+    assert "never described as release-aligned or vintage-safe" in timing_caveats
+
+
+def test_macro_report_returns_explicit_reference_month_and_information_time() -> None:
+    dates = pd.date_range("2010-01-31", periods=180, freq="ME")
+    releases = pd.Series(
+        (dates + pd.offsets.Day(13) + pd.offsets.Hour(13)).tz_localize("UTC")
+    )
+    raw = build_base_frame(
+        pd.DataFrame(
+            {
+                "date": dates,
+                "CPIAUCSL": 100.0 * (1.002 ** np.arange(len(dates), dtype=float)),
+                "TB3MS": 1.0,
+                "release_timestamp": releases,
+                "release_timestamp_provenance": "actual_release_metadata",
+                "release_timing_status": "release_aligned",
+            }
+        )
+    )
+    featured = add_transitory_inflation_features(raw, baseline_method="fed_target")
+
+    report = build_macro_research_report(
+        raw,
+        featured,
+        baseline_method="fed_target",
+        sample_mode="live_dashboard",
+        benchmark_horizons=(3,),
+        market_horizons=(3,),
+        robustness_baselines=("fed_target",),
+    )
+
+    assert report.available
+    assert report.reference_month == str(dates[-1].date())
+    assert report.information_timestamp == releases.iloc[-1].isoformat()
+    assert report.timing_status == "release_aligned"
+    assert report.as_of == report.reference_month
+    assert "not a signal availability" in report.as_of_semantics
+    detail = report.current_regime_table.iloc[0]
+    assert detail["reference_month"] == report.reference_month
+    assert detail["information_timestamp"] == report.information_timestamp
+    assert detail["latest_valid_signal_date"] == report.reference_month
+    assert "not a signal availability" in detail[
+        "latest_valid_signal_date_semantics"
+    ]
+    returned_text = " ".join(
+        [*report.current_regime_lines, *report.historical_analog_lines]
+    ).lower()
+    assert "reference month" in returned_text
+    assert "information timestamp" in returned_text
+
+
+def test_macro_report_discloses_unavailable_timing_when_channel_summary_is_empty() -> None:
+    dates = pd.date_range("2010-01-31", periods=180, freq="ME")
+    releases = pd.Series(
+        (dates + pd.offsets.Day(13) + pd.offsets.Hour(13)).tz_localize("UTC")
+    )
+    raw = build_base_frame(
+        pd.DataFrame(
+            {
+                "date": dates,
+                "CPIAUCSL": 100.0 * (1.002 ** np.arange(len(dates), dtype=float)),
+                "TB3MS": 1.0,
+                "release_timestamp": releases,
+                "release_timestamp_provenance": "actual_release_metadata",
+                "release_timing_status": "release_aligned",
+            }
+        )
+    )
+    featured = add_transitory_inflation_features(raw, baseline_method="fed_target")
+    stale_market_row: dict[str, object] = {
+        "date": pd.Timestamp("2009-12-31"),
+        MARKET_TIMESTAMP_COLUMN: pd.Timestamp("2009-12-31 21:00:00+00:00"),
+        MARKET_TIMESTAMP_PROVENANCE_COLUMN: MARKET_TIMESTAMP_PROVENANCE_ACTUAL,
+        MARKET_TIMESTAMP_STATUS_COLUMN: MARKET_TIMESTAMP_STATUS_EXACT,
+    }
+    stale_market_row.update(
+        {variable: 1.0 + position for position, variable in enumerate(MARKET_VALUE_COLUMNS)}
+    )
+    market = build_market_close_frame(pd.DataFrame([stale_market_row]))
+
+    report = build_macro_research_report(
+        raw,
+        featured,
+        baseline_method="fed_target",
+        sample_mode="live_dashboard",
+        market_monthly=market,
+        benchmark_horizons=(3,),
+        market_horizons=(3,),
+        robustness_baselines=("fed_target",),
+    )
+
+    assert report.available
+    assert report.market_channel_summary.empty
+    disclosure = "\n".join(report.market_linkage_lines)
+    assert "No channel summary is available" in disclosure
+    assert MARKET_ORIGIN_UNAVAILABLE in disclosure
+    assert MARKET_TIMING_UNAVAILABLE in disclosure
+    assert "conditioning origin=unavailable" in disclosure
+    assert MARKET_ORIGIN_INFORMATION_TIMESTAMP not in disclosure
+
+
+def test_macro_report_returns_named_per_series_timing_for_partial_rows() -> None:
+    dates = pd.date_range("2010-01-31", periods=180, freq="ME")
+    releases = pd.Series(
+        (dates + pd.offsets.Day(13) + pd.offsets.Hour(13)).tz_localize("UTC")
+    )
+    raw = build_base_frame(
+        pd.DataFrame(
+            {
+                "date": dates,
+                "CPIAUCSL": 100.0 * (1.002 ** np.arange(len(dates), dtype=float)),
+                "TB3MS": 1.0,
+                "release_timestamp": releases,
+                "release_timestamp_provenance": "actual_release_metadata",
+                "release_timing_status": "release_aligned",
+            }
+        )
+    )
+    featured = add_transitory_inflation_features(raw, baseline_method="fed_target")
+    market_timestamps = pd.Series(
+        (dates + pd.offsets.Day(20) + pd.offsets.Hour(21)).tz_localize("UTC")
+    )
+    market = build_market_close_frame(
+        pd.DataFrame(
+            {
+                "date": dates + pd.offsets.Day(20),
+                "DGS2": np.linspace(1.0, 4.0, len(dates)),
+                "DGS10": np.nan,
+                MARKET_TIMESTAMP_COLUMN: market_timestamps,
+                MARKET_TIMESTAMP_PROVENANCE_COLUMN: (
+                    MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+                ),
+                MARKET_TIMESTAMP_STATUS_COLUMN: MARKET_TIMESTAMP_STATUS_EXACT,
+            }
+        )
+    )
+
+    report = build_macro_research_report(
+        raw,
+        featured,
+        baseline_method="fed_target",
+        sample_mode="live_dashboard",
+        market_monthly=market,
+        benchmark_horizons=(3,),
+        market_horizons=(3,),
+        robustness_baselines=("fed_target",),
+    )
+
+    assert report.available
+    summary = report.market_series_timing_summary
+    exact_2y = summary.loc[
+        (summary["market_variable"] == "yield_2y")
+        & (
+            summary["market_origin_basis"]
+            == MARKET_ORIGIN_INFORMATION_TIMESTAMP
+        )
+        & (
+            summary["market_timing_status"]
+            == MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+        )
+    ]
+    unavailable_10y = summary.loc[
+        (summary["market_variable"] == "yield_10y")
+        & (summary["market_origin_basis"] == MARKET_ORIGIN_UNAVAILABLE)
+        & (summary["market_timing_status"] == MARKET_TIMING_UNAVAILABLE)
+    ]
+    assert not exact_2y.empty
+    assert not unavailable_10y.empty
+    disclosure = "\n".join(report.market_linkage_lines)
+    assert "instrument=yield_2y" in disclosure
+    assert "instrument=yield_10y" in disclosure
+    assert MARKET_ORIGIN_INFORMATION_TIMESTAMP in disclosure
+    assert MARKET_ORIGIN_UNAVAILABLE in disclosure
 
 
 def test_macro_research_report_discloses_missing_measures_and_approved_market_channels() -> None:

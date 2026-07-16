@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
 from .config import DEFAULT_SAMPLE_MODE, RAW_DATA_DIR, SampleMode, resolve_sample_mode
 from .data import (
+    _has_explicit_timezone,
     _merge_series_frames,
     _safe_error,
     fetch_fred_series_api,
@@ -18,6 +19,13 @@ from .data import (
 )
 
 CACHED_MARKET_DATA_STEM = "fred_market_rates"
+MARKET_TIMESTAMP_COLUMN = "market_timestamp"
+MARKET_TIMESTAMP_PROVENANCE_COLUMN = "market_timestamp_provenance"
+MARKET_TIMESTAMP_STATUS_COLUMN = "market_timestamp_status"
+MARKET_TIMESTAMP_PROVENANCE_ACTUAL = "actual_market_close_metadata"
+MARKET_TIMESTAMP_PROVENANCE_FRED_DATE_ONLY = "fred_observation_date_only"
+MARKET_TIMESTAMP_STATUS_EXACT = "exact_market_close_timestamp"
+MARKET_TIMESTAMP_STATUS_DATE_ONLY = "date_only_observation"
 
 
 @dataclass(frozen=True)
@@ -89,6 +97,7 @@ class MarketDataLoadResult:
     data: pd.DataFrame
     market_data_source_used: str
     market_live_fetch_status: str
+    market_closes: pd.DataFrame = field(default_factory=pd.DataFrame)
     market_cache_file_used: str | None = None
     available_market_variables: tuple[str, ...] = ()
     latest_valid_date_by_variable: dict[str, pd.Timestamp | None] | None = None
@@ -116,6 +125,7 @@ def _market_result(
     data: pd.DataFrame,
     source: str,
     status: str,
+    market_closes: pd.DataFrame | None = None,
     cache_file: Path | None = None,
     api_key_configured: bool = False,
 ) -> MarketDataLoadResult:
@@ -123,6 +133,7 @@ def _market_result(
         data=data,
         market_data_source_used=source,
         market_live_fetch_status=status,
+        market_closes=data if market_closes is None else market_closes,
         market_cache_file_used=cache_file.name if cache_file else None,
         available_market_variables=available_market_variables(data),
         latest_valid_date_by_variable=latest_valid_dates_by_variable(data),
@@ -163,6 +174,78 @@ def merge_fred_market_series_csv(
         fetch_fred_series_csv(series_id, start_date=start_date, end_date=end_date)
         for series_id in MARKET_FRED_SERIES_IDS
     )
+
+
+def build_market_close_frame(
+    merged: pd.DataFrame,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Normalize market observations while keeping exact timestamps distinct from dates.
+
+    Duplicate observation dates retain the last physical source row in stable
+    input order. Selection is row-coherent: null values and timestamp metadata
+    come from that same row rather than from column-wise aggregation.
+    """
+
+    if "date" not in merged.columns:
+        raise ValueError("Market data must include a date column")
+
+    out = pd.DataFrame({"date": pd.to_datetime(merged["date"], errors="coerce")})
+    for variable, meta in MARKET_FRED_SERIES.items():
+        if variable in merged.columns:
+            source_col = variable
+        elif meta.series_id in merged.columns:
+            source_col = meta.series_id
+        else:
+            continue
+        out[variable] = pd.to_numeric(merged[source_col], errors="coerce")
+
+    supplied_timestamp = merged.get(
+        MARKET_TIMESTAMP_COLUMN,
+        pd.Series(pd.NaT, index=merged.index),
+    )
+    supplied_provenance = merged.get(
+        MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+        pd.Series(pd.NA, index=merged.index, dtype="string"),
+    ).astype("string")
+    supplied_status = merged.get(
+        MARKET_TIMESTAMP_STATUS_COLUMN,
+        pd.Series(pd.NA, index=merged.index, dtype="string"),
+    ).astype("string")
+    timezone_known = supplied_timestamp.map(_has_explicit_timezone).astype(bool)
+    trusted = (
+        timezone_known
+        & supplied_provenance.eq(MARKET_TIMESTAMP_PROVENANCE_ACTUAL).fillna(False)
+        & supplied_status.eq(MARKET_TIMESTAMP_STATUS_EXACT).fillna(False)
+    )
+    out[MARKET_TIMESTAMP_COLUMN] = pd.to_datetime(
+        supplied_timestamp,
+        errors="coerce",
+        utc=True,
+    ).where(trusted)
+    out[MARKET_TIMESTAMP_PROVENANCE_COLUMN] = pd.Series(
+        MARKET_TIMESTAMP_PROVENANCE_FRED_DATE_ONLY,
+        index=out.index,
+        dtype="string",
+    )
+    out.loc[trusted, MARKET_TIMESTAMP_PROVENANCE_COLUMN] = (
+        MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+    )
+    out[MARKET_TIMESTAMP_STATUS_COLUMN] = pd.Series(
+        MARKET_TIMESTAMP_STATUS_DATE_ONLY,
+        index=out.index,
+        dtype="string",
+    )
+    out.loc[trusted, MARKET_TIMESTAMP_STATUS_COLUMN] = MARKET_TIMESTAMP_STATUS_EXACT
+
+    if not any(variable in out.columns for variable in MARKET_VALUE_COLUMNS):
+        expected = ", ".join([*MARKET_FRED_SERIES_IDS, *MARKET_VALUE_COLUMNS])
+        raise ValueError(f"Market data must include at least one approved series: {expected}")
+
+    out = out.dropna(subset=["date"]).sort_values("date", kind="stable")
+    out = out.drop_duplicates(subset=["date"], keep="last")
+    return slice_date_range(out, start_date=start_date, end_date=end_date)
 
 
 def build_market_frame(
@@ -252,6 +335,12 @@ def load_cached_market_data_for_mode(mode: SampleMode | str = DEFAULT_SAMPLE_MOD
         if column == "date"
         or column in MARKET_VALUE_COLUMNS
         or column in MARKET_FRED_SERIES_IDS
+        or column
+        in {
+            MARKET_TIMESTAMP_COLUMN,
+            MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+            MARKET_TIMESTAMP_STATUS_COLUMN,
+        }
     ]
     if approved_columns == ["date"]:
         expected = ", ".join([*MARKET_FRED_SERIES_IDS, *MARKET_VALUE_COLUMNS])
@@ -259,6 +348,40 @@ def load_cached_market_data_for_mode(mode: SampleMode | str = DEFAULT_SAMPLE_MOD
 
     resolved = resolve_sample_mode(mode)
     return build_market_frame(
+        cached.loc[:, approved_columns],
+        start_date=resolved.start_date,
+        end_date=resolved.end_date,
+    )
+
+
+def load_cached_market_closes_for_mode(
+    mode: SampleMode | str = DEFAULT_SAMPLE_MODE,
+) -> pd.DataFrame:
+    """Load the finest dated observations retained by the selected market cache."""
+
+    path = find_cached_market_data_file(mode)
+    cached = pd.read_csv(path)
+    if "date" not in cached.columns:
+        raise ValueError(f"Cached market data {path} must include a date column")
+    approved_columns = [
+        column
+        for column in cached.columns
+        if column == "date"
+        or column in MARKET_VALUE_COLUMNS
+        or column in MARKET_FRED_SERIES_IDS
+        or column
+        in {
+            MARKET_TIMESTAMP_COLUMN,
+            MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+            MARKET_TIMESTAMP_STATUS_COLUMN,
+        }
+    ]
+    if approved_columns == ["date"]:
+        expected = ", ".join([*MARKET_FRED_SERIES_IDS, *MARKET_VALUE_COLUMNS])
+        raise ValueError(f"Cached market data {path} must include one of: {expected}")
+
+    resolved = resolve_sample_mode(mode)
+    return build_market_close_frame(
         cached.loc[:, approved_columns],
         start_date=resolved.start_date,
         end_date=resolved.end_date,
@@ -276,8 +399,18 @@ def load_market_data_for_mode_with_status(
 
     if key:
         try:
-            data = load_market_data_from_api(
-                key,
+            raw = merge_fred_market_series_api(
+                api_key=key,
+                start_date=resolved.start_date,
+                end_date=resolved.end_date,
+            )
+            data = build_market_frame(
+                raw,
+                start_date=resolved.start_date,
+                end_date=resolved.end_date,
+            )
+            market_closes = build_market_close_frame(
+                raw,
                 start_date=resolved.start_date,
                 end_date=resolved.end_date,
             )
@@ -286,6 +419,7 @@ def load_market_data_for_mode_with_status(
                 data,
                 source="fred_api",
                 status="; ".join(status_parts),
+                market_closes=market_closes,
                 api_key_configured=True,
             )
         except Exception as exc:
@@ -294,7 +428,17 @@ def load_market_data_for_mode_with_status(
         status_parts.append("fred_api: skipped (FRED_API_KEY not configured)")
 
     try:
-        data = load_market_data_from_csv(
+        raw = merge_fred_market_series_csv(
+            start_date=resolved.start_date,
+            end_date=resolved.end_date,
+        )
+        data = build_market_frame(
+            raw,
+            start_date=resolved.start_date,
+            end_date=resolved.end_date,
+        )
+        market_closes = build_market_close_frame(
+            raw,
             start_date=resolved.start_date,
             end_date=resolved.end_date,
         )
@@ -303,6 +447,7 @@ def load_market_data_for_mode_with_status(
             data,
             source="fred_csv",
             status="; ".join(status_parts),
+            market_closes=market_closes,
             api_key_configured=key is not None,
         )
     except Exception as exc:
@@ -311,11 +456,13 @@ def load_market_data_for_mode_with_status(
     try:
         cache_path = find_cached_market_data_file(resolved)
         data = load_cached_market_data_for_mode(resolved)
+        market_closes = load_cached_market_closes_for_mode(resolved)
         status_parts.append("cached_fred_market: ok")
         return _market_result(
             data,
             source="cached_fred_market",
             status="; ".join(status_parts),
+            market_closes=market_closes,
             cache_file=cache_path,
             api_key_configured=key is not None,
         )

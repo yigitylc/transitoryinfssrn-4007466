@@ -171,15 +171,28 @@ Required rules:
 
 1. CPI reference month is never its information date.
 2. A derived signal's information timestamp is the maximum input availability timestamp across its
-   dependency window.
+   dependency window. Incoming timing status is authoritative: any dependency actually used that is
+   `reference_month_only`, proxy, unknown, or otherwise non-exact prevents a derived
+   `release_aligned` status.
 3. Ex-post imputation uses the following observation's release timestamp as its earliest information
    timestamp.
-4. Exact market measurement begins at the first eligible market close on or after publication.
-5. A month-end `t+1` market origin is allowed only as a labelled conservative release proxy.
+4. Exact market measurement begins at the first eligible market close on or after the full signal
+   `information_timestamp` and requires trustworthy, timezone-bearing signal and market timestamps
+   with explicit status and provenance; time-of-day is not discarded.
+5. Date-only FRED market observations use a labelled conservative next-observation-date proxy after
+   applicable signal information time when the full signal-information timing is trustworthy. A
+   month-end `t+1` market origin is allowed only as a labelled conservative proxy when full
+   signal-information timing is unavailable or unverified.
 6. Missing release metadata forces `reference_month_only`; it cannot be labelled release-aligned or
    vintage-safe.
 7. Vintage-safe requires values actually available by the decision timestamp. Latest-revised FRED
    values remain explicitly non-vintage.
+8. Duplicate monthly macro inputs select one physical source row: the latest dated row in the month,
+   with the last stable input row breaking same-date ties. Values, nulls, timing status, and
+   provenance are never combined across duplicates.
+9. Multi-series market timing is routed independently by series. One missing series cannot demote a
+   different series with an eligible exact post-information observation; aggregate labels summarize
+   the authoritative per-series exact, proxy, mixed, partial, or unavailable results.
 
 The terms `row-lookahead-safe`, `release-aligned`, `vintage-safe`, and `ex-post continuity` may not be
 collapsed into `live-safe`.

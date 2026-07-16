@@ -3,9 +3,24 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from transitory_inflation.data import INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
 from transitory_inflation.features import add_transitory_inflation_features
-from transitory_inflation.market_data import MARKET_VALUE_COLUMNS
-from transitory_inflation.market_linkage import build_market_linkage_tables
+from transitory_inflation.market_data import (
+    MARKET_TIMESTAMP_COLUMN,
+    MARKET_TIMESTAMP_PROVENANCE_ACTUAL,
+    MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+    MARKET_TIMESTAMP_STATUS_COLUMN,
+    MARKET_TIMESTAMP_STATUS_EXACT,
+    MARKET_VALUE_COLUMNS,
+    build_market_close_frame,
+)
+from transitory_inflation.market_linkage import (
+    MARKET_ORIGIN_INFORMATION_TIMESTAMP,
+    MARKET_ORIGIN_UNAVAILABLE,
+    MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED,
+    MARKET_TIMING_UNAVAILABLE,
+    build_market_linkage_tables,
+)
 from transitory_inflation.trader_research import (
     available_regimes,
     build_trader_research_view,
@@ -61,7 +76,7 @@ def _explicit_neutral_signal(periods: int = 8) -> pd.DataFrame:
     )
 
 
-def test_bucket_uses_latest_live_safe_walk_forward_label() -> None:
+def test_bucket_uses_latest_row_lookahead_safe_walk_forward_label() -> None:
     signal = _signal_frame(120)
     bucket = latest_walk_forward_bucket(signal)
 
@@ -72,9 +87,79 @@ def test_bucket_uses_latest_live_safe_walk_forward_label() -> None:
     assert bucket.available
     assert bucket.regime == str(last["historical_regime"])
     assert bucket.pressure == str(last["historical_short_term_pressure"])
-    assert bucket.as_of == pd.Timestamp(last["date"])
+    assert bucket.reference_month == pd.Timestamp(last["date"])
+    assert bucket.information_timestamp is None
+    assert bucket.timing_status == "reference_month_only"
+    assert bucket.as_of == bucket.reference_month
+    assert "not a signal availability" in bucket.as_of_semantics
     assert bucket.regime_count > 0
     assert 0 < bucket.regime_pressure_count <= bucket.regime_count
+
+
+def test_bucket_exposes_reference_month_and_information_timestamp_separately() -> None:
+    signal = _signal_frame(120)
+    signal["reference_month"] = signal["date"]
+    signal["information_timestamp"] = (
+        signal["date"] + pd.offsets.Day(13) + pd.offsets.Hour(13)
+    ).dt.tz_localize("UTC")
+    signal["information_timestamp_provenance"] = (
+        INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+    )
+    signal["timing_status"] = "release_aligned"
+    signal["tinf_4m_information_timestamp"] = signal["information_timestamp"]
+    signal["tinf_4m_information_timestamp_provenance"] = (
+        INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+    )
+    signal["tinf_4m_timing_status"] = "release_aligned"
+
+    bucket = latest_walk_forward_bucket(signal)
+
+    assert bucket.available
+    assert bucket.reference_month == pd.Timestamp(signal["date"].iloc[-1])
+    assert bucket.information_timestamp == signal["information_timestamp"].iloc[-1]
+    assert bucket.reference_month != bucket.information_timestamp
+    assert bucket.timing_status == "release_aligned"
+
+
+def test_bucket_timing_waits_for_regime_and_pressure_dependencies() -> None:
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [
+                pd.Timestamp("2024-02-13 17:00:00+00:00")
+            ],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_regime_information_timestamp": [
+                pd.Timestamp("2024-02-13 19:00:00+00:00")
+            ],
+            "historical_regime_information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "historical_regime_timing_status": ["release_aligned"],
+            "historical_short_term_pressure": ["mixed"],
+            "historical_short_term_pressure_information_timestamp": [
+                pd.Timestamp("2024-02-13 18:00:00+00:00")
+            ],
+            "historical_short_term_pressure_information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "historical_short_term_pressure_timing_status": ["release_aligned"],
+            "tinf_4m": [1.0],
+        }
+    )
+
+    bucket = latest_walk_forward_bucket(signal)
+
+    assert bucket.available
+    assert bucket.information_timestamp == pd.Timestamp(
+        "2024-02-13 19:00:00+00:00"
+    )
+    assert bucket.timing_status == "release_aligned"
 
 
 def test_bucket_unavailable_without_enough_prior_history() -> None:
@@ -143,6 +228,73 @@ def test_analog_months_are_in_bucket_with_changes_and_sorted() -> None:
     assert analog["date"].is_monotonic_increasing
     assert len(analog) == int(expected_mask.sum())
     assert analog[change_cols].notna().any(axis=1).all()
+
+
+def test_trader_view_preserves_per_series_timing_for_partial_rows() -> None:
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [
+                pd.Timestamp("2024-02-13 17:00:00+00:00")
+            ],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+        }
+    )
+    market = build_market_close_frame(
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-02-14", "2024-03-14"]),
+                "DGS2": [4.2, 4.5],
+                "DGS10": [np.nan, np.nan],
+                MARKET_TIMESTAMP_COLUMN: pd.to_datetime(
+                    [
+                        "2024-02-14 18:00:00+00:00",
+                        "2024-03-14 18:00:00+00:00",
+                    ]
+                ),
+                MARKET_TIMESTAMP_PROVENANCE_COLUMN: [
+                    MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+                ]
+                * 2,
+                MARKET_TIMESTAMP_STATUS_COLUMN: [MARKET_TIMESTAMP_STATUS_EXACT] * 2,
+            }
+        )
+    )
+    tables = build_market_linkage_tables(signal, market, horizons=(1,))
+
+    view = build_trader_research_view(
+        tables,
+        "neutral",
+        "mixed",
+        horizons=(1,),
+    )
+
+    assert view.available
+    analog = view.analog_months.iloc[0]
+    assert analog["yield_2y_origin_basis"] == MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    assert (
+        analog["yield_2y_timing_status"]
+        == MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+    )
+    assert analog["yield_10y_origin_basis"] == MARKET_ORIGIN_UNAVAILABLE
+    assert analog["yield_10y_timing_status"] == MARKET_TIMING_UNAVAILABLE
+    summary = view.series_timing_summary.set_index("market_variable")
+    assert summary.loc["yield_2y", "market_origin_basis"] == (
+        MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    )
+    assert summary.loc["yield_10y", "market_origin_basis"] == (
+        MARKET_ORIGIN_UNAVAILABLE
+    )
 
 
 def test_weak_evidence_flag_set_for_small_bucket() -> None:

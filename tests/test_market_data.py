@@ -10,7 +10,15 @@ from transitory_inflation.data import FRED_API_URL
 from transitory_inflation.market_data import (
     MARKET_FRED_SERIES,
     MARKET_FRED_SERIES_IDS,
+    MARKET_TIMESTAMP_COLUMN,
+    MARKET_TIMESTAMP_PROVENANCE_ACTUAL,
+    MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+    MARKET_TIMESTAMP_PROVENANCE_FRED_DATE_ONLY,
+    MARKET_TIMESTAMP_STATUS_COLUMN,
+    MARKET_TIMESTAMP_STATUS_DATE_ONLY,
+    MARKET_TIMESTAMP_STATUS_EXACT,
     MARKET_VALUE_COLUMNS,
+    build_market_close_frame,
     build_market_frame,
     load_market_data_for_mode_with_status,
     validate_market_series_registry,
@@ -121,6 +129,22 @@ def test_api_key_present_uses_official_market_api_path(
     assert result.api_key_configured
     assert len(calls) == len(MARKET_FRED_SERIES_IDS)
     assert set(result.available_market_variables) == set(MARKET_VALUE_COLUMNS)
+    assert result.data["date"].tolist() == [
+        pd.Timestamp("2020-01-31"),
+        pd.Timestamp("2020-02-29"),
+    ]
+    assert result.market_closes["date"].tolist() == [
+        pd.Timestamp("2020-01-02"),
+        pd.Timestamp("2020-01-31"),
+        pd.Timestamp("2020-02-28"),
+    ]
+    assert result.market_closes[MARKET_TIMESTAMP_COLUMN].isna().all()
+    assert result.market_closes[MARKET_TIMESTAMP_STATUS_COLUMN].eq(
+        MARKET_TIMESTAMP_STATUS_DATE_ONLY
+    ).all()
+    assert result.market_closes[MARKET_TIMESTAMP_PROVENANCE_COLUMN].eq(
+        MARKET_TIMESTAMP_PROVENANCE_FRED_DATE_ONLY
+    ).all()
     assert "secret-market-key" not in result.market_live_fetch_status
     assert "secret-market-key" not in capsys.readouterr().out
 
@@ -235,3 +259,45 @@ def test_daily_fred_values_become_month_end_last_observations() -> None:
     ]
     assert out["yield_2y"].tolist() == [1.2, 1.6]
     assert out["yield_10y"].tolist() == [2.2, 2.6]
+    assert MARKET_TIMESTAMP_COLUMN not in out.columns
+
+
+def test_explicit_market_close_timestamp_preserves_time_of_day() -> None:
+    close = pd.Timestamp("2024-02-13 16:00:00-05:00")
+    out = build_market_close_frame(
+        pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2024-02-13")],
+                "DGS2": [4.5],
+                MARKET_TIMESTAMP_COLUMN: [close],
+                MARKET_TIMESTAMP_PROVENANCE_COLUMN: [
+                    MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+                ],
+                MARKET_TIMESTAMP_STATUS_COLUMN: [MARKET_TIMESTAMP_STATUS_EXACT],
+            }
+        )
+    )
+
+    assert out.loc[0, MARKET_TIMESTAMP_COLUMN] == close.tz_convert("UTC")
+    assert out.loc[0, MARKET_TIMESTAMP_COLUMN].hour == 21
+    assert out.loc[0, MARKET_TIMESTAMP_STATUS_COLUMN] == MARKET_TIMESTAMP_STATUS_EXACT
+
+
+def test_market_timestamp_without_explicit_status_fails_closed() -> None:
+    out = build_market_close_frame(
+        pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2024-02-13")],
+                "DGS2": [4.5],
+                MARKET_TIMESTAMP_COLUMN: [pd.Timestamp("2024-02-13 21:00:00+00:00")],
+                MARKET_TIMESTAMP_PROVENANCE_COLUMN: [
+                    MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+                ],
+            }
+        )
+    )
+
+    assert pd.isna(out.loc[0, MARKET_TIMESTAMP_COLUMN])
+    assert out.loc[0, MARKET_TIMESTAMP_STATUS_COLUMN] == (
+        MARKET_TIMESTAMP_STATUS_DATE_ONLY
+    )

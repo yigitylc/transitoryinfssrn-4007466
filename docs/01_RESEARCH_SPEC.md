@@ -47,11 +47,14 @@ Expected outputs:
 - rolling AR(1) persistence estimates
 - decay/convergence table
 
-### 2. Live signal mode (no full-sample lookahead)
+### 2. Live signal mode (no full-sample lookahead; latest-revised and non-vintage)
 
-Purpose: make the signal usable as a current macro indicator. "Live-safe" here
-means no full-sample lookahead; it is not a real-time data-vintage backtest (the
-loader uses latest-revised FRED data, not the data as first released).
+Purpose: make the signal usable as a current macro indicator. The shifted construction is
+`row-lookahead-safe`: it uses no future rows or full-sample information. This does not mean
+release-aligned or vintage-safe. The loader uses latest-revised FRED data, and missing CPI release
+metadata remains explicitly `reference_month_only`. Exact publication/information timing also
+requires explicit provenance and a timezone-bearing timestamp; timestamp times are not reduced to
+calendar dates.
 
 Sample: `live_dashboard`, 1982-01-01 through the latest available FRED data.
 Use `max_history` to check robustness of the same outputs over the longest
@@ -61,10 +64,10 @@ Requirements:
 
 - avoid full-sample lookahead
 - prefer shifted rolling or shifted expanding baselines
-- show what data was known at each point
-- label results as live-safe or ex-post
-- treat live-safe as no full-sample lookahead on latest-revised data, not a
-  real-time data-vintage backtest
+- show only timing metadata actually supplied for each point and fail closed when it is unavailable
+- label row-lookahead-safe and ex-post construction separately from timing/vintage status
+- expose reference month, actual publication/information time when available, and the
+  latest-revised non-vintage limitation
 
 #### Historical signal validation
 
@@ -76,7 +79,7 @@ first, then future CPI outcomes are appended only for scoring historical rows.
 Future values must never feed back into baseline, epsilon, TINF, pressure, or
 regime construction.
 
-Default live-like settings:
+Default row-lookahead-safe settings:
 
 - `sample_mode = live_dashboard`
 - `baseline_method = rolling_36_shifted`
@@ -106,13 +109,23 @@ can use information unavailable at month t.
 Purpose: study, descriptively, how markets behaved after past inflation-persistence
 states.
 
-Scope (decided 2026-06-24): descriptive only, rates-only, and live-safe. It ships as
-the **Trader Research** Streamlit tab, which conditions on the latest live-safe
+Scope (decided 2026-06-24): descriptive only, rates-only, and row-lookahead-safe. It ships as
+the **Trader Research** Streamlit tab, which conditions on the latest row-lookahead-safe
 walk-forward regime bucket (`historical_regime` / `historical_short_term_pressure`)
 and reports, for the six approved FRED rate instruments, the forward-change
 distribution (median, p25-p75, increase/decrease hit rates, sample count,
 weak-evidence) plus the analog months behind it. It reuses the Phase 4 market-linkage
 tables (`market_linkage.build_market_linkage_tables`) and adds no new market series.
+Exact market measurement begins at the first eligible market-close timestamp greater than or equal
+to the full signal information timestamp, but only when both timestamps have explicit trustworthy
+status, provenance, and timezone information. Standard FRED rate observations are date-only and
+therefore cannot establish an exact close: when signal information timing is trustworthy, they use
+the first observation date after that information timestamp as a clearly labelled conservative
+proxy. Rows without trustworthy signal information timing use the clearly labelled conservative
+month-end `t+1` proxy. Each required market series is routed independently before the row-level
+exact, proxy, mixed, partial, or unavailable status is summarized.
+None of these paths is a vintage backtest because the macro and market values are latest-revised
+FRED data.
 
 In scope (approved FRED rates only):
 

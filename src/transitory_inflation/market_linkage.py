@@ -3,9 +3,20 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
+from .data import (
+    INFORMATION_TIMESTAMP_PROVENANCE_RELEASES,
+    TIMING_STATUS_RELEASE_ALIGNED,
+    _has_explicit_timezone,
+)
 from .market_data import (
+    MARKET_TIMESTAMP_COLUMN,
+    MARKET_TIMESTAMP_PROVENANCE_ACTUAL,
+    MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+    MARKET_TIMESTAMP_STATUS_COLUMN,
+    MARKET_TIMESTAMP_STATUS_EXACT,
     MARKET_VALUE_COLUMNS,
     current_market_snapshot,
     market_data_availability,
@@ -21,6 +32,37 @@ MARKET_CHANNELS: dict[str, tuple[str, str]] = {
 }
 WEAK_EVIDENCE_MIN_COUNT = 30
 WEAK_EVIDENCE_NOTE = "Fewer than 30 complete observations; interpret cautiously."
+MARKET_ORIGIN_INFORMATION_TIMESTAMP = (
+    "exact_information_timestamp_aligned_market_close"
+)
+# Compatibility aliases for callers that imported the original H5 constant names.
+MARKET_ORIGIN_PUBLICATION = MARKET_ORIGIN_INFORMATION_TIMESTAMP
+MARKET_ORIGIN_NEXT_OBSERVATION_PROXY = "conservative_next_observation_date_proxy"
+MARKET_ORIGIN_CONSERVATIVE_PROXY = "conservative_month_end_t_plus_1_proxy"
+MARKET_ORIGIN_MIXED = "mixed_market_origin_basis"
+MARKET_ORIGIN_PARTIAL = "partial_market_origin_availability"
+MARKET_ORIGIN_UNAVAILABLE = "unavailable_no_trustworthy_post_information_observation"
+MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED = (
+    "exact_information_timestamp_aligned_market_close_latest_revised_non_vintage"
+)
+# Compatibility alias matching the pre-correction public symbol.
+MARKET_TIMING_RELEASE_ALIGNED = MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+MARKET_TIMING_NEXT_OBSERVATION_PROXY = (
+    "conservative_next_observation_date_proxy_latest_revised_non_vintage"
+)
+MARKET_TIMING_CONSERVATIVE_PROXY = (
+    "conservative_month_end_t_plus_1_proxy_latest_revised_non_vintage"
+)
+MARKET_TIMING_MIXED = "mixed_market_origin_basis_latest_revised_non_vintage"
+MARKET_TIMING_PARTIAL = (
+    "partial_market_origin_availability_latest_revised_non_vintage"
+)
+MARKET_TIMING_UNAVAILABLE = (
+    "unavailable_no_trustworthy_market_observation_at_or_after_information_timestamp"
+)
+MARKET_AVAILABILITY_FULL = "fully_available"
+MARKET_AVAILABILITY_PARTIAL = "partially_available"
+MARKET_AVAILABILITY_UNAVAILABLE = "unavailable"
 MARKET_SUMMARY_COLUMNS: tuple[str, ...] = (
     "horizon_months",
     "market_variable",
@@ -70,6 +112,8 @@ class MarketLinkageTables:
     regime_pressure_rankings: pd.DataFrame
     channel_summary_by_regime: pd.DataFrame
     correlations: pd.DataFrame
+    timing_summary: pd.DataFrame
+    series_timing_summary: pd.DataFrame
 
 
 def _horizons(values: Iterable[int]) -> tuple[int, ...]:
@@ -90,6 +134,500 @@ def _require_columns(df: pd.DataFrame, columns: Iterable[str]) -> None:
 
 def _month_end_dates(values: pd.Series) -> pd.Series:
     return pd.to_datetime(values).dt.to_period("M").dt.to_timestamp("M")
+
+
+def _observation_dates(values: pd.Series) -> pd.Series:
+    """Normalize source observation dates only for conservative proxy matching."""
+
+    parsed = pd.to_datetime(values, errors="coerce", utc=True)
+    return parsed.dt.tz_convert(None).dt.normalize()
+
+
+def _trusted_signal_information(
+    signal: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series]:
+    supplied = signal.get(
+        "information_timestamp",
+        pd.Series(pd.NaT, index=signal.index),
+    )
+    timing_status = signal.get(
+        "timing_status",
+        pd.Series(pd.NA, index=signal.index, dtype="string"),
+    ).astype("string")
+    provenance = signal.get(
+        "information_timestamp_provenance",
+        pd.Series(pd.NA, index=signal.index, dtype="string"),
+    ).astype("string")
+    trustworthy = (
+        supplied.map(_has_explicit_timezone).astype(bool)
+        & timing_status.eq(TIMING_STATUS_RELEASE_ALIGNED).fillna(False)
+        & provenance.eq(INFORMATION_TIMESTAMP_PROVENANCE_RELEASES).fillna(False)
+    )
+    parsed = pd.to_datetime(supplied, errors="coerce", utc=True)
+    combined = parsed.copy()
+
+    # Walk-forward regime and pressure labels can become available later than
+    # the row's underlying TINF values. When validation supplies their timing
+    # metadata, market routing must wait for every label dependency actually
+    # used by the row and must fail closed if any such dependency is non-exact.
+    for label_column in (
+        "historical_regime",
+        "historical_short_term_pressure",
+    ):
+        timestamp_column = f"{label_column}_information_timestamp"
+        status_column = f"{label_column}_timing_status"
+        provenance_column = f"{label_column}_information_timestamp_provenance"
+        if not {
+            timestamp_column,
+            status_column,
+            provenance_column,
+        }.intersection(signal.columns):
+            continue
+
+        dependency_used = signal.get(
+            label_column,
+            pd.Series(pd.NA, index=signal.index, dtype="string"),
+        ).notna()
+        dependency_timestamp = signal.get(
+            timestamp_column,
+            pd.Series(pd.NaT, index=signal.index),
+        )
+        dependency_status = signal.get(
+            status_column,
+            pd.Series(pd.NA, index=signal.index, dtype="string"),
+        ).astype("string")
+        dependency_provenance = signal.get(
+            provenance_column,
+            pd.Series(pd.NA, index=signal.index, dtype="string"),
+        ).astype("string")
+        dependency_trustworthy = (
+            dependency_timestamp.map(_has_explicit_timezone).astype(bool)
+            & dependency_status.eq(TIMING_STATUS_RELEASE_ALIGNED).fillna(False)
+            & dependency_provenance.eq(
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ).fillna(False)
+        )
+        trustworthy &= ~dependency_used | dependency_trustworthy
+        dependency_parsed = pd.to_datetime(
+            dependency_timestamp,
+            errors="coerce",
+            utc=True,
+        )
+        combined = pd.concat(
+            [combined, dependency_parsed.where(dependency_used)],
+            axis=1,
+        ).max(axis=1)
+
+    return combined.where(trustworthy), trustworthy
+
+
+def _trusted_market_timestamps(
+    market: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series]:
+    supplied = market.get(
+        MARKET_TIMESTAMP_COLUMN,
+        pd.Series(pd.NaT, index=market.index),
+    )
+    status = market.get(
+        MARKET_TIMESTAMP_STATUS_COLUMN,
+        pd.Series(pd.NA, index=market.index, dtype="string"),
+    ).astype("string")
+    provenance = market.get(
+        MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+        pd.Series(pd.NA, index=market.index, dtype="string"),
+    ).astype("string")
+    trustworthy = (
+        supplied.map(_has_explicit_timezone).astype(bool)
+        & status.eq(MARKET_TIMESTAMP_STATUS_EXACT).fillna(False)
+        & provenance.eq(MARKET_TIMESTAMP_PROVENANCE_ACTUAL).fillna(False)
+    )
+    parsed = pd.to_datetime(supplied, errors="coerce", utc=True)
+    return parsed.where(trustworthy), trustworthy
+
+
+def _market_origin_targets(
+    signal: pd.DataFrame,
+    *,
+    exact_market_available: bool,
+) -> pd.DataFrame:
+    if "reference_month" in signal.columns:
+        reference_month = _month_end_dates(signal["reference_month"])
+    else:
+        reference_month = _month_end_dates(signal["date"])
+
+    information_timestamp, trustworthy_information = _trusted_signal_information(signal)
+    exact = trustworthy_information & exact_market_available
+    next_observation_proxy = trustworthy_information & (not exact_market_available)
+    conservative_proxy = reference_month + pd.offsets.MonthEnd(1)
+    next_observation_date = (
+        information_timestamp.dt.tz_convert(None).dt.normalize() + pd.offsets.Day(1)
+    )
+
+    targets = pd.DataFrame(index=signal.index)
+    targets["reference_month"] = reference_month
+    targets["market_origin_target_timestamp"] = information_timestamp.where(exact)
+    targets["market_origin_target_observation_date"] = conservative_proxy
+    targets.loc[
+        next_observation_proxy,
+        "market_origin_target_observation_date",
+    ] = next_observation_date.loc[next_observation_proxy]
+    targets.loc[exact, "market_origin_target_observation_date"] = pd.NaT
+    targets["market_origin_basis"] = pd.Series(
+        MARKET_ORIGIN_CONSERVATIVE_PROXY,
+        index=signal.index,
+        dtype="string",
+    )
+    targets.loc[next_observation_proxy, "market_origin_basis"] = (
+        MARKET_ORIGIN_NEXT_OBSERVATION_PROXY
+    )
+    targets.loc[exact, "market_origin_basis"] = (
+        MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    )
+    targets["market_timing_status"] = pd.Series(
+        MARKET_TIMING_CONSERVATIVE_PROXY,
+        index=signal.index,
+        dtype="string",
+    )
+    targets.loc[next_observation_proxy, "market_timing_status"] = (
+        MARKET_TIMING_NEXT_OBSERVATION_PROXY
+    )
+    targets.loc[exact, "market_timing_status"] = (
+        MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+    )
+    targets["market_data_vintage_status"] = "latest_revised_non_vintage"
+    return targets
+
+
+def _first_market_value_on_or_after_timestamp(
+    market_timestamps: pd.Series,
+    market_values: pd.Series,
+    targets: pd.Series,
+) -> tuple[pd.Series, pd.Series]:
+    eligible = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                market_timestamps,
+                errors="coerce",
+                utc=True,
+            ).astype("datetime64[ns, UTC]"),
+            "value": pd.to_numeric(market_values, errors="coerce"),
+        }
+    ).dropna()
+    eligible = eligible.sort_values("timestamp")
+    selected_timestamps = pd.Series(
+        pd.NaT,
+        index=targets.index,
+        dtype="datetime64[ns, UTC]",
+    )
+    selected_values = pd.Series(float("nan"), index=targets.index, dtype=float)
+    if eligible.empty:
+        return selected_timestamps, selected_values
+
+    target_timestamps = pd.to_datetime(
+        targets,
+        errors="coerce",
+        utc=True,
+    ).astype("datetime64[ns, UTC]")
+    eligible_ns = eligible["timestamp"].astype("int64").to_numpy()
+    target_ns = target_timestamps.astype("int64").to_numpy()
+    positions = np.searchsorted(eligible_ns, target_ns, side="left")
+    usable = target_timestamps.notna().to_numpy() & (positions < len(eligible))
+    if usable.any():
+        eligible_timestamps = eligible["timestamp"].array
+        eligible_values = eligible["value"].to_numpy()
+        selected_timestamps.iloc[np.flatnonzero(usable)] = eligible_timestamps[
+            positions[usable]
+        ]
+        selected_values.iloc[np.flatnonzero(usable)] = eligible_values[positions[usable]]
+    return selected_timestamps, selected_values
+
+
+def _first_market_value_on_or_after_date(
+    market_dates: pd.Series,
+    market_values: pd.Series,
+    targets: pd.Series,
+) -> tuple[pd.Series, pd.Series]:
+    eligible = pd.DataFrame(
+        {
+            "date": _observation_dates(market_dates),
+            "value": pd.to_numeric(market_values, errors="coerce"),
+        }
+    ).dropna()
+    eligible = eligible.sort_values("date")
+    selected_dates = pd.Series(pd.NaT, index=targets.index, dtype="datetime64[ns]")
+    selected_values = pd.Series(float("nan"), index=targets.index, dtype=float)
+    if eligible.empty:
+        return selected_dates, selected_values
+
+    target_dates = _observation_dates(targets)
+    eligible_dates = eligible["date"].to_numpy(dtype="datetime64[ns]")
+    positions = np.searchsorted(
+        eligible_dates,
+        target_dates.to_numpy(dtype="datetime64[ns]"),
+        side="left",
+    )
+    usable = target_dates.notna().to_numpy() & (positions < len(eligible))
+    if usable.any():
+        eligible_values = eligible["value"].to_numpy()
+        selected_dates.iloc[np.flatnonzero(usable)] = eligible_dates[positions[usable]]
+        selected_values.iloc[np.flatnonzero(usable)] = eligible_values[positions[usable]]
+    return selected_dates, selected_values
+
+
+def _align_market_outcomes(
+    signal: pd.DataFrame,
+    market_observations: pd.DataFrame,
+    *,
+    horizons: tuple[int, ...],
+    market_columns: tuple[str, ...],
+) -> pd.DataFrame:
+    out = signal.copy()
+    if "date" not in market_observations.columns or not market_columns:
+        targets = _market_origin_targets(out, exact_market_available=False)
+        for column in targets.columns:
+            out[column] = targets[column]
+        out["market_origin_timestamp"] = pd.NaT
+        out["market_origin_observation_date"] = pd.NaT
+        out["market_required_series_count"] = len(market_columns)
+        out["market_available_series_count"] = 0
+        out["market_availability_status"] = MARKET_AVAILABILITY_UNAVAILABLE
+        out["market_origin_basis"] = MARKET_ORIGIN_UNAVAILABLE
+        out["market_timing_status"] = MARKET_TIMING_UNAVAILABLE
+        for variable in market_columns:
+            out[variable] = float("nan")
+            out[f"{variable}_origin_timestamp"] = pd.NaT
+            out[f"{variable}_origin_observation_date"] = pd.NaT
+            out[f"{variable}_origin_basis"] = MARKET_ORIGIN_UNAVAILABLE
+            out[f"{variable}_timing_status"] = MARKET_TIMING_UNAVAILABLE
+        return out
+
+    metadata_columns = [
+        column
+        for column in (
+            MARKET_TIMESTAMP_COLUMN,
+            MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+            MARKET_TIMESTAMP_STATUS_COLUMN,
+        )
+        if column in market_observations.columns
+    ]
+    market = market_observations.loc[
+        :,
+        ["date", *market_columns, *metadata_columns],
+    ].copy()
+    market["date"] = pd.to_datetime(market["date"], errors="coerce")
+    market = market.dropna(subset=["date"]).sort_values("date")
+    trusted_market_timestamps, trusted_market_rows = _trusted_market_timestamps(market)
+    out["market_data_vintage_status"] = "latest_revised_non_vintage"
+    variable_origin_timestamp_columns: list[str] = []
+    variable_origin_date_columns: list[str] = []
+    variable_target_timestamp_columns: list[str] = []
+    variable_target_date_columns: list[str] = []
+    variable_origin_basis_columns: list[str] = []
+    variable_available: list[pd.Series] = []
+
+    for variable in market_columns:
+        market_values = pd.to_numeric(market[variable], errors="coerce")
+        series_has_trusted_exact_value = bool(
+            (trusted_market_rows & market_values.notna()).any()
+        )
+        targets = _market_origin_targets(
+            out,
+            exact_market_available=series_has_trusted_exact_value,
+        )
+        out["reference_month"] = targets["reference_month"]
+        exact_rows = targets["market_origin_basis"].eq(
+            MARKET_ORIGIN_INFORMATION_TIMESTAMP
+        )
+        next_observation_proxy_rows = targets["market_origin_basis"].eq(
+            MARKET_ORIGIN_NEXT_OBSERVATION_PROXY
+        )
+        conservative_proxy_rows = targets["market_origin_basis"].eq(
+            MARKET_ORIGIN_CONSERVATIVE_PROXY
+        )
+        target_timestamp_col = f"{variable}_origin_target_timestamp"
+        target_date_col = f"{variable}_origin_target_observation_date"
+        out[target_timestamp_col] = targets["market_origin_target_timestamp"]
+        out[target_date_col] = targets["market_origin_target_observation_date"]
+        variable_target_timestamp_columns.append(target_timestamp_col)
+        variable_target_date_columns.append(target_date_col)
+
+        exact_origin_timestamp, exact_origin_value = (
+            _first_market_value_on_or_after_timestamp(
+                trusted_market_timestamps,
+                market_values,
+                targets["market_origin_target_timestamp"],
+            )
+        )
+        proxy_origin_date, proxy_origin_value = _first_market_value_on_or_after_date(
+            market["date"],
+            market_values,
+            targets["market_origin_target_observation_date"],
+        )
+        origin_timestamp_col = f"{variable}_origin_timestamp"
+        origin_date_col = f"{variable}_origin_observation_date"
+        out[origin_timestamp_col] = exact_origin_timestamp.where(exact_rows)
+        out[origin_date_col] = proxy_origin_date.where(~exact_rows)
+        out[variable] = proxy_origin_value.where(~exact_rows, exact_origin_value)
+        variable_origin_timestamp_columns.append(origin_timestamp_col)
+        variable_origin_date_columns.append(origin_date_col)
+
+        exact_available = exact_rows & out[origin_timestamp_col].notna()
+        next_proxy_available = (
+            next_observation_proxy_rows & out[origin_date_col].notna()
+        )
+        conservative_proxy_available = (
+            conservative_proxy_rows & out[origin_date_col].notna()
+        )
+        available = (
+            exact_available | next_proxy_available | conservative_proxy_available
+        )
+        variable_available.append(available)
+        origin_basis_col = f"{variable}_origin_basis"
+        timing_status_col = f"{variable}_timing_status"
+        variable_origin_basis_columns.append(origin_basis_col)
+        out[origin_basis_col] = pd.Series(
+            MARKET_ORIGIN_UNAVAILABLE,
+            index=out.index,
+            dtype="string",
+        )
+        out[timing_status_col] = pd.Series(
+            MARKET_TIMING_UNAVAILABLE,
+            index=out.index,
+            dtype="string",
+        )
+        out.loc[exact_available, origin_basis_col] = (
+            MARKET_ORIGIN_INFORMATION_TIMESTAMP
+        )
+        out.loc[exact_available, timing_status_col] = (
+            MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+        )
+        out.loc[next_proxy_available, origin_basis_col] = (
+            MARKET_ORIGIN_NEXT_OBSERVATION_PROXY
+        )
+        out.loc[next_proxy_available, timing_status_col] = (
+            MARKET_TIMING_NEXT_OBSERVATION_PROXY
+        )
+        out.loc[conservative_proxy_available, origin_basis_col] = (
+            MARKET_ORIGIN_CONSERVATIVE_PROXY
+        )
+        out.loc[conservative_proxy_available, timing_status_col] = (
+            MARKET_TIMING_CONSERVATIVE_PROXY
+        )
+
+        for horizon in horizons:
+            exact_endpoint_targets = exact_origin_timestamp + pd.DateOffset(months=horizon)
+            exact_endpoint_timestamp, exact_endpoint_value = (
+                _first_market_value_on_or_after_timestamp(
+                    trusted_market_timestamps,
+                    market_values,
+                    exact_endpoint_targets,
+                )
+            )
+            proxy_endpoint_targets = proxy_origin_date + pd.DateOffset(months=horizon)
+            proxy_endpoint_date, proxy_endpoint_value = _first_market_value_on_or_after_date(
+                market["date"],
+                market_values,
+                proxy_endpoint_targets,
+            )
+            out[f"{variable}_fwd_{horizon}m_timestamp"] = (
+                exact_endpoint_timestamp.where(exact_rows)
+            )
+            endpoint_date_col = f"{variable}_fwd_{horizon}m_observation_date"
+            out[endpoint_date_col] = proxy_endpoint_date.where(~exact_rows)
+            endpoint_value = proxy_endpoint_value.where(
+                ~exact_rows,
+                exact_endpoint_value,
+            )
+            out[f"{variable}_fwd_{horizon}m"] = endpoint_value
+            out[_change_col(variable, horizon)] = (endpoint_value - out[variable]) * 100.0
+
+    out["market_origin_target_timestamp"] = pd.concat(
+        [out[column] for column in variable_target_timestamp_columns],
+        axis=1,
+    ).max(axis=1)
+    out["market_origin_target_observation_date"] = pd.concat(
+        [out[column] for column in variable_target_date_columns],
+        axis=1,
+    ).max(axis=1)
+    out["market_origin_timestamp"] = pd.concat(
+        [out[column] for column in variable_origin_timestamp_columns],
+        axis=1,
+    ).max(axis=1)
+    out["market_origin_observation_date"] = pd.concat(
+        [out[column] for column in variable_origin_date_columns],
+        axis=1,
+    ).max(axis=1)
+    available_count = pd.concat(variable_available, axis=1).sum(axis=1).astype(int)
+    required_count = len(market_columns)
+    fully_available = available_count.eq(required_count)
+    partially_available = available_count.gt(0) & ~fully_available
+    unavailable = available_count.eq(0)
+    origin_bases = pd.concat(
+        [out[column] for column in variable_origin_basis_columns],
+        axis=1,
+    )
+    fully_exact = fully_available & origin_bases.eq(
+        MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    ).all(axis=1)
+    fully_next_observation_proxy = fully_available & origin_bases.eq(
+        MARKET_ORIGIN_NEXT_OBSERVATION_PROXY
+    ).all(axis=1)
+    fully_conservative_proxy = fully_available & origin_bases.eq(
+        MARKET_ORIGIN_CONSERVATIVE_PROXY
+    ).all(axis=1)
+    fully_mixed = fully_available & ~(
+        fully_exact
+        | fully_next_observation_proxy
+        | fully_conservative_proxy
+    )
+    out["market_required_series_count"] = required_count
+    out["market_available_series_count"] = available_count
+    out["market_availability_status"] = pd.Series(
+        MARKET_AVAILABILITY_UNAVAILABLE,
+        index=out.index,
+        dtype="string",
+    )
+    out.loc[fully_available, "market_availability_status"] = (
+        MARKET_AVAILABILITY_FULL
+    )
+    out.loc[partially_available, "market_availability_status"] = (
+        MARKET_AVAILABILITY_PARTIAL
+    )
+    out["market_origin_basis"] = pd.Series(
+        MARKET_ORIGIN_UNAVAILABLE,
+        index=out.index,
+        dtype="string",
+    )
+    out["market_timing_status"] = pd.Series(
+        MARKET_TIMING_UNAVAILABLE,
+        index=out.index,
+        dtype="string",
+    )
+    out.loc[fully_exact, "market_origin_basis"] = (
+        MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    )
+    out.loc[fully_exact, "market_timing_status"] = (
+        MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+    )
+    out.loc[fully_next_observation_proxy, "market_origin_basis"] = (
+        MARKET_ORIGIN_NEXT_OBSERVATION_PROXY
+    )
+    out.loc[fully_next_observation_proxy, "market_timing_status"] = (
+        MARKET_TIMING_NEXT_OBSERVATION_PROXY
+    )
+    out.loc[fully_conservative_proxy, "market_origin_basis"] = (
+        MARKET_ORIGIN_CONSERVATIVE_PROXY
+    )
+    out.loc[fully_conservative_proxy, "market_timing_status"] = (
+        MARKET_TIMING_CONSERVATIVE_PROXY
+    )
+    out.loc[fully_mixed, "market_origin_basis"] = MARKET_ORIGIN_MIXED
+    out.loc[fully_mixed, "market_timing_status"] = MARKET_TIMING_MIXED
+    out.loc[partially_available, "market_origin_basis"] = MARKET_ORIGIN_PARTIAL
+    out.loc[partially_available, "market_timing_status"] = MARKET_TIMING_PARTIAL
+    out.loc[unavailable, "market_origin_timestamp"] = pd.NaT
+    out.loc[unavailable, "market_origin_observation_date"] = pd.NaT
+    return out
 
 
 def _available_market_columns(df: pd.DataFrame) -> tuple[str, ...]:
@@ -155,8 +693,15 @@ def build_market_linkage_panel(
     market_monthly: pd.DataFrame,
     horizons: Iterable[int] = DEFAULT_MARKET_LINKAGE_HORIZONS,
 ) -> pd.DataFrame:
-    """Join completed inflation-signal features to market data, then add future changes."""
+    """Align signal rows to eligible market observations, then add future changes.
 
+    ``market_monthly`` is retained as the public argument name for compatibility;
+    callers may pass timestamped observations for exact alignment at or after the
+    full signal-information timestamp, or date-only observations for an explicitly
+    conservative proxy alignment.
+    """
+
+    horizons = _horizons(horizons)
     _require_columns(signal_features, ("date", *DEFAULT_SIGNAL_COLUMNS))
     signal = signal_features.copy()
     signal["date"] = _month_end_dates(signal["date"])
@@ -196,13 +741,20 @@ def build_market_linkage_panel(
         signal.loc[invalid, ["historical_regime", "historical_short_term_pressure"]] = pd.NA
 
     if "date" not in market_monthly.columns:
-        return add_forward_market_changes(signal, horizons=horizons, market_columns=())
+        return _align_market_outcomes(
+            signal,
+            market_monthly,
+            horizons=horizons,
+            market_columns=(),
+        )
 
     market_columns = _available_market_columns(market_monthly)
-    market = market_monthly.loc[:, ["date", *market_columns]].copy()
-    market["date"] = _month_end_dates(market["date"])
-    panel = signal.merge(market, on="date", how="left", validate="one_to_one")
-    return add_forward_market_changes(panel, horizons=horizons, market_columns=market_columns)
+    return _align_market_outcomes(
+        signal,
+        market_monthly,
+        horizons=horizons,
+        market_columns=market_columns,
+    )
 
 
 def _forward_market_change_summary_by_groups(
@@ -444,6 +996,173 @@ def market_signal_correlations(
     )
 
 
+def market_timing_summary(panel: pd.DataFrame) -> pd.DataFrame:
+    """Summarize exact, proxy, mixed, partial, and unavailable origins."""
+
+    columns = (
+        "market_origin_basis",
+        "market_timing_status",
+        "market_availability_status",
+        "row_count",
+        "required_series_count",
+        "minimum_available_series_count",
+        "maximum_available_series_count",
+        "exact_series_origin_count",
+        "next_observation_proxy_series_origin_count",
+        "month_end_proxy_series_origin_count",
+        "unavailable_series_origin_count",
+        "first_reference_month",
+        "latest_reference_month",
+        "first_market_origin_timestamp",
+        "latest_market_origin_timestamp",
+        "first_market_origin_observation_date",
+        "latest_market_origin_observation_date",
+    )
+    required = {
+        "market_origin_basis",
+        "market_timing_status",
+        "market_availability_status",
+    }
+    if panel.empty or not required.issubset(panel.columns):
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, object]] = []
+    origin_basis_columns = [
+        column
+        for column in panel.columns
+        if column.endswith("_origin_basis") and column != "market_origin_basis"
+    ]
+    for (basis, status, availability), group in panel.groupby(
+        [
+            "market_origin_basis",
+            "market_timing_status",
+            "market_availability_status",
+        ],
+        dropna=False,
+        sort=False,
+    ):
+        reference_months = pd.to_datetime(
+            group.get("reference_month", group["date"]),
+            errors="coerce",
+        )
+        origin_timestamps = pd.to_datetime(
+            group.get("market_origin_timestamp"),
+            errors="coerce",
+            utc=True,
+        )
+        origin_observation_dates = pd.to_datetime(
+            group.get("market_origin_observation_date"),
+            errors="coerce",
+        )
+        required_series_count = pd.to_numeric(
+            group.get("market_required_series_count"),
+            errors="coerce",
+        )
+        available_series_count = pd.to_numeric(
+            group.get("market_available_series_count"),
+            errors="coerce",
+        )
+        series_origins = (
+            group.loc[:, origin_basis_columns].stack(future_stack=True)
+            if origin_basis_columns
+            else pd.Series(dtype="string")
+        )
+        rows.append(
+            {
+                "market_origin_basis": basis,
+                "market_timing_status": status,
+                "market_availability_status": availability,
+                "row_count": int(len(group)),
+                "required_series_count": int(required_series_count.max()),
+                "minimum_available_series_count": int(available_series_count.min()),
+                "maximum_available_series_count": int(available_series_count.max()),
+                "exact_series_origin_count": int(
+                    series_origins.eq(MARKET_ORIGIN_INFORMATION_TIMESTAMP).sum()
+                ),
+                "next_observation_proxy_series_origin_count": int(
+                    series_origins.eq(MARKET_ORIGIN_NEXT_OBSERVATION_PROXY).sum()
+                ),
+                "month_end_proxy_series_origin_count": int(
+                    series_origins.eq(MARKET_ORIGIN_CONSERVATIVE_PROXY).sum()
+                ),
+                "unavailable_series_origin_count": int(
+                    series_origins.eq(MARKET_ORIGIN_UNAVAILABLE).sum()
+                ),
+                "first_reference_month": reference_months.min(),
+                "latest_reference_month": reference_months.max(),
+                "first_market_origin_timestamp": origin_timestamps.min(),
+                "latest_market_origin_timestamp": origin_timestamps.max(),
+                "first_market_origin_observation_date": origin_observation_dates.min(),
+                "latest_market_origin_observation_date": origin_observation_dates.max(),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def market_series_timing_summary(panel: pd.DataFrame) -> pd.DataFrame:
+    """Return authoritative per-series origin basis and timing-status counts."""
+
+    columns = (
+        "market_variable",
+        "market_origin_basis",
+        "market_timing_status",
+        "row_count",
+        "first_reference_month",
+        "latest_reference_month",
+        "first_market_origin_timestamp",
+        "latest_market_origin_timestamp",
+        "first_market_origin_observation_date",
+        "latest_market_origin_observation_date",
+    )
+    if panel.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, object]] = []
+    for variable in MARKET_VALUE_COLUMNS:
+        basis_column = f"{variable}_origin_basis"
+        status_column = f"{variable}_timing_status"
+        if basis_column not in panel.columns or status_column not in panel.columns:
+            continue
+
+        for (basis, status), group in panel.groupby(
+            [basis_column, status_column],
+            dropna=False,
+            sort=False,
+        ):
+            reference_months = pd.to_datetime(
+                group.get("reference_month", group["date"]),
+                errors="coerce",
+            )
+            origin_timestamps = pd.to_datetime(
+                group.get(f"{variable}_origin_timestamp"),
+                errors="coerce",
+                utc=True,
+            )
+            origin_observation_dates = pd.to_datetime(
+                group.get(f"{variable}_origin_observation_date"),
+                errors="coerce",
+            )
+            rows.append(
+                {
+                    "market_variable": variable,
+                    "market_origin_basis": basis,
+                    "market_timing_status": status,
+                    "row_count": int(len(group)),
+                    "first_reference_month": reference_months.min(),
+                    "latest_reference_month": reference_months.max(),
+                    "first_market_origin_timestamp": origin_timestamps.min(),
+                    "latest_market_origin_timestamp": origin_timestamps.max(),
+                    "first_market_origin_observation_date": (
+                        origin_observation_dates.min()
+                    ),
+                    "latest_market_origin_observation_date": (
+                        origin_observation_dates.max()
+                    ),
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
+
+
 def build_market_linkage_tables(
     signal_features: pd.DataFrame,
     market_monthly: pd.DataFrame,
@@ -476,4 +1195,6 @@ def build_market_linkage_tables(
         ),
         channel_summary_by_regime=channel_regime_summary(panel, horizons=horizons),
         correlations=market_signal_correlations(panel, horizons=horizons),
+        timing_summary=market_timing_summary(panel),
+        series_timing_summary=market_series_timing_summary(panel),
     )

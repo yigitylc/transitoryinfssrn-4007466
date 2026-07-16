@@ -4,9 +4,31 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from transitory_inflation.data import INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
 from transitory_inflation.features import add_transitory_inflation_features
+from transitory_inflation.market_data import (
+    MARKET_TIMESTAMP_COLUMN,
+    MARKET_TIMESTAMP_PROVENANCE_ACTUAL,
+    MARKET_TIMESTAMP_PROVENANCE_COLUMN,
+    MARKET_TIMESTAMP_STATUS_COLUMN,
+    MARKET_TIMESTAMP_STATUS_EXACT,
+    build_market_close_frame,
+)
 from transitory_inflation.market_linkage import (
+    MARKET_AVAILABILITY_FULL,
+    MARKET_AVAILABILITY_PARTIAL,
+    MARKET_AVAILABILITY_UNAVAILABLE,
     MARKET_CHANNELS,
+    MARKET_ORIGIN_CONSERVATIVE_PROXY,
+    MARKET_ORIGIN_INFORMATION_TIMESTAMP,
+    MARKET_ORIGIN_MIXED,
+    MARKET_ORIGIN_NEXT_OBSERVATION_PROXY,
+    MARKET_ORIGIN_PARTIAL,
+    MARKET_ORIGIN_UNAVAILABLE,
+    MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED,
+    MARKET_TIMING_MIXED,
+    MARKET_TIMING_PARTIAL,
+    MARKET_TIMING_UNAVAILABLE,
     add_forward_market_changes,
     build_market_linkage_panel,
     build_market_linkage_tables,
@@ -62,6 +84,633 @@ def test_market_linkage_requires_completed_signal_features() -> None:
         build_market_linkage_panel(raw_only, market)
 
 
+def test_release_aligned_market_origin_never_precedes_publication() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2024-02-13", "2024-02-13", "2024-02-14", "2024-05-13"]
+            ),
+            "market_timestamp": pd.to_datetime(
+                [
+                    "2024-02-13 16:00:00+00:00",
+                    "2024-02-13 18:00:00+00:00",
+                    "2024-02-14 16:00:00+00:00",
+                    "2024-05-13 18:00:00+00:00",
+                ]
+            ),
+            "market_timestamp_provenance": [
+                MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+            ]
+            * 4,
+            "market_timestamp_status": [MARKET_TIMESTAMP_STATUS_EXACT] * 4,
+            "yield_2y": [1.0, 1.1, 1.2, 1.5],
+        }
+    )
+
+    panel = build_market_linkage_panel(signal, market, horizons=(3,))
+    row = panel.iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    assert row["yield_2y_origin_timestamp"] == pd.Timestamp(
+        "2024-02-13 18:00:00+00:00"
+    )
+    assert row["yield_2y_origin_timestamp"] >= publication
+    assert row["yield_2y_origin_timestamp"] != pd.Timestamp(
+        "2024-02-13 16:00:00+00:00"
+    )
+    assert row["yield_2y_fwd_3m_timestamp"] == pd.Timestamp(
+        "2024-05-13 18:00:00+00:00"
+    )
+    assert row["yield_2y_change_3m_bp"] == pytest.approx(40.0)
+
+
+def test_market_origin_waits_for_walk_forward_label_information() -> None:
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [
+                pd.Timestamp("2024-02-13 17:00:00+00:00")
+            ],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_regime_information_timestamp": [
+                pd.Timestamp("2024-02-13 19:00:00+00:00")
+            ],
+            "historical_regime_information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "historical_regime_timing_status": ["release_aligned"],
+            "historical_short_term_pressure": ["mixed"],
+            "historical_short_term_pressure_information_timestamp": [
+                pd.Timestamp("2024-02-13 18:00:00+00:00")
+            ],
+            "historical_short_term_pressure_information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "historical_short_term_pressure_timing_status": ["release_aligned"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2024-02-13", "2024-02-13", "2024-03-13"]
+            ),
+            MARKET_TIMESTAMP_COLUMN: pd.to_datetime(
+                [
+                    "2024-02-13 18:00:00+00:00",
+                    "2024-02-13 20:00:00+00:00",
+                    "2024-03-13 20:00:00+00:00",
+                ]
+            ),
+            MARKET_TIMESTAMP_PROVENANCE_COLUMN: [
+                MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+            ]
+            * 3,
+            MARKET_TIMESTAMP_STATUS_COLUMN: [MARKET_TIMESTAMP_STATUS_EXACT] * 3,
+            "yield_2y": [1.0, 1.2, 1.5],
+        }
+    )
+
+    row = build_market_linkage_panel(signal, market, horizons=(1,)).iloc[0]
+
+    assert row["yield_2y_origin_timestamp"] == pd.Timestamp(
+        "2024-02-13 20:00:00+00:00"
+    )
+    assert row["yield_2y_origin_timestamp"] >= pd.Timestamp(
+        "2024-02-13 19:00:00+00:00"
+    )
+
+
+def test_duplicate_market_rows_remain_coherent_through_normalizer_and_linkage() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    raw_market = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2024-02-13", "2024-02-13", "2024-02-14", "2024-03-14"]
+            ),
+            "DGS2": [4.0, np.nan, 4.2, 4.5],
+            MARKET_TIMESTAMP_COLUMN: pd.to_datetime(
+                [
+                    "2024-02-13 16:00:00+00:00",
+                    "2024-02-13 18:00:00+00:00",
+                    "2024-02-14 21:00:00+00:00",
+                    "2024-03-14 21:00:00+00:00",
+                ]
+            ),
+            MARKET_TIMESTAMP_PROVENANCE_COLUMN: (
+                [MARKET_TIMESTAMP_PROVENANCE_ACTUAL] * 4
+            ),
+            MARKET_TIMESTAMP_STATUS_COLUMN: [MARKET_TIMESTAMP_STATUS_EXACT] * 4,
+        }
+    )
+    normalized = build_market_close_frame(raw_market)
+    duplicate_date = normalized.loc[normalized["date"] == pd.Timestamp("2024-02-13")].iloc[0]
+
+    assert pd.isna(duplicate_date["yield_2y"])
+    assert duplicate_date[MARKET_TIMESTAMP_COLUMN] == pd.Timestamp(
+        "2024-02-13 18:00:00+00:00"
+    )
+
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    row = build_market_linkage_panel(signal, normalized, horizons=(1,)).iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    assert row["yield_2y_origin_timestamp"] == pd.Timestamp(
+        "2024-02-14 21:00:00+00:00"
+    )
+    assert row["yield_2y"] == pytest.approx(4.2)
+
+
+def test_exact_alignment_without_post_information_observation_is_unavailable() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-02-13")],
+            MARKET_TIMESTAMP_COLUMN: [pd.Timestamp("2024-02-13 16:00:00+00:00")],
+            MARKET_TIMESTAMP_PROVENANCE_COLUMN: [MARKET_TIMESTAMP_PROVENANCE_ACTUAL],
+            MARKET_TIMESTAMP_STATUS_COLUMN: [MARKET_TIMESTAMP_STATUS_EXACT],
+            "yield_2y": [4.0],
+        }
+    )
+
+    row = build_market_linkage_panel(signal, market, horizons=(1,)).iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_UNAVAILABLE
+    assert row["market_timing_status"] == MARKET_TIMING_UNAVAILABLE
+    assert pd.isna(row["market_origin_timestamp"])
+    assert pd.isna(row["yield_2y"])
+
+
+def test_mixed_exact_series_availability_is_partial_and_preserves_usable_value() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = build_market_close_frame(
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(
+                    ["2024-02-13", "2024-02-14", "2024-03-14"]
+                ),
+                "DGS2": [4.0, 4.2, 4.5],
+                "DGS10": [5.0, np.nan, np.nan],
+                MARKET_TIMESTAMP_COLUMN: pd.to_datetime(
+                    [
+                        "2024-02-13 16:00:00+00:00",
+                        "2024-02-14 18:00:00+00:00",
+                        "2024-03-14 18:00:00+00:00",
+                    ]
+                ),
+                MARKET_TIMESTAMP_PROVENANCE_COLUMN: [
+                    MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+                ]
+                * 3,
+                MARKET_TIMESTAMP_STATUS_COLUMN: [MARKET_TIMESTAMP_STATUS_EXACT] * 3,
+            }
+        )
+    )
+
+    tables = build_market_linkage_tables(signal, market, horizons=(1,))
+    row = tables.panel.iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_PARTIAL
+    assert row["market_timing_status"] == MARKET_TIMING_PARTIAL
+    assert row["market_availability_status"] == MARKET_AVAILABILITY_PARTIAL
+    assert row["market_required_series_count"] == 2
+    assert row["market_available_series_count"] == 1
+    assert row["yield_2y_origin_basis"] == MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    assert row["yield_10y_origin_basis"] == MARKET_ORIGIN_UNAVAILABLE
+    assert (
+        row["yield_2y_timing_status"]
+        == MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+    )
+    assert row["yield_10y_timing_status"] == MARKET_TIMING_UNAVAILABLE
+    assert row["yield_2y_origin_timestamp"] == pd.Timestamp(
+        "2024-02-14 18:00:00+00:00"
+    )
+    assert pd.isna(row["yield_10y_origin_timestamp"])
+    assert row["yield_2y"] == pytest.approx(4.2)
+    assert pd.isna(row["yield_10y"])
+    summary = tables.timing_summary.iloc[0]
+    assert summary["market_origin_basis"] == MARKET_ORIGIN_PARTIAL
+    assert summary["exact_series_origin_count"] == 1
+    assert summary["unavailable_series_origin_count"] == 1
+
+
+def test_entirely_missing_series_does_not_downgrade_an_exact_series() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = build_market_close_frame(
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-02-14", "2024-03-14"]),
+                "DGS2": [4.2, 4.5],
+                "DGS10": [np.nan, np.nan],
+                MARKET_TIMESTAMP_COLUMN: pd.to_datetime(
+                    [
+                        "2024-02-14 18:00:00+00:00",
+                        "2024-03-14 18:00:00+00:00",
+                    ]
+                ),
+                MARKET_TIMESTAMP_PROVENANCE_COLUMN: [
+                    MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+                ]
+                * 2,
+                MARKET_TIMESTAMP_STATUS_COLUMN: [MARKET_TIMESTAMP_STATUS_EXACT] * 2,
+            }
+        )
+    )
+
+    tables = build_market_linkage_tables(signal, market, horizons=(1,))
+    row = tables.panel.iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_PARTIAL
+    assert row["market_availability_status"] == MARKET_AVAILABILITY_PARTIAL
+    assert row["yield_2y_origin_basis"] == MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    assert (
+        row["yield_2y_timing_status"]
+        == MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+    )
+    assert row["yield_2y_origin_timestamp"] == pd.Timestamp(
+        "2024-02-14 18:00:00+00:00"
+    )
+    assert row["yield_10y_origin_basis"] == MARKET_ORIGIN_UNAVAILABLE
+    assert row["yield_2y"] == pytest.approx(4.2)
+    assert pd.isna(row["yield_10y"])
+    series_summary = tables.series_timing_summary
+    exact_2y = series_summary.loc[
+        (series_summary["market_variable"] == "yield_2y")
+        & (
+            series_summary["market_origin_basis"]
+            == MARKET_ORIGIN_INFORMATION_TIMESTAMP
+        )
+    ]
+    unavailable_10y = series_summary.loc[
+        (series_summary["market_variable"] == "yield_10y")
+        & (series_summary["market_origin_basis"] == MARKET_ORIGIN_UNAVAILABLE)
+    ]
+    assert len(exact_2y) == 1
+    assert len(unavailable_10y) == 1
+
+
+def test_fully_available_heterogeneous_series_are_labelled_mixed() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = build_market_close_frame(
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(
+                    ["2024-02-14", "2024-02-15", "2024-03-14", "2024-03-15"]
+                ),
+                "DGS2": [4.2, np.nan, 4.5, np.nan],
+                "DGS10": [np.nan, 5.3, np.nan, 5.6],
+                MARKET_TIMESTAMP_COLUMN: pd.Series(
+                    [
+                        pd.Timestamp("2024-02-14 18:00:00+00:00"),
+                        pd.NaT,
+                        pd.Timestamp("2024-03-14 18:00:00+00:00"),
+                        pd.NaT,
+                    ],
+                    dtype="datetime64[ns, UTC]",
+                ),
+                MARKET_TIMESTAMP_PROVENANCE_COLUMN: [
+                    MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+                ]
+                * 4,
+                MARKET_TIMESTAMP_STATUS_COLUMN: [MARKET_TIMESTAMP_STATUS_EXACT] * 4,
+            }
+        )
+    )
+
+    row = build_market_linkage_panel(signal, market, horizons=(1,)).iloc[0]
+
+    assert row["market_availability_status"] == MARKET_AVAILABILITY_FULL
+    assert row["market_origin_basis"] == MARKET_ORIGIN_MIXED
+    assert row["market_timing_status"] == MARKET_TIMING_MIXED
+    assert row["yield_2y_origin_basis"] == MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    assert row["yield_10y_origin_basis"] == MARKET_ORIGIN_NEXT_OBSERVATION_PROXY
+    assert row["yield_2y_origin_timestamp"] == pd.Timestamp(
+        "2024-02-14 18:00:00+00:00"
+    )
+    assert row["yield_10y_origin_observation_date"] == pd.Timestamp("2024-02-15")
+
+
+def test_all_exact_series_can_use_different_eligible_origin_timestamps() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = build_market_close_frame(
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(
+                    ["2024-02-14", "2024-02-15", "2024-03-15"]
+                ),
+                "DGS2": [4.2, np.nan, 4.5],
+                "DGS10": [np.nan, 5.3, 5.6],
+                MARKET_TIMESTAMP_COLUMN: pd.to_datetime(
+                    [
+                        "2024-02-14 18:00:00+00:00",
+                        "2024-02-15 19:00:00+00:00",
+                        "2024-03-15 19:00:00+00:00",
+                    ]
+                ),
+                MARKET_TIMESTAMP_PROVENANCE_COLUMN: [
+                    MARKET_TIMESTAMP_PROVENANCE_ACTUAL
+                ]
+                * 3,
+                MARKET_TIMESTAMP_STATUS_COLUMN: [MARKET_TIMESTAMP_STATUS_EXACT] * 3,
+            }
+        )
+    )
+
+    row = build_market_linkage_panel(signal, market, horizons=(1,)).iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_INFORMATION_TIMESTAMP
+    assert row["market_availability_status"] == MARKET_AVAILABILITY_FULL
+    assert row["market_available_series_count"] == 2
+    assert row["yield_2y_origin_timestamp"] == pd.Timestamp(
+        "2024-02-14 18:00:00+00:00"
+    )
+    assert row["yield_10y_origin_timestamp"] == pd.Timestamp(
+        "2024-02-15 19:00:00+00:00"
+    )
+    assert (
+        row["yield_2y_timing_status"]
+        == MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+    )
+    assert (
+        row["yield_10y_timing_status"]
+        == MARKET_TIMING_INFORMATION_TIMESTAMP_ALIGNED
+    )
+    assert row["market_origin_timestamp"] == pd.Timestamp(
+        "2024-02-15 19:00:00+00:00"
+    )
+    assert row["yield_2y"] == pytest.approx(4.2)
+    assert row["yield_10y"] == pytest.approx(5.3)
+
+
+def test_missing_signal_timing_status_cannot_produce_exact_alignment() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-02-29")],
+            "market_timestamp": [pd.Timestamp("2024-02-29 21:00:00+00:00")],
+            "market_timestamp_provenance": [MARKET_TIMESTAMP_PROVENANCE_ACTUAL],
+            "market_timestamp_status": [MARKET_TIMESTAMP_STATUS_EXACT],
+            "yield_2y": [1.2],
+        }
+    )
+
+    row = build_market_linkage_panel(signal, market, horizons=(3,)).iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_CONSERVATIVE_PROXY
+    assert pd.isna(row["market_origin_timestamp"])
+    assert "exact_information_timestamp" not in row["market_timing_status"]
+
+
+def test_date_only_market_observation_uses_next_observation_proxy() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-02-13", "2024-02-14", "2024-05-14"]),
+            "yield_2y": [1.0, 1.2, 1.6],
+        }
+    )
+
+    row = build_market_linkage_panel(signal, market, horizons=(3,)).iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_NEXT_OBSERVATION_PROXY
+    assert pd.isna(row["market_origin_timestamp"])
+    assert row["market_origin_observation_date"] == pd.Timestamp("2024-02-14")
+    assert "exact_information_timestamp" not in row["market_timing_status"]
+    assert "next_observation_date_proxy" in row["market_timing_status"]
+
+
+def test_failed_next_observation_proxy_lookup_is_explicitly_unavailable() -> None:
+    publication = pd.Timestamp("2024-02-13 17:00:00+00:00")
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "reference_month": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [publication],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    date_only_market = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-02-12", "2024-02-13"]),
+            "yield_2y": [4.0, 4.1],
+            "yield_10y": [5.0, 5.1],
+        }
+    )
+
+    row = build_market_linkage_panel(signal, date_only_market, horizons=(1,)).iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_UNAVAILABLE
+    assert row["market_timing_status"] == MARKET_TIMING_UNAVAILABLE
+    assert row["market_availability_status"] == MARKET_AVAILABILITY_UNAVAILABLE
+    assert row["market_available_series_count"] == 0
+    assert pd.isna(row["market_origin_observation_date"])
+    assert pd.isna(row["yield_2y"])
+    assert pd.isna(row["yield_10y"])
+    assert row["yield_2y_origin_basis"] == MARKET_ORIGIN_UNAVAILABLE
+    assert row["yield_10y_origin_basis"] == MARKET_ORIGIN_UNAVAILABLE
+
+
+def test_missing_release_metadata_uses_labelled_month_end_t_plus_1_proxy() -> None:
+    signal = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-31")],
+            "information_timestamp": [pd.Timestamp("2024-01-31")],
+            "timing_status": ["reference_month_only"],
+            "historical_regime": ["neutral"],
+            "historical_short_term_pressure": ["mixed"],
+            "epsilon": [1.0],
+            "tinf_4m": [1.0],
+            "tinf_8m": [1.0],
+            "tinf_12m": [1.0],
+        }
+    )
+    market = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-31", "2024-02-29", "2024-05-31"]),
+            "yield_2y": [1.0, 1.2, 1.6],
+        }
+    )
+
+    tables = build_market_linkage_tables(signal, market, horizons=(3,))
+    row = tables.panel.iloc[0]
+
+    assert row["market_origin_basis"] == MARKET_ORIGIN_CONSERVATIVE_PROXY
+    assert pd.isna(row["market_origin_target_timestamp"])
+    assert row["market_origin_target_observation_date"] == pd.Timestamp("2024-02-29")
+    assert pd.isna(row["yield_2y_origin_timestamp"])
+    assert row["yield_2y_origin_observation_date"] == pd.Timestamp("2024-02-29")
+    assert "exact_information_timestamp" not in row["market_timing_status"]
+    assert "latest_revised_non_vintage" in row["market_timing_status"]
+    assert tables.timing_summary.iloc[0]["market_origin_basis"] == (
+        MARKET_ORIGIN_CONSERVATIVE_PROXY
+    )
+
+
 def test_future_market_values_do_not_alter_tinf_or_regime_labels() -> None:
     signal = _signal_frame(periods=70)
     dates = signal["date"]
@@ -102,7 +751,7 @@ def test_market_linkage_masks_imputed_signal_rows_without_compressing_horizons()
     assert pd.isna(panel.loc[contaminated_pos, "historical_regime"])
     assert pd.isna(panel.loc[contaminated_pos, "historical_short_term_pressure"])
     assert panel.loc[contaminated_pos - 1, "yield_2y_fwd_2m"] == market.loc[
-        contaminated_pos + 1,
+        contaminated_pos + 2,
         "yield_2y",
     ]
 
@@ -131,8 +780,8 @@ def test_market_summary_excludes_rows_without_full_forward_market_data() -> None
 
     row = summary.loc[summary["market_variable"] == "yield_2y"].iloc[0]
     assert row["historical_regime"] == "neutral"
-    assert row["count"] == 3
-    assert row["avg_change_bp"] == pytest.approx(((1.5 - 1.0) + (1.9 - 1.2) + (2.4 - 1.5)) * 100 / 3)
+    assert row["count"] == 2
+    assert row["avg_change_bp"] == pytest.approx(((1.9 - 1.2) + (2.4 - 1.5)) * 100 / 2)
     assert row["increase_hit_rate"] == pytest.approx(1.0)
     assert row["decrease_hit_rate"] == pytest.approx(0.0)
     assert row["weak_evidence"]
@@ -219,7 +868,7 @@ def test_regime_pressure_rankings_sort_by_average_change_and_include_evidence() 
 
 
 def test_low_count_rows_below_30_are_weak_evidence_but_30_is_not() -> None:
-    dates = pd.date_range("2020-01-31", periods=34, freq="ME")
+    dates = pd.date_range("2020-01-31", periods=35, freq="ME")
     signal = pd.DataFrame(
         {
             "date": dates,
@@ -238,7 +887,7 @@ def test_low_count_rows_below_30_are_weak_evidence_but_30_is_not() -> None:
         }
     )
 
-    weak_panel = build_market_linkage_panel(signal.iloc[:31], market.iloc[:31], horizons=(2,))
+    weak_panel = build_market_linkage_panel(signal.iloc[:32], market.iloc[:32], horizons=(2,))
     weak_summary = forward_market_change_summary_by_regime(weak_panel, horizons=(2,))
     sufficient_panel = build_market_linkage_panel(signal, market, horizons=(4,))
     sufficient_summary = forward_market_change_summary_by_regime(

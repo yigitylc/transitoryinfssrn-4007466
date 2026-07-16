@@ -13,8 +13,10 @@ from .dashboard import current_signal_imputation_notice
 from .data import (
     HEADLINE_INFLATION_MEASURE,
     INFLATION_MEASURES,
+    REFERENCE_MONTH_COMPATIBILITY_SEMANTICS,
     date_label,
     latest_valid_observation_date,
+    timestamp_label,
 )
 from .features import BASELINE_META, add_transitory_inflation_features, latest_signal_snapshot
 from .market_data import available_market_variables
@@ -171,6 +173,10 @@ class TraderReport:
     available: bool
     reason: str | None = None
     as_of: str | None = None
+    as_of_semantics: str = REFERENCE_MONTH_COMPATIBILITY_SEMANTICS
+    reference_month: str | None = None
+    information_timestamp: str | None = None
+    timing_status: str | None = None
     headline: str = ""
     state_lines: tuple[str, ...] = field(default_factory=tuple)
     persistence_lines: tuple[str, ...] = field(default_factory=tuple)
@@ -187,6 +193,10 @@ class MacroResearchReport:
     available: bool
     reason: str | None = None
     as_of: str | None = None
+    as_of_semantics: str = REFERENCE_MONTH_COMPATIBILITY_SEMANTICS
+    reference_month: str | None = None
+    information_timestamp: str | None = None
+    timing_status: str | None = None
     headline: str = ""
     current_signal_notice: str | None = None
     current_regime_lines: tuple[str, ...] = field(default_factory=tuple)
@@ -204,6 +214,7 @@ class MacroResearchReport:
     inflation_measure_availability: pd.DataFrame = field(default_factory=pd.DataFrame)
     historical_analogs: pd.DataFrame = field(default_factory=pd.DataFrame)
     market_channel_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    market_series_timing_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _status_get(status: object | None, key: str, default: object = None) -> object:
@@ -372,7 +383,7 @@ def _robustness_lines(
     lines.append(f"Covered inflation measures: {measures or 'none'}; baselines: {baselines or 'none'}.")
     if not verdict["baseline_live_safe"].dropna().astype(bool).all():
         lines.append(
-            "Rows using full_sample or other non-live-safe baselines are ex-post / paper-style "
+            "Rows using full_sample or other non-row-lookahead-safe baselines are ex-post / paper-style "
             "checks, not live-signal evidence."
         )
     if not win_rates.empty:
@@ -435,7 +446,22 @@ def _historical_analog_table(
         inflation_count = int(len(inflation_rows))
         inflation_summary = {
             "analog_group": analog_group,
-            "conditioning_signal_date": date_label(snapshot["date"]),
+            "conditioning_signal_date": date_label(
+                snapshot.get("reference_month", snapshot["date"])
+            ),
+            "conditioning_signal_date_semantics": (
+                REFERENCE_MONTH_COMPATIBILITY_SEMANTICS
+            ),
+            "conditioning_reference_month": date_label(
+                snapshot.get("reference_month", snapshot["date"])
+            ),
+            "conditioning_information_timestamp": timestamp_label(
+                snapshot.get("information_timestamp")
+            ),
+            "conditioning_timing_status": snapshot.get(
+                "timing_status",
+                "reference_month_only",
+            ),
             "historical_regime": current_regime,
             "historical_short_term_pressure": current_pressure,
             "historical_tinf_state": current_tinf_state,
@@ -502,13 +528,18 @@ def _historical_analog_lines(analogs: pd.DataFrame) -> tuple[str, ...]:
     if analogs.empty:
         return ("No historical analog table is available for the current regime/pressure state.",)
     group_name = str(analogs["analog_group"].iloc[0])
-    conditioning_date = str(analogs["conditioning_signal_date"].iloc[0])
+    reference_month = str(analogs["conditioning_reference_month"].iloc[0])
+    information_timestamp = str(
+        analogs["conditioning_information_timestamp"].iloc[0]
+    )
+    timing_status = str(analogs["conditioning_timing_status"].iloc[0])
     counts = pd.to_numeric(analogs["future_inflation_count"], errors="coerce").dropna()
     weak_rows = int(analogs["weak_evidence"].fillna(False).astype(bool).sum())
     lines = [
-        f"Observed-only analog conditioning signal as of {conditioning_date}: {group_name}.",
+        f"Observed-only analog conditioning reference month {reference_month}: {group_name}.",
+        f"Conditioning information timestamp {information_timestamp}; timing status {timing_status}.",
         f"Future CPI and epsilon changes are summarized across {int(counts.max()) if len(counts) else 0} "
-        "matching historical signal dates at the richest horizon sample.",
+        "matching historical reference months at the richest horizon sample.",
     ]
     if weak_rows:
         lines.append(f"{weak_rows} analog-market rows are weak evidence with fewer than 30 observations.")
@@ -519,14 +550,23 @@ def _market_summary(
     featured: pd.DataFrame,
     market_monthly: pd.DataFrame | None,
     horizons: tuple[int, ...],
-) -> tuple[tuple[str, ...], pd.DataFrame]:
+) -> tuple[tuple[str, ...], pd.DataFrame, pd.DataFrame]:
     base_lines = [
-        "A positive forward change means the market variable rose after the signal date.",
+        "A positive forward change means the market variable rose after its eligible market origin.",
         "Nominal yields, breakevens, and real yields represent different macro channels.",
         "Market linkage is descriptive history; it is not a live trading signal.",
     ]
     if market_monthly is None or market_monthly.empty or not available_market_variables(market_monthly):
-        return tuple([*base_lines, "No approved market-rate data are available for this report run."]), pd.DataFrame()
+        return (
+            tuple(
+                [
+                    *base_lines,
+                    "No approved market-rate data are available for this report run.",
+                ]
+            ),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
 
     tables = market_linkage_mod.build_market_linkage_tables(
         featured,
@@ -534,16 +574,111 @@ def _market_summary(
         horizons=horizons,
     )
     channel_summary = tables.channel_summary_by_regime
-    if channel_summary.empty:
-        return tuple([*base_lines, "No channel summary is available for the current market data."]), channel_summary
-    weak = int(channel_summary["weak_evidence"].fillna(False).astype(bool).sum())
+    series_timing_summary = tables.series_timing_summary
     lines = [
         *base_lines,
         f"Approved channels included: {', '.join(market_linkage_mod.MARKET_CHANNELS)}.",
     ]
+    weak = 0
+    if channel_summary.empty:
+        lines.append("No channel summary is available for the current market data.")
+    else:
+        weak = int(channel_summary["weak_evidence"].fillna(False).astype(bool).sum())
+    if not tables.timing_summary.empty:
+        origins = set(tables.timing_summary["market_origin_basis"].dropna().astype(str))
+        if market_linkage_mod.MARKET_ORIGIN_CONSERVATIVE_PROXY in origins:
+            lines.append(
+                "Full signal-timing metadata are unavailable, incomplete, or untrusted for some "
+                "or all rows, so those market outcomes use a clearly labelled conservative "
+                "month-end t+1 origin proxy."
+            )
+        if market_linkage_mod.MARKET_ORIGIN_NEXT_OBSERVATION_PROXY in origins:
+            lines.append(
+                "Rows with trustworthy full signal-information timing but date-only FRED market data "
+                "begin at the first observation date after applicable signal information time as "
+                "a conservative proxy."
+            )
+        if market_linkage_mod.MARKET_ORIGIN_INFORMATION_TIMESTAMP in origins:
+            lines.append(
+                "Exact rows have trustworthy full signal-information and market-close timestamps and "
+                "each displayed series begins at its first eligible market close on or after "
+                "the governing signal information timestamp. Series may have different exact "
+                "origin timestamps; the shared "
+                "origin is the latest selected timestamp needed for full-row availability."
+            )
+        if market_linkage_mod.MARKET_ORIGIN_MIXED in origins:
+            lines.append(
+                "Fully available mixed-basis rows retain each instrument's exact or proxy "
+                "origin metadata; their shared row label is mixed rather than exact or a "
+                "single proxy basis."
+            )
+        if market_linkage_mod.MARKET_ORIGIN_PARTIAL in origins:
+            lines.append(
+                "Partial rows retain usable per-series values and their exact or proxy origin "
+                "metadata, while unavailable series remain explicitly unavailable; the shared "
+                "row is not labelled exact or fully proxy-available."
+            )
+        if market_linkage_mod.MARKET_ORIGIN_UNAVAILABLE in origins:
+            lines.append(
+                "Some rows have no eligible market observation at or after their required "
+                "information timestamp; their origin is labelled unavailable and excluded."
+            )
+        for timing in tables.timing_summary.to_dict(orient="records"):
+            first_timestamp = timing.get("first_market_origin_timestamp")
+            latest_timestamp = timing.get("latest_market_origin_timestamp")
+            first_observation_date = timing.get(
+                "first_market_origin_observation_date"
+            )
+            latest_observation_date = timing.get(
+                "latest_market_origin_observation_date"
+            )
+            if pd.notna(first_timestamp):
+                first_origin = timestamp_label(first_timestamp)
+                latest_origin = timestamp_label(latest_timestamp)
+                conditioning_origin = (
+                    f"exact timestamp {first_origin}"
+                    if first_origin == latest_origin
+                    else f"exact timestamps {first_origin} through {latest_origin}"
+                )
+            elif pd.notna(first_observation_date):
+                first_origin = date_label(first_observation_date)
+                latest_origin = date_label(latest_observation_date)
+                conditioning_origin = (
+                    f"proxy observation date {first_origin}"
+                    if first_origin == latest_origin
+                    else f"proxy observation dates {first_origin} through {latest_origin}"
+                )
+            else:
+                conditioning_origin = "unavailable"
+            lines.append(
+                "Market timing disclosure: "
+                f"market-origin basis={timing.get('market_origin_basis')}; "
+                f"timing status={timing.get('market_timing_status')}; "
+                f"availability={timing.get('market_availability_status')}; "
+                f"rows={int(timing.get('row_count', 0))}; "
+                f"available series={int(timing.get('minimum_available_series_count', 0))}-"
+                f"{int(timing.get('maximum_available_series_count', 0))} of "
+                f"{int(timing.get('required_series_count', 0))}; "
+                f"per-series origins exact={int(timing.get('exact_series_origin_count', 0))}, "
+                "next-observation-proxy="
+                f"{int(timing.get('next_observation_proxy_series_origin_count', 0))}, "
+                "month-end-proxy="
+                f"{int(timing.get('month_end_proxy_series_origin_count', 0))}, "
+                f"unavailable={int(timing.get('unavailable_series_origin_count', 0))}; "
+                f"conditioning origin={conditioning_origin}."
+            )
+    for timing in series_timing_summary.to_dict(orient="records"):
+        lines.append(
+            "Market series timing disclosure: "
+            f"instrument={timing.get('market_variable')}; "
+            f"origin basis={timing.get('market_origin_basis')}; "
+            f"timing status={timing.get('market_timing_status')}; "
+            f"rows={int(timing.get('row_count', 0))}."
+        )
+    lines.append("All CPI and market FRED values remain latest-revised and non-vintage.")
     if weak:
         lines.append(f"{weak} market-linkage rows are weak evidence with fewer than 30 observations.")
-    return tuple(lines), channel_summary
+    return tuple(lines), channel_summary, series_timing_summary
 
 
 def _current_regime_section(
@@ -569,7 +704,31 @@ def _current_regime_section(
     table = pd.DataFrame(
         [
             {
-                "latest_valid_signal_date": date_label(snapshot["date"]),
+                "latest_valid_signal_date": date_label(
+                    snapshot.get("reference_month", snapshot["date"])
+                ),
+                "latest_valid_signal_date_semantics": (
+                    REFERENCE_MONTH_COMPATIBILITY_SEMANTICS
+                ),
+                "reference_month": date_label(
+                    snapshot.get("reference_month", snapshot["date"])
+                ),
+                "release_timestamp": timestamp_label(snapshot.get("release_timestamp")),
+                "information_timestamp": timestamp_label(snapshot.get("information_timestamp")),
+                "release_timestamp_provenance": snapshot.get(
+                    "release_timestamp_provenance",
+                    "release_metadata_unavailable_or_unverified",
+                ),
+                "information_timestamp_provenance": snapshot.get(
+                    "information_timestamp_provenance",
+                    "information_timing_unavailable_or_unverified",
+                ),
+                "timing_status": snapshot.get("timing_status", "reference_month_only"),
+                "data_vintage_status": snapshot.get(
+                    "data_vintage_status",
+                    "latest_revised_non_vintage",
+                ),
+                "retrieved_at": timestamp_label(snapshot.get("retrieved_at")),
                 "data_source_used": _status_get(macro_status, "data_source_used", "unknown"),
                 "inflation_measure": measure.label,
                 "fred_series_id": measure.series_id,
@@ -596,7 +755,8 @@ def _current_regime_section(
         ]
     )
     lines = (
-        f"As of {date_label(snapshot['date'])}, headline CPI YoY is "
+        f"For CPI reference month {date_label(snapshot.get('reference_month', snapshot['date']))}, "
+        "headline CPI YoY is "
         f"{float(snapshot['inflation_yoy']):.2f}% versus a "
         f"{float(snapshot['baseline']):.2f}% {baseline_method} baseline.",
         f"TINF 4M is {float(snapshot['tinf_4m']):+.2f}pp, with TINF 8M "
@@ -606,6 +766,10 @@ def _current_regime_section(
         f"Data freshness: source={_status_get(macro_status, 'data_source_used', 'unknown')}; "
         f"raw data through {raw_end}; latest CPI observation {date_label(latest_cpi_observation)}; "
         f"latest CPI YoY {date_label(latest_cpi_yoy)}; imputation applied={imputation_applied}.",
+        f"Timing: status={snapshot.get('timing_status', 'reference_month_only')}; publication="
+        f"{timestamp_label(snapshot.get('release_timestamp'))}; information="
+        f"{timestamp_label(snapshot.get('information_timestamp'))}; vintage="
+        f"{snapshot.get('data_vintage_status', 'latest_revised_non_vintage')}.",
     )
     return lines, table
 
@@ -657,14 +821,18 @@ def _caveats(
         "but not identical: historical validation uses walk-forward thresholds while the live "
         "snapshot uses the current configured signal context, so historical analogs are "
         "historical comparisons, not exact regime-identity matches.",
-        "Full-sample baselines are ex-post / paper-style and are not live-safe.",
-        "Data freshness matters; FRED publication lags can affect the latest usable signal date.",
-        "The signal is built on latest-revised FRED data and treats each month's CPI as known "
-        "within that month; 'live-safe' here means no full-sample lookahead, not a real-time "
-        "data-vintage backtest.",
+        "Full-sample baselines are ex-post / paper-style and are not row-lookahead-safe.",
+        "Data freshness matters; report the latest CPI reference month separately from any "
+        "trustworthy signal information timestamp.",
+        "The signal uses latest-revised, non-vintage FRED data. CPI reference months are not "
+        "publication dates; missing release metadata remains reference-month-only and is never "
+        "described as release-aligned or vintage-safe.",
+        "Exact market alignment requires trustworthy full signal-information and market-close "
+        "timestamps. Date-only FRED observations use a conservative next-observation-date proxy; "
+        "missing full signal-information timing uses a conservative month-end t+1 proxy.",
         "Future market changes are used only for evaluation and descriptive linkage, never for signal construction.",
         f"Computed under sample mode '{sample_mode}' and baseline '{baseline_method}' "
-        f"({'live-safe' if meta.live_safe else 'EX-POST / not live-safe'}).",
+        f"({'row-lookahead-safe' if meta.live_safe else 'EX-POST / not row-lookahead-safe'}).",
         f"Macro data source used: {_status_get(macro_status, 'data_source_used', 'unknown')}; "
         f"market data source used: {_status_get(market_status, 'market_data_source_used', 'unknown')}.",
     ]
@@ -744,15 +912,24 @@ def build_macro_research_report(
         threshold_pp=threshold_pp,
     )
     analog_lines = _historical_analog_lines(analogs)
-    market_lines, market_summary = _market_summary(
+    market_lines, market_summary, market_series_timing_summary = _market_summary(
         featured,
         market_monthly=market_monthly,
         horizons=market_horizons,
     )
     signal_notice = current_signal_imputation_notice(current_snapshot)
-    as_of = date_label(current_snapshot["date"])
+    reference_month = date_label(
+        current_snapshot.get("reference_month", current_snapshot["date"])
+    )
+    information_timestamp = timestamp_label(
+        current_snapshot.get("information_timestamp")
+    )
+    timing_status = str(
+        current_snapshot.get("timing_status", "reference_month_only")
+    )
+    as_of = reference_month
     headline = (
-        f"As of {as_of}: {current_snapshot['regime']} inflation regime, "
+        f"CPI reference month {as_of}: {current_snapshot['regime']} inflation regime, "
         f"short-term pressure "
         f"{validation_mod.pressure_label(str(current_snapshot.get('term_structure', 'mixed')))}, "
         f"TINF 4M {float(current_snapshot['tinf_4m']):+.2f}pp."
@@ -761,6 +938,9 @@ def build_macro_research_report(
     return MacroResearchReport(
         available=True,
         as_of=as_of,
+        reference_month=reference_month,
+        information_timestamp=information_timestamp,
+        timing_status=timing_status,
         headline=headline,
         current_signal_notice=signal_notice,
         current_regime_lines=current_lines,
@@ -784,6 +964,7 @@ def build_macro_research_report(
         inflation_measure_availability=availability,
         historical_analogs=analogs,
         market_channel_summary=market_summary,
+        market_series_timing_summary=market_series_timing_summary,
     )
 
 
@@ -850,7 +1031,7 @@ def build_trader_report(
             reason=snapshot.get("reason", "No complete TINF observation available."),
         )
 
-    as_of = str(pd.to_datetime(snapshot["date"]).date())
+    as_of = date_label(snapshot.get("reference_month", snapshot["date"]))
     tinf = float(snapshot["tinf_4m"])
     pct = float(snapshot["tinf_4m_percentile"])
     regime = str(snapshot["regime"])
@@ -910,16 +1091,17 @@ def build_trader_report(
         signs.add("positive" if v > 0 else "negative")
         robustness_lines.append(
             f"{method}: TINF 4M {v:+.2f}pp ({_ordinal(float(snap['tinf_4m_percentile']))} pct), "
-            f"regime '{snap['regime']}', as of {pd.to_datetime(snap['date']).date()}."
+            f"regime '{snap['regime']}', CPI reference month "
+            f"{pd.to_datetime(snap['date']).date()}."
         )
     if len(signs) == 1:
         robustness_lines.append(
-            f"All live-safe baselines agree the deviation is {signs.pop()} - "
+            f"All row-lookahead-safe baselines agree the deviation is {signs.pop()} - "
             "the direction of the signal is not a baseline artifact."
         )
     elif signs:
         robustness_lines.append(
-            "Live-safe baselines DISAGREE on the sign of the deviation - the call is "
+            "Row-lookahead-safe baselines DISAGREE on the sign of the deviation - the call is "
             "baseline-dependent. Quote the baseline with any conclusion."
         )
 
@@ -955,8 +1137,10 @@ def build_trader_report(
         "The market linkages above are stylized priors; they have not yet been validated "
         "empirically inside this project (trader research layer is on the backlog).",
         f"Computed under baseline '{baseline_method}' "
-        f"({'live-safe' if meta.live_safe else 'EX-POST: uses information unavailable in real time'}) "
+        f"({'row-lookahead-safe' if meta.live_safe else 'EX-POST: uses future-row information'}) "
         f"and sample mode '{sample_mode}'. Percentiles and regime cutoffs shift with the sample.",
+        "Inputs are latest-revised and non-vintage. CPI reference months are not publication "
+        "timestamps, and row-lookahead safety is not a release-alignment or vintage-safety claim.",
     ]
     if "cpi_imputed" in raw.columns and raw["cpi_imputed"].any():
         months = ", ".join(
@@ -968,7 +1152,8 @@ def build_trader_report(
         )
 
     headline = (
-        f"As of {as_of}: TINF 4M {tinf:+.2f}pp ({_ordinal(pct)} percentile) - regime '{regime}', "
+        f"CPI reference month {as_of}: TINF 4M {tinf:+.2f}pp "
+        f"({_ordinal(pct)} percentile) - regime '{regime}', "
         f"short-term pressure {pressure}."
     )
     if valid_t_stars:
@@ -980,6 +1165,9 @@ def build_trader_report(
     return TraderReport(
         available=True,
         as_of=as_of,
+        reference_month=as_of,
+        information_timestamp=timestamp_label(snapshot.get("information_timestamp")),
+        timing_status=str(snapshot.get("timing_status", "reference_month_only")),
         headline=headline,
         state_lines=state_lines,
         persistence_lines=tuple(persistence_lines),

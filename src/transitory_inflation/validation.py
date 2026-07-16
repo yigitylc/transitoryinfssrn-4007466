@@ -5,6 +5,19 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
+from .data import (
+    INFORMATION_TIMESTAMP_PROVENANCE_RELEASES,
+    INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED,
+    TIMING_STATUS_REFERENCE_MONTH_ONLY,
+    TIMING_STATUS_RELEASE_ALIGNED,
+    TIMING_STATUS_UNAVAILABLE,
+)
+from .features import (
+    _expanding_information_timestamp,
+    _latest_timestamp,
+    _trusted_information_timestamps,
+)
+
 DEFAULT_FORWARD_HORIZONS: tuple[int, ...] = (3, 6, 12, 24, 36)
 DEFAULT_LABEL_HORIZONS: tuple[int, ...] = (6, 12, 24, 36)
 DEFAULT_EPSILON_THRESHOLD_PP = 0.50
@@ -34,6 +47,90 @@ def pressure_label(term_structure: object) -> str:
     """
 
     return PRESSURE_LABELS.get(str(term_structure), "mixed")
+
+
+def _timing_status_for_value(
+    values: pd.Series,
+    exact_timestamps: pd.Series,
+) -> pd.Series:
+    status = pd.Series(
+        TIMING_STATUS_UNAVAILABLE,
+        index=values.index,
+        dtype="string",
+    )
+    available = values.notna()
+    status.loc[available] = TIMING_STATUS_REFERENCE_MONTH_ONLY
+    status.loc[available & exact_timestamps.notna()] = TIMING_STATUS_RELEASE_ALIGNED
+    return status
+
+
+def _trusted_generic_information(df: pd.DataFrame) -> pd.Series:
+    return _trusted_information_timestamps(
+        df.get(
+            "information_timestamp",
+            pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns, UTC]"),
+        ),
+        df.get(
+            "information_timestamp_provenance",
+            pd.Series(pd.NA, index=df.index, dtype="string"),
+        ),
+        df.get(
+            "timing_status",
+            pd.Series(pd.NA, index=df.index, dtype="string"),
+        ),
+    )
+
+
+def _consolidate_derived_timing(
+    df: pd.DataFrame,
+    *,
+    values: pd.Series,
+    derived_timestamp: pd.Series,
+) -> None:
+    """Make generic row timing include the newly derived label's dependencies."""
+
+    incoming = _trusted_generic_information(df)
+    available = values.notna()
+    exact = available & incoming.notna() & derived_timestamp.notna()
+    combined = _latest_timestamp(
+        incoming,
+        derived_timestamp,
+    ).where(exact)
+
+    if "information_timestamp" not in df.columns:
+        df["information_timestamp"] = pd.Series(
+            pd.NaT,
+            index=df.index,
+            dtype="datetime64[ns, UTC]",
+        )
+    if "information_timestamp_provenance" not in df.columns:
+        df["information_timestamp_provenance"] = pd.Series(
+            INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED,
+            index=df.index,
+            dtype="string",
+        )
+    if "timing_status" not in df.columns:
+        df["timing_status"] = pd.Series(
+            TIMING_STATUS_UNAVAILABLE,
+            index=df.index,
+            dtype="string",
+        )
+
+    # A missing optional label is not an input to later calculations. Preserve
+    # the existing row trust in that case; only available derived labels can
+    # extend or conservatively downgrade the generic dependency timestamp.
+    nonexact_available = available & ~exact
+    df.loc[nonexact_available, "information_timestamp"] = pd.NaT
+    if exact.any():
+        df.loc[exact, "information_timestamp"] = combined.loc[exact]
+    df.loc[available, "information_timestamp_provenance"] = (
+        INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED
+    )
+    df.loc[exact, "information_timestamp_provenance"] = (
+        INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+    )
+    derived_status = _timing_status_for_value(values, combined)
+    df.loc[available, "timing_status"] = derived_status.loc[available]
 
 TRANSITORY_SIGNAL_REGIMES: tuple[str, ...] = ("elevated falling",)
 PERSISTENT_SIGNAL_REGIMES: tuple[str, ...] = ("elevated rising",)
@@ -193,9 +290,37 @@ def add_short_term_pressure_labels(
 
     out = df.copy()
     if source_col in out.columns:
-        out[output_col] = out[source_col].map(PRESSURE_LABELS).fillna("mixed")
+        source_available = out[source_col].notna()
+        out[output_col] = out[source_col].map(PRESSURE_LABELS).where(source_available)
+        out[output_col] = out[output_col].astype("string")
     elif output_col not in out.columns:
-        out[output_col] = "mixed"
+        out[output_col] = pd.Series(pd.NA, index=out.index, dtype="string")
+
+    trusted_information = _trusted_generic_information(out).where(
+        out[output_col].notna()
+    )
+    timestamp_col = f"{output_col}_information_timestamp"
+    provenance_col = f"{output_col}_information_timestamp_provenance"
+    status_col = f"{output_col}_timing_status"
+    out[timestamp_col] = trusted_information
+    out[provenance_col] = pd.Series(
+        INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED,
+        index=out.index,
+        dtype="string",
+    )
+    out.loc[
+        trusted_information.notna(),
+        provenance_col,
+    ] = INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+    out[status_col] = _timing_status_for_value(
+        out[output_col],
+        trusted_information,
+    )
+    _consolidate_derived_timing(
+        out,
+        values=out[output_col],
+        derived_timestamp=trusted_information,
+    )
     return out
 
 
@@ -236,6 +361,62 @@ def add_walk_forward_regime_labels(
     out[f"{output_col}_lower_threshold"] = lower
     out[f"{output_col}_upper_threshold"] = upper
     out[f"{output_col}_threshold_method"] = "expanding_shifted"
+
+    information_col = f"{tinf_col}_information_timestamp"
+    provenance_col = f"{tinf_col}_information_timestamp_provenance"
+    status_col = f"{tinf_col}_timing_status"
+    tinf_information = _trusted_information_timestamps(
+        out.get(
+            information_col,
+            pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns, UTC]"),
+        ),
+        out.get(
+            provenance_col,
+            pd.Series(pd.NA, index=out.index, dtype="string"),
+        ),
+        out.get(
+            status_col,
+            pd.Series(pd.NA, index=out.index, dtype="string"),
+        ),
+    ).where(tinf.notna())
+    prior_information, prior_information_exact = _expanding_information_timestamp(
+        tinf,
+        tinf_information,
+        min_periods=min_prior_observations,
+        shift=1,
+    )
+    regime_exact = (
+        regime.notna()
+        & tinf_information.notna()
+        & prior_information_exact
+        & prior_information.notna()
+    )
+    regime_information = _latest_timestamp(
+        tinf_information,
+        prior_information,
+    ).where(regime_exact)
+    regime_information_col = f"{output_col}_information_timestamp"
+    regime_provenance_col = f"{output_col}_information_timestamp_provenance"
+    regime_status_col = f"{output_col}_timing_status"
+    out[regime_information_col] = regime_information
+    out[regime_provenance_col] = pd.Series(
+        INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED,
+        index=out.index,
+        dtype="string",
+    )
+    out.loc[
+        regime_information.notna(),
+        regime_provenance_col,
+    ] = INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+    out[regime_status_col] = _timing_status_for_value(
+        regime,
+        regime_information,
+    )
+    _consolidate_derived_timing(
+        out,
+        values=regime,
+        derived_timestamp=regime_information,
+    )
     return out
 
 

@@ -10,7 +10,10 @@ from transitory_inflation.dashboard import (
     build_dashboard_data_views,
     current_signal_imputation_notice,
 )
-from transitory_inflation.data import build_base_frame
+from transitory_inflation.data import (
+    RELEASE_TIMESTAMP_PROVENANCE_ACTUAL,
+    build_base_frame,
+)
 from transitory_inflation.features import latest_signal_snapshot
 
 
@@ -67,7 +70,40 @@ def test_current_signal_keeps_derived_imputation_lineage_and_notice() -> None:
     assert snapshot["regime_uses_imputed_input"]
     assert snapshot["uses_imputed_input"]
     assert not snapshot["observed_only_eligible"]
+    assert snapshot["timing_status"] == "reference_month_only"
+    assert pd.isna(snapshot["information_timestamp"])
+    assert snapshot["data_vintage_status"] == "latest_revised_non_vintage"
     assert current_signal_imputation_notice(snapshot) == CURRENT_SIGNAL_IMPUTATION_NOTICE
+
+
+def test_dashboard_snapshot_separates_reference_month_from_information_timestamp() -> None:
+    dates = pd.date_range("2015-01-31", periods=72, freq="ME")
+    releases = pd.Series(
+        (dates + pd.offsets.Day(13) + pd.offsets.Hour(13)).tz_localize("UTC")
+    )
+    observed = build_base_frame(
+        pd.DataFrame(
+            {
+                "date": dates,
+                "CPIAUCSL": 100.0 * (1.002 ** np.arange(len(dates), dtype=float)),
+                "TB3MS": 1.0,
+                "release_timestamp": releases,
+                "release_timestamp_provenance": RELEASE_TIMESTAMP_PROVENANCE_ACTUAL,
+                "release_timing_status": "release_aligned",
+            }
+        ),
+        imputation_policy="observed_only",
+    )
+
+    snapshot = build_dashboard_data_views(
+        observed,
+        baseline_method="fed_target",
+    ).current_snapshot
+
+    assert snapshot["reference_month"] == dates[-1]
+    assert snapshot["information_timestamp"] == releases.iloc[-1]
+    assert snapshot["reference_month"] != snapshot["information_timestamp"]
+    assert snapshot["timing_status"] == "release_aligned"
 
 
 def test_dashboard_research_consumers_remain_observed_only() -> None:

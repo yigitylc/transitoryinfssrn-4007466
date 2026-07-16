@@ -21,6 +21,22 @@ BASE_MACRO_COLUMNS = ("date", "cpi_level", "tbill_3m", "inflation_yoy")
 MACRO_CACHE_SCHEMA_COLUMN = "macro_cache_schema_version"
 MACRO_CACHE_SCHEMA_VERSION = 2
 
+TIMING_STATUS_RELEASE_ALIGNED = "release_aligned"
+TIMING_STATUS_REFERENCE_MONTH_ONLY = "reference_month_only"
+TIMING_STATUS_UNAVAILABLE = "derived_value_unavailable"
+DATA_VINTAGE_STATUS_LATEST_REVISED = "latest_revised_non_vintage"
+RELEASE_TIMESTAMP_PROVENANCE_ACTUAL = "actual_release_metadata"
+RELEASE_TIMESTAMP_PROVENANCE_UNVERIFIED = "release_metadata_unavailable_or_unverified"
+INFORMATION_TIMESTAMP_PROVENANCE_RELEASES = (
+    "derived_from_actual_release_metadata"
+)
+INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED = (
+    "information_timing_unavailable_or_unverified"
+)
+REFERENCE_MONTH_COMPATIBILITY_SEMANTICS = (
+    "compatibility alias for reference_month; not a signal availability or information timestamp"
+)
+
 ImputationPolicy = Literal["observed_only", "ex_post_continuity"]
 VALID_IMPUTATION_POLICIES: tuple[ImputationPolicy, ...] = (
     "observed_only",
@@ -93,6 +109,40 @@ class InflationMeasure:
     @property
     def yoy_uses_missing_input_col(self) -> str:
         return f"{self.yoy_col}_uses_missing_input"
+
+    @property
+    def release_timestamp_col(self) -> str:
+        if self.key == HEADLINE_INFLATION_MEASURE:
+            return "release_timestamp"
+        return f"{self.lineage_prefix}_release_timestamp"
+
+    @property
+    def release_timestamp_provenance_col(self) -> str:
+        if self.key == HEADLINE_INFLATION_MEASURE:
+            return "release_timestamp_provenance"
+        return f"{self.lineage_prefix}_release_timestamp_provenance"
+
+    @property
+    def release_timing_status_col(self) -> str:
+        if self.key == HEADLINE_INFLATION_MEASURE:
+            return "release_timing_status"
+        return f"{self.lineage_prefix}_release_timing_status"
+
+    @property
+    def level_information_timestamp_col(self) -> str:
+        return f"{self.lineage_prefix}_level_information_timestamp"
+
+    @property
+    def yoy_information_timestamp_col(self) -> str:
+        return f"{self.yoy_col}_information_timestamp"
+
+    @property
+    def yoy_information_timestamp_provenance_col(self) -> str:
+        return f"{self.yoy_col}_information_timestamp_provenance"
+
+    @property
+    def yoy_timing_status_col(self) -> str:
+        return f"{self.yoy_col}_timing_status"
 
 
 HEADLINE_INFLATION_MEASURE = "headline_cpi"
@@ -393,6 +443,14 @@ def date_label(date: object) -> str:
     return str(pd.to_datetime(date).date())
 
 
+def timestamp_label(timestamp: object) -> str:
+    """Format an optional timestamp without dropping its time or UTC offset."""
+
+    if timestamp is None or pd.isna(timestamp):
+        return "unknown"
+    return pd.Timestamp(timestamp).isoformat()
+
+
 def available_inflation_measures(df: pd.DataFrame) -> tuple[str, ...]:
     """Return inflation measure keys with at least one usable YoY observation."""
 
@@ -413,11 +471,162 @@ def monthly_last(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
     return out
 
 
+def _monthly_macro_physical_rows(
+    df: pd.DataFrame,
+    date_col: str = "date",
+) -> pd.DataFrame:
+    """Select one coherent physical macro row per month.
+
+    The latest dated row wins. Stable input order breaks ties for duplicate
+    dates, with the last physical row selected. Unlike ``resample().last()``,
+    this preserves every value and null from that one source row.
+    """
+
+    out = df.copy()
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+    out = out.dropna(subset=[date_col]).sort_values(date_col, kind="stable")
+    reference_month = out[date_col].dt.to_period("M")
+    out = out.loc[~reference_month.duplicated(keep="last")].copy()
+    out[date_col] = out[date_col].dt.to_period("M").dt.to_timestamp("M")
+    return out.reset_index(drop=True)
+
+
+def _rowwise_latest_timestamp(*values: pd.Series) -> pd.Series:
+    """Return the latest known timestamp per row, preserving unknown rows as NaT."""
+
+    if not values:
+        return pd.Series(dtype="datetime64[ns, UTC]")
+    timestamps = pd.concat(
+        [
+            pd.to_datetime(value, errors="coerce", utc=True).astype(
+                "datetime64[ns, UTC]"
+            )
+            for value in values
+        ],
+        axis=1,
+    )
+    return pd.to_datetime(timestamps.max(axis=1), errors="coerce", utc=True)
+
+
+def _utc_timestamps(values: object) -> pd.Series:
+    """Convert timestamp metadata to UTC while retaining time-of-day."""
+
+    parsed = pd.to_datetime(values, errors="coerce", utc=True)
+    if isinstance(parsed, pd.Series):
+        return parsed.astype("datetime64[ns, UTC]")
+    if isinstance(parsed, pd.DatetimeIndex):
+        return pd.Series(parsed.astype("datetime64[ns, UTC]"))
+    raise TypeError("Timestamp metadata must be one-dimensional")
+
+
+def _has_explicit_timezone(value: object) -> bool:
+    """Return whether a timestamp value carries an explicit UTC offset/timezone."""
+
+    if value is None or pd.isna(value):
+        return False
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return False
+    return timestamp.tzinfo is not None and timestamp.utcoffset() is not None
+
+
+def _incoming_release_timing_status(
+    frame: pd.DataFrame,
+    measure: InflationMeasure,
+) -> pd.Series:
+    """Resolve source release status without borrowing headline trust."""
+
+    candidate_columns = [
+        measure.release_timing_status_col,
+        measure.yoy_timing_status_col,
+    ]
+    if measure.key == HEADLINE_INFLATION_MEASURE:
+        candidate_columns.append("timing_status")
+
+    status = pd.Series(pd.NA, index=frame.index, dtype="string")
+    for column in candidate_columns:
+        if column not in frame.columns:
+            continue
+        candidate = frame[column].astype("string").str.strip().replace("", pd.NA)
+        status = status.fillna(candidate)
+    return status
+
+
+def _trusted_release_timestamps(
+    values: pd.Series,
+    provenance: pd.Series,
+    timing_status: pd.Series,
+    *,
+    value_available: pd.Series,
+) -> pd.Series:
+    """Accept exact publication times only when every trust gate is explicit."""
+
+    timezone_known = values.map(_has_explicit_timezone).astype(bool)
+    actual_metadata = provenance.astype("string").eq(
+        RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+    ).fillna(False)
+    release_aligned = timing_status.astype("string").eq(
+        TIMING_STATUS_RELEASE_ALIGNED
+    ).fillna(False)
+    parsed = _utc_timestamps(values)
+    return parsed.where(
+        timezone_known
+        & actual_metadata
+        & release_aligned
+        & value_available.fillna(False).astype(bool)
+    )
+
+
+def _resolved_release_timing_status(
+    supplied_status: pd.Series,
+    trusted_releases: pd.Series,
+    *,
+    value_available: pd.Series,
+) -> pd.Series:
+    """Preserve non-exact source status while downgrading unsupported exact claims."""
+
+    available = value_available.fillna(False).astype(bool)
+    supplied = supplied_status.astype("string").str.strip().replace("", pd.NA)
+    status = pd.Series(
+        TIMING_STATUS_UNAVAILABLE,
+        index=supplied_status.index,
+        dtype="string",
+    )
+    status.loc[available] = TIMING_STATUS_REFERENCE_MONTH_ONLY
+    supplied_nonexact = (
+        available
+        & supplied.notna()
+        & ~supplied.eq(TIMING_STATUS_RELEASE_ALIGNED).fillna(False)
+    )
+    status.loc[supplied_nonexact] = supplied.loc[supplied_nonexact]
+    status.loc[trusted_releases.notna()] = TIMING_STATUS_RELEASE_ALIGNED
+    return status
+
+
+def _retrieval_timestamp_column(
+    out: pd.DataFrame,
+    retrieved_at: object | None,
+) -> pd.Series:
+    """Resolve actual load metadata without inventing a publication timestamp."""
+
+    if "retrieved_at" in out.columns:
+        values = pd.to_datetime(out["retrieved_at"], errors="coerce", utc=True)
+        return values
+    if retrieved_at is None:
+        return pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns, UTC]")
+    value = pd.to_datetime(retrieved_at, errors="coerce", utc=True)
+    if pd.isna(value):
+        return pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns, UTC]")
+    return pd.Series(value, index=out.index, dtype="datetime64[ns, UTC]")
+
+
 def build_base_frame(
     merged: pd.DataFrame,
     start_date: str | None = None,
     end_date: str | None = None,
     imputation_policy: ImputationPolicy | str = DEFAULT_IMPUTATION_POLICY,
+    retrieved_at: object | None = None,
 ) -> pd.DataFrame:
     """Build the canonical monthly base frame from merged raw FRED series.
 
@@ -429,8 +638,19 @@ def build_base_frame(
     """
 
     policy = resolve_imputation_policy(imputation_policy)
-    out = monthly_last(merged)
+    out = _monthly_macro_physical_rows(merged)
     out = out.rename(columns={"TB3MS": "tbill_3m"})
+    out["reference_month"] = pd.to_datetime(out["date"], errors="coerce")
+    out["retrieved_at"] = _retrieval_timestamp_column(out, retrieved_at)
+    if "vintage_timestamp" in out.columns:
+        out["vintage_timestamp"] = _utc_timestamps(out["vintage_timestamp"])
+    else:
+        out["vintage_timestamp"] = pd.Series(
+            pd.NaT,
+            index=out.index,
+            dtype="datetime64[ns, UTC]",
+        )
+    out["data_vintage_status"] = DATA_VINTAGE_STATUS_LATEST_REVISED
     out["imputation_policy"] = policy
 
     for measure in INFLATION_MEASURES.values():
@@ -464,12 +684,52 @@ def build_base_frame(
         out[measure.imputation_available_at_col] = pd.Series(
             pd.NaT,
             index=out.index,
-            dtype="datetime64[ns]",
+            dtype="object",
         )
         out[measure.imputation_availability_basis_col] = pd.Series(
             pd.NA,
             index=out.index,
             dtype="string",
+        )
+
+        if measure.release_timestamp_col in out.columns:
+            supplied_releases = out[measure.release_timestamp_col].copy()
+        else:
+            supplied_releases = pd.Series(pd.NaT, index=out.index)
+        if measure.release_timestamp_provenance_col in out.columns:
+            supplied_release_provenance = out[
+                measure.release_timestamp_provenance_col
+            ].astype("string")
+        else:
+            supplied_release_provenance = pd.Series(
+                pd.NA,
+                index=out.index,
+                dtype="string",
+            )
+        supplied_release_timing_status = _incoming_release_timing_status(
+            out,
+            measure,
+        )
+        releases = _trusted_release_timestamps(
+            supplied_releases,
+            supplied_release_provenance,
+            supplied_release_timing_status,
+            value_available=observed_level.notna(),
+        )
+        out[measure.release_timestamp_col] = releases
+        out[measure.release_timestamp_provenance_col] = pd.Series(
+            RELEASE_TIMESTAMP_PROVENANCE_UNVERIFIED,
+            index=out.index,
+            dtype="string",
+        )
+        out.loc[
+            releases.notna(),
+            measure.release_timestamp_provenance_col,
+        ] = RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+        out[measure.release_timing_status_col] = _resolved_release_timing_status(
+            supplied_release_timing_status,
+            releases,
+            value_available=observed_level.notna(),
         )
 
         safe_log_level = observed_level.where(observed_level > 0)
@@ -486,30 +746,23 @@ def build_base_frame(
             out[measure.level_col] = observed_level.where(~imputed, log_interp)
             out.loc[imputed, measure.imputation_method_col] = "log_linear_bridge"
 
-            release_col = f"{measure.lineage_prefix}_release_timestamp"
-            if release_col not in out.columns and "release_timestamp" in out.columns:
-                release_col = "release_timestamp"
             next_reference_month = pd.to_datetime(out["date"], errors="coerce").shift(-1)
             proxy_availability = next_reference_month + pd.offsets.MonthEnd(1)
-            if release_col in out.columns:
-                following_release = pd.to_datetime(
-                    out[release_col],
-                    errors="coerce",
-                ).shift(-1)
-                availability = following_release.fillna(proxy_availability)
-                basis = pd.Series(
-                    "following_reference_month_end_plus_one_month_proxy",
-                    index=out.index,
-                    dtype="string",
-                )
-                basis.loc[following_release.notna()] = "following_release_timestamp"
-            else:
-                availability = proxy_availability
-                basis = pd.Series(
-                    "following_reference_month_end_plus_one_month_proxy",
-                    index=out.index,
-                    dtype="string",
-                )
+            following_release = releases.shift(-1)
+            availability = pd.Series(
+                proxy_availability.astype("object"),
+                index=out.index,
+                dtype="object",
+            )
+            availability.loc[following_release.notna()] = following_release.loc[
+                following_release.notna()
+            ]
+            basis = pd.Series(
+                "following_reference_month_end_plus_one_month_proxy",
+                index=out.index,
+                dtype="string",
+            )
+            basis.loc[following_release.notna()] = "following_release_timestamp"
 
             out.loc[imputed, measure.imputation_available_at_col] = availability.loc[imputed]
             out.loc[imputed, measure.imputation_availability_basis_col] = basis.loc[imputed]
@@ -527,6 +780,66 @@ def build_base_frame(
             missing_input | missing_input.shift(12, fill_value=False)
         )
 
+        level_information = releases.where(observed_level.notna())
+        if policy == "ex_post_continuity":
+            exact_imputation_availability = pd.Series(
+                pd.NaT,
+                index=out.index,
+                dtype="datetime64[ns, UTC]",
+            )
+            actual_release_basis = (
+                out[measure.imputation_availability_basis_col]
+                == "following_release_timestamp"
+            )
+            exact_imputation_availability.loc[actual_release_basis] = pd.to_datetime(
+                out.loc[actual_release_basis, measure.imputation_available_at_col],
+                errors="coerce",
+                utc=True,
+            )
+            level_information = level_information.where(
+                ~out[measure.imputed_col],
+                exact_imputation_availability,
+            )
+        out[measure.level_information_timestamp_col] = level_information
+
+        lagged_level_information = level_information.shift(12)
+        yoy_information = _rowwise_latest_timestamp(
+            level_information,
+            lagged_level_information,
+        )
+        yoy_dependencies_known = (
+            out[measure.level_col].notna()
+            & out[measure.level_col].shift(12).notna()
+            & level_information.notna()
+            & lagged_level_information.notna()
+        )
+        out[measure.yoy_information_timestamp_col] = yoy_information.where(
+            out[measure.yoy_col].notna() & yoy_dependencies_known
+        )
+        out[measure.yoy_information_timestamp_provenance_col] = pd.Series(
+            INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED,
+            index=out.index,
+            dtype="string",
+        )
+        out.loc[
+            out[measure.yoy_information_timestamp_col].notna(),
+            measure.yoy_information_timestamp_provenance_col,
+        ] = INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+        yoy_available = out[measure.yoy_col].notna()
+        out[measure.yoy_timing_status_col] = pd.Series(
+            TIMING_STATUS_UNAVAILABLE,
+            index=out.index,
+            dtype="string",
+        )
+        out.loc[
+            yoy_available,
+            measure.yoy_timing_status_col,
+        ] = TIMING_STATUS_REFERENCE_MONTH_ONLY
+        out.loc[
+            yoy_available & out[measure.yoy_information_timestamp_col].notna(),
+            measure.yoy_timing_status_col,
+        ] = TIMING_STATUS_RELEASE_ALIGNED
+
     raw_series_cols = [
         measure.series_id
         for measure in INFLATION_MEASURES.values()
@@ -534,6 +847,28 @@ def build_base_frame(
     ]
     if raw_series_cols:
         out = out.drop(columns=raw_series_cols)
+
+    headline = INFLATION_MEASURES[HEADLINE_INFLATION_MEASURE]
+    if headline.yoy_information_timestamp_col in out.columns:
+        out["information_timestamp"] = pd.to_datetime(
+            out[headline.yoy_information_timestamp_col],
+            errors="coerce",
+            utc=True,
+        )
+        out["information_timestamp_provenance"] = out[
+            headline.yoy_information_timestamp_provenance_col
+        ].astype("string")
+        out["timing_status"] = out[headline.yoy_timing_status_col].astype("string")
+    else:
+        out["information_timestamp"] = pd.Series(
+            pd.NaT,
+            index=out.index,
+            dtype="datetime64[ns, UTC]",
+        )
+        out["information_timestamp_provenance"] = (
+            INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED
+        )
+        out["timing_status"] = TIMING_STATUS_UNAVAILABLE
     return slice_date_range(out, start_date=start_date, end_date=end_date)
 
 
@@ -565,6 +900,7 @@ def load_base_macro_data_from_api(
         start_date=start_date,
         end_date=end_date,
         imputation_policy=policy,
+        retrieved_at=pd.Timestamp.now(tz="UTC"),
     )
 
 
@@ -586,6 +922,7 @@ def load_base_macro_data_from_csv(
         start_date=start_date,
         end_date=end_date,
         imputation_policy=policy,
+        retrieved_at=pd.Timestamp.now(tz="UTC"),
     )
 
 
@@ -787,16 +1124,48 @@ def build_macro_cache_frame(df: pd.DataFrame) -> pd.DataFrame:
         cache[measure.originally_missing_col] = originally_missing.astype(bool)
         cache[measure.source_unavailable_col] = source_unavailable.astype(bool)
 
-    timestamp_cols = [
-        "release_timestamp",
-        *(
-            f"{measure.lineage_prefix}_release_timestamp"
-            for measure in INFLATION_MEASURES.values()
-        ),
-    ]
-    for column in timestamp_cols:
+    for column in ("retrieved_at", "vintage_timestamp"):
         if column in df.columns:
-            cache[column] = pd.to_datetime(df[column], errors="coerce")
+            cache[column] = _utc_timestamps(df[column])
+    for measure in INFLATION_MEASURES.values():
+        if measure.series_id not in cache.columns:
+            continue
+        release_col = measure.release_timestamp_col
+        provenance_col = measure.release_timestamp_provenance_col
+        status_col = measure.release_timing_status_col
+        supplied_releases = df.get(
+            release_col,
+            pd.Series(pd.NaT, index=df.index),
+        )
+        supplied_provenance = df.get(
+            provenance_col,
+            pd.Series(pd.NA, index=df.index, dtype="string"),
+        ).astype("string")
+        supplied_timing_status = _incoming_release_timing_status(df, measure)
+        value_available = cache[measure.series_id].notna()
+        trusted_releases = _trusted_release_timestamps(
+            supplied_releases,
+            supplied_provenance,
+            supplied_timing_status,
+            value_available=value_available,
+        )
+        cache[release_col] = trusted_releases
+        cache[provenance_col] = pd.Series(
+            RELEASE_TIMESTAMP_PROVENANCE_UNVERIFIED,
+            index=df.index,
+            dtype="string",
+        )
+        cache.loc[
+            trusted_releases.notna(),
+            provenance_col,
+        ] = RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+        cache[status_col] = _resolved_release_timing_status(
+            supplied_timing_status,
+            trusted_releases,
+            value_available=value_available,
+        )
+    if "data_vintage_status" in df.columns:
+        cache["data_vintage_status"] = df["data_vintage_status"].astype("string")
 
     if "CPIAUCSL" not in cache.columns:
         raise KeyError("Macro cache data must include a headline CPI level")
@@ -883,15 +1252,45 @@ def _cached_macro_input_frame(cached: pd.DataFrame, path: Path) -> pd.DataFrame:
         merged[measure.originally_missing_col] = originally_missing.astype(bool)
         merged[measure.source_unavailable_col] = source_unavailable.astype(bool)
 
-        release_col = f"{measure.lineage_prefix}_release_timestamp"
-        if release_col in cached.columns:
-            merged[release_col] = pd.to_datetime(cached[release_col], errors="coerce")
-
-    if "release_timestamp" in cached.columns:
-        merged["release_timestamp"] = pd.to_datetime(
-            cached["release_timestamp"],
-            errors="coerce",
+        release_col = measure.release_timestamp_col
+        provenance_col = measure.release_timestamp_provenance_col
+        status_col = measure.release_timing_status_col
+        supplied_releases = cached.get(
+            release_col,
+            pd.Series(pd.NaT, index=cached.index),
         )
+        supplied_provenance = cached.get(
+            provenance_col,
+            pd.Series(pd.NA, index=cached.index, dtype="string"),
+        ).astype("string")
+        supplied_timing_status = _incoming_release_timing_status(cached, measure)
+        value_available = observed_level.notna()
+        trusted_releases = _trusted_release_timestamps(
+            supplied_releases,
+            supplied_provenance,
+            supplied_timing_status,
+            value_available=value_available,
+        )
+        merged[release_col] = trusted_releases
+        merged[provenance_col] = pd.Series(
+            RELEASE_TIMESTAMP_PROVENANCE_UNVERIFIED,
+            index=cached.index,
+            dtype="string",
+        )
+        merged.loc[
+            trusted_releases.notna(),
+            provenance_col,
+        ] = RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+        merged[status_col] = _resolved_release_timing_status(
+            supplied_timing_status,
+            trusted_releases,
+            value_available=value_available,
+        )
+    for column in ("retrieved_at", "vintage_timestamp"):
+        if column in cached.columns:
+            merged[column] = _utc_timestamps(cached[column])
+    if "data_vintage_status" in cached.columns:
+        merged["data_vintage_status"] = cached["data_vintage_status"].astype("string")
     return merged
 
 
@@ -951,6 +1350,7 @@ def make_demo_data(periods: int = 260, seed: int = 7) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "date": dates,
+            "reference_month": dates,
             "cpi_observed_level": cpi_level,
             "cpi_level": cpi_level,
             "cpi_originally_missing": False,
@@ -967,6 +1367,16 @@ def make_demo_data(periods: int = 260, seed: int = 7) -> pd.DataFrame:
             "inflation_yoy": inflation_yoy,
             "inflation_yoy_uses_imputed_input": False,
             "inflation_yoy_uses_missing_input": False,
+            "release_timestamp": pd.NaT,
+            "release_timestamp_provenance": RELEASE_TIMESTAMP_PROVENANCE_UNVERIFIED,
+            "information_timestamp": pd.NaT,
+            "information_timestamp_provenance": (
+                INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED
+            ),
+            "vintage_timestamp": pd.NaT,
+            "retrieved_at": pd.NaT,
+            "timing_status": TIMING_STATUS_REFERENCE_MONTH_ONLY,
+            "data_vintage_status": DATA_VINTAGE_STATUS_LATEST_REVISED,
             "imputation_policy": DEFAULT_IMPUTATION_POLICY,
             "is_demo_data": True,
         }

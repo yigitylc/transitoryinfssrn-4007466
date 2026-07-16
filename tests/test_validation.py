@@ -4,12 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from transitory_inflation.data import build_base_frame
+from transitory_inflation.data import (
+    INFORMATION_TIMESTAMP_PROVENANCE_RELEASES,
+    build_base_frame,
+)
 from transitory_inflation.features import add_transitory_inflation_features
 from transitory_inflation.validation import (
     BINARY_RATE_SPECS,
     add_forward_outcomes,
     add_outcome_labels,
+    add_short_term_pressure_labels,
     add_walk_forward_regime_labels,
     build_historical_validation_frame,
     forward_outcome_summary_by_regime,
@@ -526,3 +530,99 @@ def test_walk_forward_regime_thresholds_use_only_prior_tinf_history() -> None:
     assert pd.isna(out.loc[35, "historical_regime"])
     assert out.loc[36, "historical_regime_upper_threshold"] == 0.0
     assert out.loc[36, "historical_regime"] == "elevated rising"
+
+
+def test_walk_forward_regime_timing_includes_delayed_prior_threshold_input() -> None:
+    dates = pd.date_range("2024-01-31", periods=6, freq="ME")
+    delayed_prior = pd.Timestamp("2025-01-01 00:00:00.000000001+00:00")
+    timestamp_values = list(
+        (dates + pd.offsets.Day(12) + pd.offsets.Hour(13)).tz_localize("UTC")
+    )
+    timestamp_values[1] = delayed_prior
+    timestamps = pd.Series(timestamp_values, dtype="datetime64[ns, UTC]")
+    frame = pd.DataFrame(
+        {
+            "date": dates,
+            "tinf_4m": [0.0, 0.2, 0.1, 0.8, 0.5, 0.4],
+            "tinf_4m_information_timestamp": timestamps,
+            "tinf_4m_information_timestamp_provenance": (
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ),
+            "tinf_4m_timing_status": "release_aligned",
+            "information_timestamp": timestamps,
+            "information_timestamp_provenance": (
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ),
+            "timing_status": "release_aligned",
+        }
+    )
+
+    out = add_walk_forward_regime_labels(frame, min_prior_observations=3)
+    latest = out.iloc[-1]
+
+    assert pd.notna(latest["historical_regime"])
+    assert latest["historical_regime_information_timestamp"] == delayed_prior
+    assert latest["historical_regime_timing_status"] == "release_aligned"
+    assert latest["information_timestamp"] == delayed_prior
+    assert latest["timing_status"] == "release_aligned"
+
+
+def test_walk_forward_regime_timing_fails_closed_for_nonexact_prior_input() -> None:
+    dates = pd.date_range("2024-01-31", periods=6, freq="ME")
+    timestamps = pd.Series(
+        (dates + pd.offsets.Day(12) + pd.offsets.Hour(13)).tz_localize("UTC")
+    )
+    status = pd.Series("release_aligned", index=range(len(dates)), dtype="string")
+    status.iloc[1] = "proxy"
+    frame = pd.DataFrame(
+        {
+            "date": dates,
+            "tinf_4m": [0.0, 0.2, 0.1, 0.8, 0.5, 0.4],
+            "tinf_4m_information_timestamp": timestamps,
+            "tinf_4m_information_timestamp_provenance": (
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ),
+            "tinf_4m_timing_status": status,
+            "information_timestamp": timestamps,
+            "information_timestamp_provenance": (
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ),
+            "timing_status": "release_aligned",
+        }
+    )
+
+    latest = add_walk_forward_regime_labels(
+        frame,
+        min_prior_observations=3,
+    ).iloc[-1]
+
+    assert pd.notna(latest["historical_regime"])
+    assert pd.isna(latest["historical_regime_information_timestamp"])
+    assert latest["historical_regime_timing_status"] == "reference_month_only"
+    assert pd.isna(latest["information_timestamp"])
+    assert latest["timing_status"] == "reference_month_only"
+
+
+def test_short_term_pressure_is_unavailable_when_term_structure_is_missing() -> None:
+    frame = pd.DataFrame(
+        {
+            "tinf_term_structure": [pd.NA],
+            "information_timestamp": [pd.Timestamp("2024-02-13 13:00:00+00:00")],
+            "information_timestamp_provenance": [
+                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+            ],
+            "timing_status": ["release_aligned"],
+        }
+    )
+
+    row = add_short_term_pressure_labels(frame).iloc[0]
+
+    assert pd.isna(row["historical_short_term_pressure"])
+    assert pd.isna(row["historical_short_term_pressure_information_timestamp"])
+    assert row["historical_short_term_pressure_timing_status"] == (
+        "derived_value_unavailable"
+    )
+    assert row["information_timestamp"] == pd.Timestamp(
+        "2024-02-13 13:00:00+00:00"
+    )
+    assert row["timing_status"] == "release_aligned"

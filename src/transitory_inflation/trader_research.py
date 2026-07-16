@@ -1,7 +1,7 @@
 """Trader Research mode: a descriptive, rates-only reading of market linkage.
 
 Scope (decided 2026-06-24): descriptive only, rates-only (the six approved FRED
-series), live-safe. This module does NOT add forecasts, PnL, sizing, timing,
+series), row-lookahead-safe. This module does NOT add forecasts, PnL, sizing, timing,
 instruments, or trade recommendations, and it does not touch the shelved
 ``report.build_trader_report`` / ``REGIME_PLAYBOOK`` layer.
 
@@ -11,7 +11,7 @@ did the approved FRED rate instruments historically do over the next
 the current bucket and exposing the forward-change distribution plus the analog
 months behind it.
 
-The current bucket is taken from the live-safe walk-forward labels
+The current bucket is taken from row-lookahead-safe walk-forward labels
 (``historical_regime`` / ``historical_short_term_pressure``), NOT from
 ``features.latest_signal_snapshot``'s full-sample (ex-post) regime, so the
 current state is matched against history in the same label space and
@@ -25,8 +25,19 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from .data import (
+    INFORMATION_TIMESTAMP_PROVENANCE_RELEASES,
+    REFERENCE_MONTH_COMPATIBILITY_SEMANTICS,
+    TIMING_STATUS_REFERENCE_MONTH_ONLY,
+    TIMING_STATUS_RELEASE_ALIGNED,
+    _has_explicit_timezone,
+)
 from .market_data import MARKET_VALUE_COLUMNS
-from .market_linkage import DEFAULT_MARKET_LINKAGE_HORIZONS, MarketLinkageTables
+from .market_linkage import (
+    DEFAULT_MARKET_LINKAGE_HORIZONS,
+    MarketLinkageTables,
+    market_series_timing_summary,
+)
 from .validation import (
     PRESSURE_ORDER,
     REGIME_ORDER,
@@ -40,13 +51,22 @@ PRESSURE_COL = "historical_short_term_pressure"
 
 @dataclass(frozen=True)
 class CurrentBucket:
-    """The latest live-safe walk-forward regime/pressure state."""
+    """The latest row-lookahead-safe walk-forward regime/pressure state.
+
+    ``as_of`` remains a compatibility alias for ``reference_month``. It is not
+    a signal-availability timestamp; use ``information_timestamp`` plus
+    ``timing_status`` for availability semantics.
+    """
 
     available: bool
     reason: str | None = None
     regime: str | None = None
     pressure: str | None = None
+    reference_month: pd.Timestamp | None = None
+    information_timestamp: pd.Timestamp | None = None
+    timing_status: str | None = None
     as_of: pd.Timestamp | None = None
+    as_of_semantics: str = REFERENCE_MONTH_COMPATIBILITY_SEMANTICS
     regime_count: int = 0
     regime_pressure_count: int = 0
 
@@ -62,11 +82,12 @@ class TraderResearchView:
     distribution: pd.DataFrame = field(default_factory=pd.DataFrame)
     channel_rollup: pd.DataFrame = field(default_factory=pd.DataFrame)
     analog_months: pd.DataFrame = field(default_factory=pd.DataFrame)
+    series_timing_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
     weak_evidence: bool = False
 
 
 def _ensure_walk_forward_labels(df: pd.DataFrame) -> pd.DataFrame:
-    """Add the live-safe walk-forward labels if they are not already present."""
+    """Add row-lookahead-safe walk-forward labels if they are not already present."""
 
     out = df
     if REGIME_COL not in out.columns:
@@ -76,8 +97,69 @@ def _ensure_walk_forward_labels(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _bucket_timing(latest: pd.Series) -> tuple[pd.Timestamp | None, str]:
+    """Combine signal and walk-forward-label timing without promoting trust."""
+
+    information_value = latest.get("information_timestamp", pd.NaT)
+    generic_exact = (
+        str(latest.get("timing_status", TIMING_STATUS_REFERENCE_MONTH_ONLY))
+        == TIMING_STATUS_RELEASE_ALIGNED
+        and _has_explicit_timezone(information_value)
+        and str(latest.get("information_timestamp_provenance", ""))
+        == INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+    )
+    dependency_timestamps: list[pd.Timestamp] = []
+    dependency_metadata_present = False
+    dependencies_exact = True
+    for label_column in (
+        REGIME_COL,
+        PRESSURE_COL,
+    ):
+        timestamp_column = f"{label_column}_information_timestamp"
+        status_column = f"{label_column}_timing_status"
+        provenance_column = f"{label_column}_information_timestamp_provenance"
+        if not {
+            timestamp_column,
+            status_column,
+            provenance_column,
+        }.intersection(latest.index):
+            continue
+        dependency_metadata_present = True
+        dependency_used = pd.notna(latest.get(label_column, pd.NA))
+        if not dependency_used:
+            continue
+        timestamp_value = latest.get(timestamp_column, pd.NaT)
+        status_value = str(
+            latest.get(status_column, TIMING_STATUS_REFERENCE_MONTH_ONLY)
+        )
+        provenance_value = str(latest.get(provenance_column, ""))
+        dependency_exact = (
+            status_value == TIMING_STATUS_RELEASE_ALIGNED
+            and _has_explicit_timezone(timestamp_value)
+            and provenance_value == INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
+        )
+        dependencies_exact &= dependency_exact
+        if dependency_exact:
+            dependency_timestamps.append(pd.Timestamp(timestamp_value))
+
+    if not dependency_metadata_present:
+        incoming_status = str(
+            latest.get("timing_status", TIMING_STATUS_REFERENCE_MONTH_ONLY)
+        )
+        if not generic_exact:
+            return None, incoming_status
+        return pd.Timestamp(information_value), TIMING_STATUS_RELEASE_ALIGNED
+
+    if not generic_exact or not dependencies_exact:
+        return None, TIMING_STATUS_REFERENCE_MONTH_ONLY
+    return (
+        max([pd.Timestamp(information_value), *dependency_timestamps]),
+        TIMING_STATUS_RELEASE_ALIGNED,
+    )
+
+
 def latest_walk_forward_bucket(df: pd.DataFrame) -> CurrentBucket:
-    """Return today's live-safe walk-forward (regime, pressure) bucket.
+    """Return today's row-lookahead-safe walk-forward (regime, pressure) bucket.
 
     The bucket is the latest row with both walk-forward labels defined. Counts
     report how many historical months share the current regime (and the current
@@ -93,7 +175,7 @@ def latest_walk_forward_bucket(df: pd.DataFrame) -> CurrentBucket:
         return CurrentBucket(
             available=False,
             reason=(
-                "No live-safe walk-forward regime label is available yet "
+                "No row-lookahead-safe walk-forward regime label is available yet "
                 "(needs enough prior history)."
             ),
         )
@@ -104,12 +186,25 @@ def latest_walk_forward_bucket(df: pd.DataFrame) -> CurrentBucket:
     latest = rows.iloc[-1]
     regime = str(latest[REGIME_COL])
     pressure = str(latest[PRESSURE_COL])
+    reference_month_value = latest.get(
+        "reference_month",
+        latest.get("date", pd.NaT),
+    )
+    reference_month = (
+        pd.Timestamp(reference_month_value)
+        if pd.notna(reference_month_value)
+        else None
+    )
+    information_timestamp, timing_status = _bucket_timing(latest)
     regime_mask = labeled[REGIME_COL] == regime
     return CurrentBucket(
         available=True,
         regime=regime,
         pressure=pressure,
-        as_of=pd.Timestamp(latest["date"]) if "date" in rows.columns else None,
+        reference_month=reference_month,
+        information_timestamp=information_timestamp,
+        timing_status=timing_status,
+        as_of=reference_month,
         regime_count=int(regime_mask.sum()),
         regime_pressure_count=int((regime_mask & (labeled[PRESSURE_COL] == pressure)).sum()),
     )
@@ -209,10 +304,38 @@ def regime_analog_months(
     ]
     base_cols = [
         column
-        for column in ("date", REGIME_COL, PRESSURE_COL, "epsilon", "tinf_4m")
+        for column in (
+            "date",
+            "reference_month",
+            "information_timestamp",
+            "timing_status",
+            "market_origin_basis",
+            "market_timing_status",
+            "market_origin_timestamp",
+            "market_origin_observation_date",
+            "market_required_series_count",
+            "market_available_series_count",
+            "market_availability_status",
+            "market_data_vintage_status",
+            REGIME_COL,
+            PRESSURE_COL,
+            "epsilon",
+            "tinf_4m",
+        )
         if column in selected.columns
     ]
-    out = selected.loc[:, [*base_cols, *change_cols]].copy()
+    series_timing_cols = [
+        column
+        for variable in market_columns
+        for column in (
+            f"{variable}_origin_timestamp",
+            f"{variable}_origin_observation_date",
+            f"{variable}_origin_basis",
+            f"{variable}_timing_status",
+        )
+        if column in selected.columns
+    ]
+    out = selected.loc[:, [*base_cols, *series_timing_cols, *change_cols]].copy()
     if change_cols:
         out = out.loc[out[change_cols].notna().any(axis=1)]
     if "date" in out.columns:
@@ -279,6 +402,10 @@ def build_trader_research_view(
     distribution = conditional_forward_distribution(tables, regime, pressure, horizons)
     channel_rollup = conditional_channel_rollup(tables, regime, horizons)
     analog_months = regime_analog_months(panel, regime, pressure, horizons, market_columns)
+    timing_mask = panel[REGIME_COL] == regime
+    if pressure is not None and PRESSURE_COL in panel.columns:
+        timing_mask &= panel[PRESSURE_COL] == pressure
+    series_timing = market_series_timing_summary(panel.loc[timing_mask])
     weak_evidence = bool(
         "weak_evidence" in distribution.columns
         and distribution["weak_evidence"].fillna(False).astype(bool).any()
@@ -292,5 +419,6 @@ def build_trader_research_view(
         distribution=distribution,
         channel_rollup=channel_rollup,
         analog_months=analog_months,
+        series_timing_summary=series_timing,
         weak_evidence=weak_evidence,
     )

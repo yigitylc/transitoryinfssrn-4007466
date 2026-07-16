@@ -58,7 +58,8 @@ GLOSSARY_ITEMS: tuple[tuple[str, str], ...] = (
     (
         "Baseline",
         "the mean-reversion anchor inflation is compared against (e.g. the prior 36-month "
-        "rolling mean). Shifted baselines use only data through the prior month (live-safe); "
+        "rolling mean). Shifted baselines use only data through the prior month "
+        "(row-lookahead-safe); "
         "the full-sample baseline is flat and ex-post.",
     ),
     (
@@ -87,10 +88,10 @@ GLOSSARY_ITEMS: tuple[tuple[str, str], ...] = (
         "should be read cautiously.",
     ),
     (
-        "live-safe vs ex-post",
-        "live-safe = no full-sample lookahead (signal usable in real time); ex-post = uses "
-        "information not available at the time (paper-style only). 'live-safe' means no full-sample "
-        "lookahead, not a real-time data-vintage backtest.",
+        "row-lookahead-safe vs ex-post",
+        "row-lookahead-safe = no future rows or full-sample information enter construction; "
+        "ex-post = uses information unavailable at the historical row. Row safety does not imply "
+        "release alignment or vintage safety: current FRED values are latest-revised and non-vintage.",
     ),
 )
 
@@ -469,8 +470,10 @@ current_raw = dashboard_views.current_raw
 current_df = dashboard_views.current_featured
 status_snapshot = dashboard_views.current_snapshot
 current_signal_notice = dashboard_mod.current_signal_imputation_notice(status_snapshot)
-latest_signal_date = (
-    macro_data.date_label(pd.to_datetime(status_snapshot["date"]))
+latest_signal_reference_month = (
+    macro_data.date_label(
+        status_snapshot.get("reference_month", status_snapshot["date"])
+    )
     if status_snapshot.get("available")
     else "unavailable"
 )
@@ -481,7 +484,8 @@ with st.sidebar:
     if status_snapshot.get("available"):
         st.markdown(regime_badge(status_snapshot["regime"]))
         st.caption(
-            f"{signal_headline(status_snapshot)}  ·  as of {latest_signal_date}. "
+            f"{signal_headline(status_snapshot)}  ·  CPI reference month "
+            f"{latest_signal_reference_month}. "
             "See the Current Macro Signal tab for the full read."
         )
     else:
@@ -500,7 +504,13 @@ st.caption(
     f"raw_data_end={raw_span_end}; "
     f"latest_cpi_observation_date={macro_data.date_label(latest_cpi_observation)}; "
     f"latest_valid_cpi_yoy_date={span_end}; "
-    f"latest_valid_signal_date={latest_signal_date}; "
+    f"latest_signal_reference_month={latest_signal_reference_month}; "
+    f"release_timestamp={macro_data.timestamp_label(status_snapshot.get('release_timestamp'))}; "
+    f"release_timestamp_provenance={status_snapshot.get('release_timestamp_provenance', 'release_metadata_unavailable_or_unverified')}; "
+    f"information_timestamp={macro_data.timestamp_label(status_snapshot.get('information_timestamp'))}; "
+    f"information_timestamp_provenance={status_snapshot.get('information_timestamp_provenance', 'information_timing_unavailable_or_unverified')}; "
+    f"timing_status={status_snapshot.get('timing_status', 'reference_month_only')}; "
+    f"data_vintage_status={status_snapshot.get('data_vintage_status', 'latest_revised_non_vintage')}; "
     f"research_imputation_policy={load_result.imputation_policy}; "
     f"current_descriptive_imputation_applied={current_imputation_applied}."
 )
@@ -545,7 +555,14 @@ with tab_signal:
         st.markdown(
             f"**Regime:** {regime_badge(snapshot['regime'])}  |  "
             f"**Short-term pressure:** {validation_mod.pressure_label(snapshot['term_structure'])}  |  "
-            f"**As of:** {pd.to_datetime(snapshot['date']).date()}"
+            f"**CPI reference month:** "
+            f"{macro_data.date_label(snapshot.get('reference_month', snapshot['date']))}"
+        )
+        st.caption(
+            f"Timing status: {snapshot.get('timing_status', 'reference_month_only')}; "
+            f"publication={macro_data.timestamp_label(snapshot.get('release_timestamp'))}; "
+            f"information={macro_data.timestamp_label(snapshot.get('information_timestamp'))}; "
+            f"vintage={snapshot.get('data_vintage_status', 'latest_revised_non_vintage')}."
         )
 
         col1, col2, col3, col4 = st.columns(4)
@@ -573,9 +590,10 @@ with tab_signal:
             "(inflationary pressure); below zero means below baseline (disinflationary). A percentile "
             "near 100 marks one of the most inflationary readings in this sample, near 0 one of the "
             "most disinflationary. 'Elevated rising' means pressure is still building; 'elevated "
-            "falling' means elevated but easing. The date is the last month where every input is "
-            "available. Percentile and regime depend on the sample mode: max_history includes pre-1982 "
-            "regimes and will shift both.",
+            "falling' means elevated but easing. The displayed month is the reference month of the "
+            "latest complete feature row. Information availability is shown separately by the full "
+            "signal-information timestamp. Percentile and regime depend on the sample mode: "
+            "max_history includes pre-1982 regimes and will shift both.",
         )
 
     st.plotly_chart(plots_mod.cpi_vs_baseline_figure(current_df), width="stretch")
@@ -587,7 +605,8 @@ with tab_signal:
         "The vertical gap between the two lines is epsilon, the raw deviation in percentage points "
         "that every TINF measure averages. Persistent one-sided gaps are exactly the episodes TINF "
         "quantifies. Rolling and expanding baselines adapt slowly by design; that lag is what makes "
-        "deviations measurable. Shifted baselines use only data through the prior month (live-safe), "
+        "deviations measurable. Shifted baselines use only data through the prior month "
+        "(row-lookahead-safe), "
         "while the full-sample baseline is flat and ex-post only.",
     )
 
@@ -636,10 +655,10 @@ with tab_validation:
             "Phase 2 benchmark comparison is still needed before treating hit rates as signal skill."
         )
     scope_caveats(
-        "Historical validation is live-like only under shifted baselines; full_sample is ex-post.",
+        "Shifted baselines are row-lookahead-safe; all validation data remain latest-revised and non-vintage.",
         (
-            "Historical validation is live-like only under rolling_36_shifted or expanding_shifted "
-            "baselines.",
+            "rolling_36_shifted and expanding_shifted avoid future-row/full-sample lookahead, but "
+            "that row safety is not a release-aligned or vintage-safe historical-data claim.",
             "full_sample is ex-post and should not be used to judge live signal success.",
         ),
     )
@@ -837,7 +856,7 @@ with tab_market_linkage:
         "descriptive evidence only.",
         "Read the grouped bars as the average forward change (bp) by regime per channel and the "
         "heatmap as signal-vs-future-change correlation. A positive change means the rate rose "
-        "after the signal date — descriptive history, not a forecast or trade.",
+        "after the eligible market origin — descriptive history, not a forecast or trade.",
     )
     scope_caveats(
         "Descriptive historical market linkage only — not a trading signal or forecast.",
@@ -848,7 +867,7 @@ with tab_market_linkage:
             "recommendation. It summarizes how selected FRED rates changed after past TINF/regime "
             "states.",
             "This is descriptive market linkage, not a trading signal.",
-            "A positive forward change means the market variable rose after the signal date.",
+            "A positive forward change means the market variable rose after the eligible market origin.",
             "Nominal yields, breakevens, and real yields measure different channels.",
             "Market linkage may be useful even if TINF/regime is not the best CPI point-forecast model.",
         ),
@@ -907,7 +926,20 @@ with tab_market_linkage:
     if not market_result.available_market_variables:
         st.info("No approved market variables are available for the selected sample.")
     else:
-        market_tables = get_market_linkage_tables(df, market_result.data)
+        market_tables = get_market_linkage_tables(df, market_result.market_closes)
+
+        st.markdown("#### Market-origin timing")
+        st.caption(
+            "Exact measurement starts at the first trustworthy market-close timestamp on or after "
+            "the trustworthy full signal-information timestamp. Date-only FRED observations instead "
+            "use the first observation date after the applicable full signal-information timestamp "
+            "as a conservative proxy; rows with unavailable, incomplete, or untrusted full "
+            "signal-timing metadata use a conservative month-end t+1 proxy. All values remain "
+            "latest-revised and non-vintage."
+        )
+        st.dataframe(market_tables.timing_summary, width="stretch")
+        st.markdown("##### Per-series timing (authoritative)")
+        st.dataframe(market_tables.series_timing_summary, width="stretch")
 
         st.markdown("#### Current market snapshot")
         st.caption("Latest available FRED observation by approved market variable.")
@@ -920,7 +952,8 @@ with tab_market_linkage:
         st.caption(
             "Average forward change in basis points by historical regime, grouped by channel "
             "(nominal 2Y/10Y, 5Y/10Y breakevens, 5Y/10Y real yields). A positive bar means the "
-            "channel's rates rose after that regime; hover for the median and count."
+            "channel's rates rose after the eligible exact or proxy market origin for rows in "
+            "that regime; hover for the median and count."
         )
         if selected_channel_summary.empty:
             st.info("No channel summary is available for the selected horizon.")
@@ -1036,7 +1069,8 @@ with tab_market_linkage:
         with st.expander("Forward market-change summary tables (by regime / pressure / combined)"):
             st.markdown("##### Forward market-change summary by historical regime")
             st.caption(
-                "Changes are t to t+h in basis points. Rows without full future market data "
+                "Changes run from each eligible market origin to its horizon endpoint in basis "
+                "points. Rows without full future market data "
                 "for that variable and horizon are excluded."
             )
             if market_tables.summary_by_regime.empty:
@@ -1120,7 +1154,7 @@ with tab_trader_research:
     section_notes(
         "Given the macro state we are in today, what did the six approved FRED rate instruments "
         "historically do over the next 3/6/12/24/36 months? This collapses the Market Linkage "
-        "history to the current live-safe regime bucket and shows the forward-change distribution "
+        "history to the current row-lookahead-safe regime bucket and shows the forward-change distribution "
         "plus the analog months behind it.",
         "Read the range plot per instrument: the marker is the median forward change and the "
         "whisker is the p25-p75 spread, in basis points, with hot/cold by the sign of the median. "
@@ -1133,8 +1167,10 @@ with tab_trader_research:
             "Descriptive historical base rates only. This is not a forecast, not a trading signal, "
             "and not a model-generated trade recommendation. No sizing, timing, or instruments are "
             "implied.",
-            "The bucket uses live-safe walk-forward labels (no full-sample lookahead); rate changes "
-            "are in basis points; small buckets (weak_evidence) and the baseline/sample choice "
+            "The bucket uses row-lookahead-safe walk-forward labels (no full-sample lookahead). "
+            "Exact market origins require trusted full signal-information and market timestamps; date-only FRED "
+            "observations use a conservative proxy. All values are latest-revised and non-vintage; "
+            "rate changes are in basis points; small buckets (weak_evidence) and the baseline/sample choice "
             "shift these readings; forward changes describe history only and never construct the "
             "signal.",
         ),
@@ -1142,11 +1178,12 @@ with tab_trader_research:
 
     bucket = trader_research_mod.latest_walk_forward_bucket(df)
     if not bucket.available:
-        st.info(bucket.reason or "No live-safe regime bucket is available yet.")
+        st.info(bucket.reason or "No row-lookahead-safe regime bucket is available yet.")
     else:
         st.markdown(
             "#### Current bucket "
-            f"(live-safe walk-forward, as of {macro_data.date_label(bucket.as_of)})"
+            f"(row-lookahead-safe walk-forward, CPI reference month "
+            f"{macro_data.date_label(bucket.reference_month)})"
         )
         bcol1, bcol2, bcol3, bcol4 = st.columns(4)
         bcol1.metric("Regime", regime_badge(bucket.regime))
@@ -1155,12 +1192,19 @@ with tab_trader_research:
             "Regime analogs", f"{bucket.regime_count}",
             delta=f"{bucket.regime_pressure_count} also share pressure", delta_color="off",
         )
-        bcol4.metric("As of", macro_data.date_label(bucket.as_of))
+        bcol4.metric("Reference month", macro_data.date_label(bucket.reference_month))
+        st.caption(
+            "Bucket timing: "
+            f"reference month={macro_data.date_label(bucket.reference_month)}; "
+            f"information timestamp={macro_data.timestamp_label(bucket.information_timestamp)}; "
+            f"timing status={bucket.timing_status or 'reference_month_only'}."
+        )
         trader_snapshot = latest_signal_snapshot(df)
         if trader_snapshot.get("available"):
             st.caption(
                 "Cross-check only: the ex-post full-sample snapshot labels this month "
-                f"'{trader_snapshot['regime']}'. Bucket matching uses the live-safe walk-forward "
+                f"'{trader_snapshot['regime']}'. Bucket matching uses the row-lookahead-safe "
+                "walk-forward "
                 "label above, never this full-sample one."
             )
 
@@ -1184,7 +1228,23 @@ with tab_trader_research:
         if not market_result.available_market_variables:
             st.info("No approved market variables are available for the selected sample.")
         else:
-            market_tables = get_market_linkage_tables(df, market_result.data)
+            market_tables = get_market_linkage_tables(df, market_result.market_closes)
+            st.caption(
+                "Timing: CPI months identify the measured reference period, not the market origin. "
+                "Exact origins require a trustworthy full signal information timestamp and "
+                "market-close timestamp; "
+                "date-only FRED observations use a conservative next-observation-date proxy after "
+                "signal information time, and missing "
+                "full signal-information timing uses a conservative month-end t+1 proxy. Data are latest-revised and "
+                "non-vintage."
+            )
+            with st.expander("Trader Research market-origin timing"):
+                st.dataframe(market_tables.timing_summary, width="stretch")
+                st.markdown("##### Per-series timing (authoritative)")
+                st.dataframe(
+                    market_tables.series_timing_summary,
+                    width="stretch",
+                )
 
             trader_horizon_label = st.selectbox(
                 "Forward horizon",
@@ -1245,10 +1305,19 @@ with tab_trader_research:
             if not view.available:
                 st.info(view.reason or "No historical analogs for this bucket.")
             else:
+                with st.expander("Selected-bucket per-series timing"):
+                    st.dataframe(
+                        view.series_timing_summary,
+                        width="stretch",
+                    )
                 conditioning = f"regime '{view.regime}'" + (
                     f" x pressure '{view.pressure}'" if view.pressure else ""
                 )
-                st.caption(f"Conditioned on {conditioning}. Forward changes are t to t+h in basis points.")
+                st.caption(
+                    f"Conditioned on {conditioning}. Forward changes run from the eligible "
+                    "market origin to the first eligible timestamp or observation date on or after "
+                    "origin plus h months."
+                )
                 if view.weak_evidence:
                     st.warning(
                         "Some rows have fewer than 30 complete observations "
@@ -1259,7 +1328,8 @@ with tab_trader_research:
                 st.caption(
                     "Per approved FRED instrument: the median (marker) and p25-p75 range (whisker) "
                     "of the forward change in basis points, colored hot/cold by the sign of the "
-                    "median. A positive change means the instrument rose after the signal month."
+                    "median. A positive change means the instrument rose after its eligible exact or "
+                    "proxy market origin."
                 )
                 trader_dist_cols = [
                     column
@@ -1331,8 +1401,9 @@ with tab_benchmarks:
     st.subheader("Phase 2 Benchmark Comparison")
     section_notes(
         "Does the TINF/regime signal add forward inflation information beyond simple baselines? "
-        "Each model forecasts CPI YoY using only information available at month t; future CPI is "
-        "used only to score it.",
+        "Each model forecasts CPI YoY from the feature row at reference month t; future CPI is used "
+        "only to score it. The stored history is latest-revised and non-vintage, so row t is not an "
+        "historical release-alignment claim.",
         "Read the diverging bars as TINF's MAE/RMSE improvement versus each naive baseline — bars "
         "right of zero (cold) mean TINF reduced error, left (hot) mean it trailed — and the badges "
         "as the verdict. Phase 1 hit rates are not enough unless they beat these naive alternatives.",
@@ -1343,16 +1414,17 @@ with tab_benchmarks:
             "This tab tests whether the TINF/regime signal adds useful forward inflation "
             "information beyond simple baselines. Phase 1 hit rates are not enough unless they "
             "beat naive alternatives.",
-            "Forecasts use only information available at month t. Future CPI outcomes are used "
-            "only for evaluation. Results are historical validation, not a guaranteed trading signal.",
+            "Forecasts use row-t features and future CPI outcomes only for evaluation. This prevents "
+            "future outcomes from constructing the signal, but latest-revised non-vintage inputs do "
+            "not establish what a historical user knew at month t.",
             "No market variables are used by these benchmark forecasts. Market linkage is reported "
             "only in its separate descriptive tab.",
         ),
     )
     if not meta.live_safe:
         st.warning(
-            "The selected baseline is not live-safe. Benchmark results under this baseline are "
-            "descriptive, not live-like."
+            "The selected baseline is not row-lookahead-safe. Benchmark results under this baseline are "
+            "descriptive, not a historical real-time or vintage-safe test."
         )
 
     bench_col1, bench_col2 = st.columns(2)
@@ -1479,7 +1551,7 @@ with tab_report:
         current_df,
         baseline_method,
         sample_mode,
-        report_market_result.data,
+        report_market_result.market_closes,
         load_result,
         report_market_result,
     )
@@ -1489,11 +1561,17 @@ with tab_report:
         if not meta.live_safe:
             st.warning(
                 "Selected baseline is ex-post. This report describes history, not a live signal — "
-                "switch to a live-safe baseline for current-signal use."
+                "switch to a row-lookahead-safe baseline for current-signal use. This still uses "
+                "latest-revised, non-vintage data."
             )
         if report.current_signal_notice:
             st.warning(report.current_signal_notice)
         st.markdown(f"**{report.headline}**")
+        st.caption(
+            f"Report timing: reference month={report.reference_month or 'unknown'}; "
+            f"information timestamp={report.information_timestamp or 'unknown'}; "
+            f"timing status={report.timing_status or 'reference_month_only'}."
+        )
 
         # Executive read: reuse tab 1's snapshot-card pattern over the same
         # latest_signal_snapshot values the report builder uses internally, so the
@@ -1505,7 +1583,8 @@ with tab_report:
                 f"**Regime:** {regime_badge(report_snapshot['regime'])}  |  "
                 f"**Short-term pressure:** "
                 f"{validation_mod.pressure_label(report_snapshot['term_structure'])}  |  "
-                f"**As of:** {pd.to_datetime(report_snapshot['date']).date()}"
+                f"**CPI reference month:** "
+                f"{macro_data.date_label(report_snapshot.get('reference_month', report_snapshot['date']))}"
             )
             r_eps = float(report_snapshot["epsilon"])
             r_pct = float(report_snapshot["tinf_4m_percentile"])
@@ -1569,6 +1648,12 @@ with tab_report:
         else:
             with st.expander("Market channel detail"):
                 st.dataframe(report.market_channel_summary, width="stretch")
+        if not report.market_series_timing_summary.empty:
+            with st.expander("Per-series market timing detail"):
+                st.dataframe(
+                    report.market_series_timing_summary,
+                    width="stretch",
+                )
 
         st.divider()
         st.markdown("#### 6. Caveats / Model Risk")
@@ -1766,7 +1851,7 @@ with tab_robustness:
             "remains the paper/default measure; core and PCE measures are robustness checks, not "
             "paper-exact replication. Future inflation outcomes are evaluation only, thresholds are "
             "reported rather than optimized, and no market variables are included.",
-            "`full_sample` is ex-post / paper-style only and is not a live-safe baseline.",
+            "`full_sample` is ex-post / paper-style only and is not row-lookahead-safe.",
         ),
     )
 
@@ -1980,8 +2065,8 @@ with tab_robustness:
     section_notes(
         "Whether today's signal survives changing the baseline definition: the latest snapshot "
         "(date, TINF 4M, percentile, regime, short-term pressure) recomputed under every baseline, "
-        "alongside each baseline's live-safe flag.",
-        "A regime call that agrees across the live-safe rows (rolling_36_shifted, "
+        "alongside each baseline's row-lookahead-safety flag.",
+        "A regime call that agrees across the row-lookahead-safe rows (rolling_36_shifted, "
         "expanding_shifted, fed_target) is robust; if it flips between baselines, the conclusion "
         "is baseline-dependent and must be quoted together with its baseline. The full_sample and "
         "rolling_36_unshifted rows are ex-post references only, never live signals. Dates can "

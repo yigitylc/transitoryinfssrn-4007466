@@ -20,15 +20,16 @@ Required gate:
   API/CSV data.
 - Cached fallback does not trust precomputed `inflation_yoy` or `cpi_imputed`
   columns in raw cache files.
-- If cleaned CPI data supports a 2026-04 signal, the latest valid signal date
-  must not remain stuck at 2025-09.
+- If cleaned CPI data supports a 2026-04 signal reference month, the latest valid
+  signal reference month must not remain stuck at 2025-09.
 - Data status clearly shows:
   - source used
   - cache path when applicable
   - raw data end date
   - latest CPI observation date
   - latest valid CPI YoY date
-  - latest valid signal date
+  - latest valid signal reference month
+  - latest trustworthy full signal-information timestamp and timing status
   - CPI imputation status
 - Historical validation columns must be explicitly `historical_*` and must not
   overwrite live/current regime labels.
@@ -149,7 +150,8 @@ Required sections
 
 Show the current live macro signal:
 
-latest valid signal date
+latest valid signal reference month
+full signal-information timestamp and timing status
 data source used
 inflation measure
 sample mode
@@ -228,7 +230,8 @@ real yields: 5Y and 10Y real yields
 
 Explain:
 
-A positive forward change means the market variable rose after the signal date.
+A positive forward change means the market variable rose after that series' eligible market
+origin, determined by the full signal information timestamp or the explicitly labelled proxy path.
 Nominal yields, breakevens, and real yields represent different macro channels.
 Market linkage can be useful even if TINF/regime is not the best CPI point-forecast model.
 Market linkage is descriptive and historical, not a live trading signal.
@@ -242,9 +245,12 @@ This dashboard is historical research, not a trading signal.
 TINF/regime does not robustly beat AR(1) as a CPI point-forecast model in current tests.
 Market linkage is descriptive and may not hold out of sample.
 Some regime buckets may have small sample sizes.
-Full-sample baselines are ex-post / paper-style and not live-safe.
-Data freshness matters.
-FRED publication lags can affect the latest signal.
+Full-sample baselines are ex-post / paper-style and are not row-lookahead-safe.
+Row-lookahead safety, reference-month-only timing, release alignment, vintage safety,
+and ex-post continuity are distinct; latest-revised FRED data are non-vintage.
+Data freshness and timing status matter.
+FRED publication lags can affect the latest trustworthy full signal-information
+timestamp without changing the CPI reference month.
 CPI imputation, if used, should be disclosed.
 Future market changes are used only for evaluation, not signal construction.
 7. Watchlist / What to Monitor Next

@@ -14,6 +14,8 @@ from transitory_inflation.data import (
     INFLATION_MEASURES,
     MACRO_CACHE_SCHEMA_COLUMN,
     MACRO_CACHE_SCHEMA_VERSION,
+    RELEASE_TIMESTAMP_PROVENANCE_ACTUAL,
+    TIMING_STATUS_RELEASE_ALIGNED,
     apply_sample_mode,
     build_base_frame,
     build_macro_cache_frame,
@@ -335,7 +337,9 @@ def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_polic
         levels = 100.0 + np.arange(30, dtype=float)
         gap_pos = 16
         levels[gap_pos] = np.nan
-        releases = dates + pd.offsets.Day(15)
+        releases = (
+            dates + pd.offsets.Day(15) + pd.offsets.Hour(13)
+        ).tz_localize("UTC")
         processed = build_base_frame(
             pd.DataFrame(
                 {
@@ -343,6 +347,10 @@ def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_polic
                     "CPIAUCSL": levels,
                     "TB3MS": 1.0,
                     "release_timestamp": releases,
+                    "release_timestamp_provenance": (
+                        RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
+                    ),
+                    "timing_status": TIMING_STATUS_RELEASE_ALIGNED,
                 }
             ),
             imputation_policy="ex_post_continuity",
@@ -355,6 +363,7 @@ def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_polic
         assert "cpi_level" not in cache.columns
         assert "cpi_imputed" not in cache.columns
         assert cache.loc[gap_pos + 1, "release_timestamp"] == releases[gap_pos + 1]
+        assert cache.loc[0, "release_timing_status"] == TIMING_STATUS_RELEASE_ALIGNED
         cache.to_csv(cache_path / "fred_base_macro_max_history.csv", index=False)
 
         observed = load_cached_macro_data_for_mode("max_history")
@@ -371,6 +380,7 @@ def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_polic
         assert pd.notna(continuity.loc[gap_pos, "cpi_level"])
         assert continuity.loc[gap_pos, "imputation_method"] == "log_linear_bridge"
         assert continuity.loc[gap_pos, "imputation_available_at"] == releases[gap_pos + 1]
+        assert observed.iloc[-1]["timing_status"] == TIMING_STATUS_RELEASE_ALIGNED
         assert (
             continuity.loc[gap_pos, "imputation_availability_basis"]
             == "following_release_timestamp"

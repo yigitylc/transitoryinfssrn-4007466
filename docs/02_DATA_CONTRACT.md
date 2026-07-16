@@ -5,7 +5,16 @@
 Preferred index/columns:
 
 ```text
-date                  month-end or FRED monthly date
+date                  backward-compatible alias for reference_month
+reference_month       economic month measured by the CPI observation
+release_timestamp     actual publication time, populated only from release metadata
+release_timestamp_provenance actual_release_metadata only for a trusted exact timestamp
+information_timestamp latest exact availability among inputs used by the derived row
+information_timestamp_provenance derived_from_actual_release_metadata when exact
+vintage_timestamp     stored-value vintage; null for current latest-revised FRED data
+retrieved_at           time the project actually fetched or loaded the source
+timing_status          release_aligned, reference_month_only, or derived_value_unavailable
+data_vintage_status    latest_revised_non_vintage for the current FRED loader
 cpi_level             CPI index level
 cpi_imputed           bool: CPI level log-linearly bridged for a single missing interior month
 inflation_yoy         YoY CPI inflation in percentage points
@@ -15,7 +24,7 @@ tinf_4m               4-month rolling mean of epsilon
 tinf_8m               8-month rolling mean of epsilon
 tinf_12m              12-month rolling mean of epsilon
 baseline_method       string label for baseline choice
-live_safe             bool or label indicating no-lookahead status
+live_safe             legacy baseline flag meaning no future-row/full-sample lookahead only
 ```
 
 ## Sample modes
@@ -49,7 +58,54 @@ Bounds are inclusive. `None` means unbounded on that side.
    appear in outputs.
 6. Compute baseline/epsilon/TINF features on the trimmed frame. Baseline
    warm-up NaNs (for example 37 months for `rolling_36_shifted`) are
-   intentional: live-safe baselines must not reach back before the sample.
+   intentional: row-lookahead-safe baselines must not reach back before the sample.
+
+### Information-date and vintage rules
+
+- CPI reference month is never silently used as its publication or information timestamp.
+- Exact `release_timestamp` values are accepted only when actual release metadata, explicit
+  provenance, a timezone-bearing timestamp, and an explicit `release_aligned` incoming timing
+  status are supplied. Time-of-day is preserved. Each inflation measure carries its own release
+  timing status and derived YoY timing status; core CPI, PCE, and core PCE never borrow headline CPI
+  timing metadata.
+- Cache serialization and reload validate the timestamp's original timezone before UTC
+  conversion and persist the incoming per-measure timing status. A timezone-naive release string,
+  a missing status, or any non-exact status remains untrusted and cannot acquire exact status merely
+  because a parser attaches UTC or sees claimed provenance.
+- CPI YoY, baseline, epsilon, and TINF availability is the latest exact availability among their
+  dependencies. Incoming timing status is authoritative: only `release_aligned` dependencies can
+  contribute exact timestamps. If any dependency actually used is `reference_month_only`, a proxy,
+  unknown, or otherwise non-exact, `information_timestamp` stays null and derived `timing_status`
+  fails closed to `reference_month_only`.
+- Ex-post continuity retains its labelled month-end availability proxy when release metadata is
+  absent, but that proxy is not promoted to an exact information timestamp.
+- Monthly macro normalization selects the latest physically dated row within each month; the last
+  stable input row breaks same-date ties. The selected row is retained whole, including nulls, so
+  values, timestamps, status, and provenance cannot be spliced across complementary-null duplicates.
+- Current FRED values are latest-revised and explicitly non-vintage. The project does not claim
+  vintage safety without an actual vintage source.
+- Exact market linkage starts at the first eligible market-close timestamp greater than or equal
+  to the signal information timestamp. It requires explicit trustworthy signal timing plus an
+  explicit timezone-bearing market-close timestamp, status, and provenance.
+- Standard FRED market observations are date-only, not exact close timestamps. With trustworthy
+  full signal-information timing they use the first observation date after the signal information
+  timestamp as a labelled conservative next-observation proxy. Without trustworthy full
+  signal-information timing they use the labelled conservative month-end `t+1` origin proxy.
+- Duplicate market observation dates retain the last physical source row in stable input order.
+  Values, nulls, timestamps, status, and provenance are selected from that one row; columns are
+  never combined across duplicate rows.
+- Multi-series linkage routes exact, next-observation proxy, month-end proxy, or unavailable
+  treatment independently for each required series and retains each result's own origin timestamp
+  or observation date, basis, and timing status. A missing series cannot demote another series with
+  an eligible exact post-information observation. A shared row is exact only when every displayed
+  series has an eligible exact origin; heterogeneous fully available origins are labelled mixed,
+  mixed availability is labelled partial, and zero eligible series is unavailable. Exact series may
+  have different origin timestamps. The shared origin records the latest selected per-series origin
+  needed for the available set and does not imply simultaneity.
+- When exact alignment is eligible but no trustworthy market observation exists at or after the
+  signal information timestamp, the origin is explicitly unavailable rather than exact with a
+  null timestamp/value. The same fail-closed rule applies when a selected proxy lookup finds no
+  eligible observation after its required origin date.
 
 ### Series availability caveats
 
@@ -91,7 +147,10 @@ Fallback order:
 
 The Streamlit app discloses `data_source_used`, `live_fetch_status`,
 `cache_file_used`, raw data end date, latest CPI observation date, latest valid
-CPI YoY date, latest valid signal date, and whether CPI imputation was applied.
+CPI YoY reference month, signal reference month, information timestamp, timing
+status, and whether CPI imputation was applied. A compatibility field named
+`latest_valid_signal_date` is a reference-month alias, not a signal-availability
+date; its companion semantics field states that explicitly.
 Cache and demo fallbacks are visibly warned and do not fabricate fresh FRED
 observations.
 
