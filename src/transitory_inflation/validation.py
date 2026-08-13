@@ -13,9 +13,11 @@ from .data import (
     TIMING_STATUS_UNAVAILABLE,
 )
 from .features import (
+    _estimated_input_months_present,
     _expanding_information_timestamp,
     _latest_timestamp,
     _trusted_information_timestamps,
+    observed_only_historical_eligibility,
 )
 
 DEFAULT_FORWARD_HORIZONS: tuple[int, ...] = (3, 6, 12, 24, 36)
@@ -126,11 +128,10 @@ def _consolidate_derived_timing(
     df.loc[available, "information_timestamp_provenance"] = (
         INFORMATION_TIMESTAMP_PROVENANCE_UNVERIFIED
     )
-    df.loc[exact, "information_timestamp_provenance"] = (
-        INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
-    )
+    df.loc[exact, "information_timestamp_provenance"] = INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
     derived_status = _timing_status_for_value(values, combined)
     df.loc[available, "timing_status"] = derived_status.loc[available]
+
 
 TRANSITORY_SIGNAL_REGIMES: tuple[str, ...] = ("elevated falling",)
 PERSISTENT_SIGNAL_REGIMES: tuple[str, ...] = ("elevated rising",)
@@ -212,18 +213,8 @@ def _mask_nonobserved_signal_inputs(
     """Blank lineage-contaminated signal values without removing calendar rows."""
 
     out = df.copy()
-    if "signal_observed_only_eligible" in out.columns:
-        eligible = out["signal_observed_only_eligible"].fillna(False).astype(bool)
-    elif {
-        "signal_uses_imputed_input",
-        "signal_uses_missing_input",
-    } & set(out.columns):
-        eligible = ~(
-            _lineage_flag(out, "signal_uses_imputed_input")
-            | _lineage_flag(out, "signal_uses_missing_input")
-        )
-    else:
-        return out
+    eligible = observed_only_historical_eligibility(out)
+    out["signal_observed_only_eligible"] = eligible
 
     invalid = ~eligible
     value_cols = [
@@ -289,16 +280,15 @@ def add_short_term_pressure_labels(
     """Add dashboard-facing pressure labels: firming, cooling, or mixed."""
 
     out = df.copy()
+    historical_eligible = observed_only_historical_eligibility(out)
     if source_col in out.columns:
-        source_available = out[source_col].notna()
+        source_available = out[source_col].notna() & historical_eligible
         out[output_col] = out[source_col].map(PRESSURE_LABELS).where(source_available)
         out[output_col] = out[output_col].astype("string")
     elif output_col not in out.columns:
         out[output_col] = pd.Series(pd.NA, index=out.index, dtype="string")
 
-    trusted_information = _trusted_generic_information(out).where(
-        out[output_col].notna()
-    )
+    trusted_information = _trusted_generic_information(out).where(out[output_col].notna())
     timestamp_col = f"{output_col}_information_timestamp"
     provenance_col = f"{output_col}_information_timestamp_provenance"
     status_col = f"{output_col}_timing_status"
@@ -341,7 +331,8 @@ def add_walk_forward_regime_labels(
 
     _require_columns(df, [tinf_col])
     out = df.copy()
-    tinf = out[tinf_col]
+    historical_eligible = observed_only_historical_eligibility(out)
+    tinf = out[tinf_col].where(historical_eligible)
     lower = tinf.expanding(min_periods=min_prior_observations).quantile(lower_quantile).shift(1)
     upper = tinf.expanding(min_periods=min_prior_observations).quantile(upper_quantile).shift(1)
     prev_tinf = tinf.shift(1)
@@ -350,7 +341,7 @@ def add_walk_forward_regime_labels(
     valid = tinf.notna() & lower.notna() & upper.notna()
     elevated = valid & (tinf > upper) & prev_tinf.notna()
     disinflationary = valid & (tinf < lower)
-    neutral = valid & ~elevated & ~disinflationary
+    neutral = valid & (tinf >= lower) & (tinf <= upper)
 
     regime.loc[neutral] = "neutral"
     regime.loc[disinflationary] = "disinflationary"
@@ -439,8 +430,21 @@ def add_forward_outcomes(
     _require_columns(df, [inflation_col, epsilon_col, tinf_col])
     out = df.copy()
     current_abs_gap = out[epsilon_col].abs()
-    origin_imputed = _lineage_flag(out, "signal_uses_imputed_input")
-    origin_missing = _lineage_flag(out, "signal_uses_missing_input")
+    disclosed_estimated_months = (
+        _estimated_input_months_present(out["estimated_input_months"])
+        if "estimated_input_months" in out.columns
+        else pd.Series(False, index=out.index, dtype=bool)
+    )
+    origin_imputed = (
+        _lineage_flag(out, "signal_uses_imputed_input")
+        | _lineage_flag(out, "uses_estimated_input")
+        | _lineage_flag(out, "uses_imputed_input")
+        | disclosed_estimated_months
+    )
+    origin_missing = _lineage_flag(out, "signal_uses_missing_input") | _lineage_flag(
+        out, "uses_missing_input"
+    )
+    origin_eligible = observed_only_historical_eligibility(out)
 
     for horizon in horizons:
         suffix = _suffix(horizon)
@@ -476,15 +480,28 @@ def add_forward_outcomes(
         out[f"epsilon_fwd_{suffix}_uses_missing_input"] = epsilon_fwd_missing
         out[f"tinf_4m_fwd_{suffix}_uses_missing_input"] = tinf_fwd_missing
 
+        target_estimated = origin_imputed.shift(-horizon, fill_value=False)
+        target_missing = origin_missing.shift(-horizon, fill_value=False)
+        target_eligible = origin_eligible.shift(-horizon, fill_value=False)
         out[f"outcome_{suffix}_uses_imputed_input"] = (
-            origin_imputed | cpi_fwd_imputed | epsilon_fwd_imputed | tinf_fwd_imputed
+            origin_imputed
+            | target_estimated
+            | cpi_fwd_imputed
+            | epsilon_fwd_imputed
+            | tinf_fwd_imputed
         )
         out[f"outcome_{suffix}_uses_missing_input"] = (
-            origin_missing | cpi_fwd_missing | epsilon_fwd_missing | tinf_fwd_missing
+            origin_missing
+            | target_missing
+            | cpi_fwd_missing
+            | epsilon_fwd_missing
+            | tinf_fwd_missing
         )
-        eligible = ~(
-            out[f"outcome_{suffix}_uses_imputed_input"]
-            | out[f"outcome_{suffix}_uses_missing_input"]
+        eligible = (
+            origin_eligible
+            & target_eligible
+            & ~out[f"outcome_{suffix}_uses_imputed_input"]
+            & ~out[f"outcome_{suffix}_uses_missing_input"]
         )
         out[f"observed_only_eligible_{suffix}"] = eligible
 
@@ -604,19 +621,16 @@ def add_outcome_labels(
         partial_decay_50 = _nullable_bool(decay_50_condition, future_valid & meaningful_gap)
 
         out[f"baseline_normalized_{suffix}"] = baseline_normalized
-        out[f"fed_target_normalized_{suffix}"] = _nullable_bool(
-            fed_target_condition, future_valid
-        )
+        out[f"fed_target_normalized_{suffix}"] = _nullable_bool(fed_target_condition, future_valid)
         out[f"partial_decay_50_{suffix}"] = partial_decay_50
         out[f"partial_decay_80_{suffix}"] = _nullable_bool(
             decay_80_condition, future_valid & meaningful_gap
         )
 
         absolute_gap_persistent_valid = future_valid & partial_decay_50.notna()
-        absolute_gap_persistent_condition = (
-            ~baseline_normalized.fillna(False).astype(bool)
-            & ~partial_decay_50.fillna(False).astype(bool)
-        )
+        absolute_gap_persistent_condition = ~baseline_normalized.fillna(False).astype(
+            bool
+        ) & ~partial_decay_50.fillna(False).astype(bool)
         out[f"absolute_gap_persistent_{suffix}"] = _nullable_bool(
             absolute_gap_persistent_condition,
             absolute_gap_persistent_valid,
@@ -634,9 +648,7 @@ def add_outcome_labels(
             persistence_valid,
         )
         out[f"persistent_{suffix}"] = out[f"positive_shock_persistent_{suffix}"]
-        out[f"reaccelerated_{suffix}"] = _nullable_bool(
-            reaccelerated_condition, future_valid
-        )
+        out[f"reaccelerated_{suffix}"] = _nullable_bool(reaccelerated_condition, future_valid)
 
     return out
 
@@ -722,15 +734,11 @@ def _forward_outcome_summary_by_groups(
                 {
                     "horizon_months": horizon,
                     "count": int(len(group)),
-                    "avg_future_cpi_yoy_change": float(
-                        group[f"cpi_yoy_change_{suffix}"].mean()
-                    ),
+                    "avg_future_cpi_yoy_change": float(group[f"cpi_yoy_change_{suffix}"].mean()),
                     "median_future_cpi_yoy_change": float(
                         group[f"cpi_yoy_change_{suffix}"].median()
                     ),
-                    "avg_future_epsilon_change": float(
-                        group[f"epsilon_change_{suffix}"].mean()
-                    ),
+                    "avg_future_epsilon_change": float(group[f"epsilon_change_{suffix}"].mean()),
                     **_binary_rate_summary(group, suffix),
                     "uses_imputed_input": bool(
                         _lineage_flag(group, f"outcome_{suffix}_uses_imputed_input").any()
@@ -828,12 +836,8 @@ def threshold_sensitivity_summary(
                 "threshold_pp": threshold,
                 "horizon_months": horizon,
                 "count": int(len(current)),
-                "avg_future_cpi_yoy_change": float(
-                    current[f"cpi_yoy_change_{suffix}"].mean()
-                ),
-                "median_future_cpi_yoy_change": float(
-                    current[f"cpi_yoy_change_{suffix}"].median()
-                ),
+                "avg_future_cpi_yoy_change": float(current[f"cpi_yoy_change_{suffix}"].mean()),
+                "median_future_cpi_yoy_change": float(current[f"cpi_yoy_change_{suffix}"].median()),
                 "avg_future_epsilon_change": float(current[f"epsilon_change_{suffix}"].mean()),
                 **_binary_rate_summary(current, suffix),
                 "uses_imputed_input": bool(
@@ -911,7 +915,9 @@ def validation_examples(
     downside_overshoot = (
         out[f"positive_shock_downside_overshoot_{suffix}"].fillna(False).astype(bool)
     )
-    positive_shock_persistent = out[f"positive_shock_persistent_{suffix}"].fillna(False).astype(bool)
+    positive_shock_persistent = (
+        out[f"positive_shock_persistent_{suffix}"].fillna(False).astype(bool)
+    )
 
     example_cols = [
         column
@@ -951,8 +957,6 @@ def validation_examples(
         "successful_transitory": take(
             transitory_signal & positive_shock_resolved & ~downside_overshoot
         ),
-        "successful_transitory_downside_overshoot": take(
-            transitory_signal & downside_overshoot
-        ),
+        "successful_transitory_downside_overshoot": take(transitory_signal & downside_overshoot),
         "successful_persistent": take(persistent_signal & positive_shock_persistent),
     }

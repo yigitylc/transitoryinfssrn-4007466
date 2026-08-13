@@ -234,3 +234,35 @@ def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
     assert set(scorecard.columns) <= expected_scorecard_columns
     assert set(verdict.columns) <= expected_verdict_columns
     assert set(win_rates.columns) <= expected_win_rate_columns
+
+
+def test_robustness_rejects_authoritative_estimate_only_rows() -> None:
+    raw = _raw_cpi_frame()
+    raw["imputation_policy"] = "observed_only"
+    raw["uses_estimated_input"] = False
+    raw["estimated_input_months"] = [()] * len(raw)
+    raw["signal_uses_imputed_input"] = False
+    raw["signal_uses_missing_input"] = False
+    raw["signal_observed_only_eligible"] = True
+    contaminated_pos = 100
+    raw.loc[contaminated_pos, "uses_estimated_input"] = True
+    changed = raw.copy()
+    changed.loc[contaminated_pos, "inflation_yoy"] += 100.0
+
+    kwargs = {
+        "horizons": (3,),
+        "thresholds": (0.50,),
+        "baseline_methods": ("full_sample",),
+        "inflation_measures": ("headline_cpi",),
+        "ar_min_observations": 8,
+        "bucket_min_observations": 1,
+    }
+    base_scorecard = build_robustness_scorecard({"unit_sample": raw}, **kwargs)
+    changed_scorecard = build_robustness_scorecard({"unit_sample": changed}, **kwargs)
+    availability = inflation_measure_availability(
+        {"unit_sample": raw},
+        inflation_measures=("headline_cpi",),
+    ).iloc[0]
+
+    pd.testing.assert_frame_equal(base_scorecard, changed_scorecard)
+    assert availability["valid_observations"] == len(raw) - 1

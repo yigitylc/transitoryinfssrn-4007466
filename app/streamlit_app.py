@@ -26,8 +26,6 @@ from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES
 from transitory_inflation.diagnostics import ljung_box_table, stationarity_diagnostics
 from transitory_inflation.features import (
     BASELINE_META,
-    add_transitory_inflation_features,
-    latest_signal_snapshot,
 )
 from transitory_inflation.models import (
     correlation_matrix,
@@ -395,8 +393,7 @@ def get_robustness_tables(
 def get_macro_research_report(
     raw: pd.DataFrame,
     featured: pd.DataFrame,
-    current_raw: pd.DataFrame,
-    current_featured: pd.DataFrame,
+    current_monitoring: dashboard_mod.CurrentMonitoringBundle,
     baseline_method: str,
     sample_mode: str,
     market_monthly: pd.DataFrame | None,
@@ -411,8 +408,7 @@ def get_macro_research_report(
         macro_status=_macro_status,
         market_monthly=market_monthly,
         market_status=_market_status,
-        current_raw=current_raw,
-        current_featured=current_featured,
+        current_monitoring=current_monitoring,
     )
 
 
@@ -445,9 +441,7 @@ if raw.empty:
     st.stop()
 
 span_start = pd.to_datetime(raw["date"].min()).date()
-span_end = macro_data.date_label(
-    macro_data.latest_valid_observation_date(raw, "inflation_yoy")
-)
+span_end = macro_data.date_label(macro_data.latest_valid_observation_date(raw, "inflation_yoy"))
 raw_span_end = pd.to_datetime(raw["date"].max()).date()
 span_text = f"{span_start} -> {span_end}"
 if str(raw_span_end) != span_end:
@@ -463,17 +457,20 @@ if meta.warning:
 dashboard_views = dashboard_mod.build_dashboard_data_views(
     raw,
     baseline_method=baseline_method,
+    warmup_raw=load_result.warmup_data,
+    sample_mode=sample_mode,
 )
 raw = dashboard_views.research_raw
 df = dashboard_views.research_featured
 current_raw = dashboard_views.current_raw
 current_df = dashboard_views.current_featured
+current_chart_df = dashboard_views.current_chart_featured
 status_snapshot = dashboard_views.current_snapshot
+current_monitoring = dashboard_views.current_monitoring
+scenario_applicable = current_monitoring.applicable
 current_signal_notice = dashboard_mod.current_signal_imputation_notice(status_snapshot)
 latest_signal_reference_month = (
-    macro_data.date_label(
-        status_snapshot.get("reference_month", status_snapshot["date"])
-    )
+    macro_data.date_label(status_snapshot.get("reference_month", status_snapshot["date"]))
     if status_snapshot.get("available")
     else "unavailable"
 )
@@ -482,19 +479,25 @@ with st.sidebar:
     st.divider()
     st.markdown("**Current reading**")
     if status_snapshot.get("available"):
-        st.markdown(regime_badge(status_snapshot["regime"]))
+        reading_label = "Base scenario" if scenario_applicable else "Observed-only reading"
+        st.markdown(f"{reading_label}: {regime_badge(status_snapshot['regime'])}")
+        scenario_label = (
+            f"{current_monitoring.stability.label}."
+            if scenario_applicable
+            else "Missing-October-2025 CPI scenarios are not applicable."
+        )
         st.caption(
             f"{signal_headline(status_snapshot)}  ·  CPI reference month "
-            f"{latest_signal_reference_month}. "
+            f"{latest_signal_reference_month}. {scenario_label} "
             "See the Current Macro Signal tab for the full read."
         )
     else:
-        st.caption("No complete signal yet for this mode/baseline.")
+        st.caption(current_monitoring.reason or "No complete signal yet for this mode/baseline.")
     if current_signal_notice:
         st.caption(current_signal_notice)
 latest_cpi_observation = macro_data.latest_valid_observation_date(raw, "cpi_observed_level")
 current_imputation_applied = bool(
-    status_snapshot.get("available") and status_snapshot.get("uses_imputed_input")
+    status_snapshot.get("available") and status_snapshot.get("uses_estimated_input")
 )
 st.caption(
     "Data status: "
@@ -505,6 +508,7 @@ st.caption(
     f"latest_cpi_observation_date={macro_data.date_label(latest_cpi_observation)}; "
     f"latest_valid_cpi_yoy_date={span_end}; "
     f"latest_signal_reference_month={latest_signal_reference_month}; "
+    f"historical_complete_signal_endpoint={macro_data.date_label(dashboard_views.current_monitoring.historical_evidence_endpoint)}; "
     f"release_timestamp={macro_data.timestamp_label(status_snapshot.get('release_timestamp'))}; "
     f"release_timestamp_provenance={status_snapshot.get('release_timestamp_provenance', 'release_metadata_unavailable_or_unverified')}; "
     f"information_timestamp={macro_data.timestamp_label(status_snapshot.get('information_timestamp'))}; "
@@ -543,15 +547,19 @@ st.caption(
 )
 
 with tab_signal:
-    snapshot = latest_signal_snapshot(current_df)
+    snapshot = status_snapshot
     if current_signal_notice:
         st.warning(current_signal_notice)
     if not snapshot.get("available"):
         st.warning(snapshot.get("reason", "No signal available."))
+        scenario_table = current_monitoring.scenario_table()
+        if not scenario_table.empty:
+            st.dataframe(style_regime_cells(scenario_table), width="stretch")
     else:
         epsilon = float(snapshot["epsilon"])
         percentile = float(snapshot["tinf_4m_percentile"])
-        st.markdown(f"### {signal_headline(snapshot)}")
+        signal_label = "Base scenario" if scenario_applicable else "Observed-only reading"
+        st.markdown(f"### {signal_label}: {signal_headline(snapshot)}")
         st.markdown(
             f"**Regime:** {regime_badge(snapshot['regime'])}  |  "
             f"**Short-term pressure:** {validation_mod.pressure_label(snapshot['term_structure'])}  |  "
@@ -564,19 +572,42 @@ with tab_signal:
             f"information={macro_data.timestamp_label(snapshot.get('information_timestamp'))}; "
             f"vintage={snapshot.get('data_vintage_status', 'latest_revised_non_vintage')}."
         )
+        if scenario_applicable:
+            stability = current_monitoring.stability
+            st.caption(
+                f"Scenario classification: {stability.label}; regime stable="
+                f"{stability.regime_stable}; pressure stable={stability.pressure_stable}. "
+                "The complete observed-only TINF/pressure signal ends "
+                f"{macro_data.date_label(current_monitoring.historical_evidence_endpoint)} "
+                "and excludes estimated CPI inputs; scored evidence endpoints vary by horizon."
+            )
+            st.dataframe(
+                style_regime_cells(current_monitoring.scenario_table()),
+                width="stretch",
+            )
+        else:
+            st.caption(
+                "Missing-October-2025 CPI scenarios are not applicable because this "
+                "sample ends before the affected month. This reading and all Paper "
+                "Window evidence remain observed-only."
+            )
 
         col1, col2, col3, col4 = st.columns(4)
         # delta_color="off" keeps the arrows gray: these are regime reads (hot/cold),
         # not good/bad outcomes, so the default green-up/red-down scheme is suppressed.
         col1.metric(
-            "CPI YoY", f"{snapshot['inflation_yoy']:.2f}%",
-            delta=f"{epsilon:+.2f}pp vs baseline", delta_color="off",
+            "CPI YoY",
+            f"{snapshot['inflation_yoy']:.2f}%",
+            delta=f"{epsilon:+.2f}pp vs baseline",
+            delta_color="off",
         )
         col2.metric("Baseline", f"{snapshot['baseline']:.2f}%")
         col3.metric("TINF 4M", f"{snapshot['tinf_4m']:.2f} pp")
         col4.metric(
-            "TINF 4M Percentile", f"{percentile:.1f}%",
-            delta=f"{percentile - 50:+.0f} vs median", delta_color="off",
+            "TINF 4M Percentile",
+            f"{percentile:.1f}%",
+            delta=f"{percentile - 50:+.0f} vs median",
+            delta_color="off",
         )
 
         section_notes(
@@ -596,31 +627,37 @@ with tab_signal:
             "max_history includes pre-1982 regimes and will shift both.",
         )
 
-    st.plotly_chart(plots_mod.cpi_vs_baseline_figure(current_df), width="stretch")
-    section_notes(
-        "How CPI YoY inflation has tracked the selected mean-reversion baseline over the whole loaded "
-        "sample: when inflation crossed above or below it, how long those episodes lasted, and how "
-        "today's gap compares with history. The dotted 2% line is a fixed policy reference, "
-        "independent of the baseline choice.",
-        "The vertical gap between the two lines is epsilon, the raw deviation in percentage points "
-        "that every TINF measure averages. Persistent one-sided gaps are exactly the episodes TINF "
-        "quantifies. Rolling and expanding baselines adapt slowly by design; that lag is what makes "
-        "deviations measurable. Shifted baselines use only data through the prior month "
-        "(row-lookahead-safe), "
-        "while the full-sample baseline is flat and ex-post only.",
-    )
+    if current_chart_df is not None:
+        st.caption(
+            "Charts below plot the base current-monitoring scenario."
+            if scenario_applicable
+            else "Charts below plot the unchanged observed-only Paper Window."
+        )
+        st.plotly_chart(plots_mod.cpi_vs_baseline_figure(current_chart_df), width="stretch")
+        section_notes(
+            "How CPI YoY inflation has tracked the selected mean-reversion baseline over the whole loaded "
+            "sample: when inflation crossed above or below it, how long those episodes lasted, and how "
+            "today's gap compares with history. The dotted 2% line is a fixed policy reference, "
+            "independent of the baseline choice.",
+            "The vertical gap between the two lines is epsilon, the raw deviation in percentage points "
+            "that every TINF measure averages. Persistent one-sided gaps are exactly the episodes TINF "
+            "quantifies. Rolling and expanding baselines adapt slowly by design; that lag is what makes "
+            "deviations measurable. Shifted baselines use only data through the prior month "
+            "(row-lookahead-safe), "
+            "while the full-sample baseline is flat and ex-post only.",
+        )
 
-    st.plotly_chart(plots_mod.tinf_term_structure_figure(current_df), width="stretch")
-    section_notes(
-        "Whether the transitory component is building or fading across horizons: the same deviation "
-        "series averaged over 4, 8, and 12 months, so recent pressure (4M) can be compared against "
-        "the slower-moving 8M and 12M readings around the zero line.",
-        "4M above 8M above 12M means short-term pressure is firming: recent deviations exceed older ones. "
-        "The reverse ordering means short-term pressure is cooling. All three hugging zero means inflation is tracking the "
-        "baseline. Because the lines average the same epsilon over nested windows they co-move; the "
-        "signal is how fast they separate and when they cross, which usually precedes a change in "
-        "the regime label above.",
-    )
+        st.plotly_chart(plots_mod.tinf_term_structure_figure(current_chart_df), width="stretch")
+        section_notes(
+            "Whether the transitory component is building or fading across horizons: the same deviation "
+            "series averaged over 4, 8, and 12 months, so recent pressure (4M) can be compared against "
+            "the slower-moving 8M and 12M readings around the zero line.",
+            "4M above 8M above 12M means short-term pressure is firming: recent deviations exceed older ones. "
+            "The reverse ordering means short-term pressure is cooling. All three hugging zero means inflation is tracking the "
+            "baseline. Because the lines average the same epsilon over nested windows they co-move; the "
+            "signal is how fast they separate and when they cross, which usually precedes a change in "
+            "the regime label above.",
+        )
 
 with tab_validation:
     st.subheader("Historical Signal Validation")
@@ -1018,7 +1055,11 @@ with tab_market_linkage:
                 st.dataframe(
                     what_happened.loc[
                         :,
-                        [column for column in what_happened_cols if column in what_happened.columns],
+                        [
+                            column
+                            for column in what_happened_cols
+                            if column in what_happened.columns
+                        ],
                     ].sort_values(["market_channel", "historical_regime"]),
                     width="stretch",
                 )
@@ -1046,7 +1087,11 @@ with tab_market_linkage:
                         .head(12)
                         .loc[
                             :,
-                            [column for column in highest_cols if column in selected_rankings.columns],
+                            [
+                                column
+                                for column in highest_cols
+                                if column in selected_rankings.columns
+                            ],
                         ],
                         width="stretch",
                     )
@@ -1061,7 +1106,11 @@ with tab_market_linkage:
                         .head(12)
                         .loc[
                             :,
-                            [column for column in lowest_cols if column in selected_rankings.columns],
+                            [
+                                column
+                                for column in lowest_cols
+                                if column in selected_rankings.columns
+                            ],
                         ],
                         width="stretch",
                     )
@@ -1167,7 +1216,8 @@ with tab_trader_research:
             "Descriptive historical base rates only. This is not a forecast, not a trading signal, "
             "and not a model-generated trade recommendation. No sizing, timing, or instruments are "
             "implied.",
-            "The bucket uses row-lookahead-safe walk-forward labels (no full-sample lookahead). "
+            "The current scenario bucket uses thresholds calibrated from prior observed-only "
+            "eligible history; analog counts and market outcomes remain strictly observed-only. "
             "Exact market origins require trusted full signal-information and market timestamps; date-only FRED "
             "observations use a conservative proxy. All values are latest-revised and non-vintage; "
             "rate changes are in basis points; small buckets (weak_evidence) and the baseline/sample choice "
@@ -1176,36 +1226,70 @@ with tab_trader_research:
         ),
     )
 
-    bucket = trader_research_mod.latest_walk_forward_bucket(df)
-    if not bucket.available:
-        st.info(bucket.reason or "No row-lookahead-safe regime bucket is available yet.")
+    trader_scenario_id = "base"
+    if scenario_applicable:
+        trader_buckets = {
+            scenario_id: trader_research_mod.current_bucket_from_snapshot(
+                view.snapshot,
+                df,
+            )
+            for scenario_id, view in current_monitoring.scenarios.items()
+        }
+        if current_monitoring.stability.scenario_sensitive:
+            trader_scenario_id = st.selectbox(
+                "Current scenario for historical conditioning",
+                options=list(macro_data.CURRENT_MONITORING_SCENARIOS),
+                index=1,
+                help=(
+                    "Classifications differ across assumptions, so no modal current bucket is "
+                    "manufactured. Select the scenario to query against observed-only history."
+                ),
+            )
+        bucket = trader_buckets[trader_scenario_id]
     else:
+        trader_scenario_id = "observed_only"
+        bucket = trader_research_mod.latest_walk_forward_bucket(df)
+    if not bucket.available:
+        st.info(bucket.reason or "No scenario-classified current bucket is available yet.")
+    else:
+        bucket_label = (
+            f"{trader_scenario_id} scenario"
+            if scenario_applicable
+            else "observed-only Paper Window"
+        )
         st.markdown(
-            "#### Current bucket "
-            f"(row-lookahead-safe walk-forward, CPI reference month "
+            f"#### Current bucket ({bucket_label}, CPI reference month "
             f"{macro_data.date_label(bucket.reference_month)})"
         )
         bcol1, bcol2, bcol3, bcol4 = st.columns(4)
         bcol1.metric("Regime", regime_badge(bucket.regime))
         bcol2.metric("Short-term pressure", str(bucket.pressure))
         bcol3.metric(
-            "Regime analogs", f"{bucket.regime_count}",
-            delta=f"{bucket.regime_pressure_count} also share pressure", delta_color="off",
+            "Regime analogs",
+            f"{bucket.regime_count}",
+            delta=f"{bucket.regime_pressure_count} also share pressure",
+            delta_color="off",
         )
         bcol4.metric("Reference month", macro_data.date_label(bucket.reference_month))
+        stability_caption = (
+            f"stability={current_monitoring.stability.label}."
+            if scenario_applicable
+            else "missing-CPI scenarios=not applicable."
+        )
         st.caption(
             "Bucket timing: "
             f"reference month={macro_data.date_label(bucket.reference_month)}; "
             f"information timestamp={macro_data.timestamp_label(bucket.information_timestamp)}; "
-            f"timing status={bucket.timing_status or 'reference_month_only'}."
+            f"timing status={bucket.timing_status or 'reference_month_only'}; "
+            f"calibration={bucket.calibration_policy}; historical population="
+            f"{bucket.historical_population_policy}; latest eligible regime/pressure origin="
+            f"{macro_data.date_label(bucket.historical_evidence_endpoint)}; "
+            f"{stability_caption}"
         )
-        trader_snapshot = latest_signal_snapshot(df)
-        if trader_snapshot.get("available"):
-            st.caption(
-                "Cross-check only: the ex-post full-sample snapshot labels this month "
-                f"'{trader_snapshot['regime']}'. Bucket matching uses the row-lookahead-safe "
-                "walk-forward "
-                "label above, never this full-sample one."
+        if scenario_applicable:
+            st.dataframe(
+                style_regime_cells(current_monitoring.scenario_table()),
+                width="stretch",
             )
 
         market_result = get_market_data(sample_mode)
@@ -1259,9 +1343,7 @@ with tab_trader_research:
             )
             if trader_regimes:
                 default_regime_index = (
-                    trader_regimes.index(bucket.regime)
-                    if bucket.regime in trader_regimes
-                    else 0
+                    trader_regimes.index(bucket.regime) if bucket.regime in trader_regimes else 0
                 )
                 chosen_regime = st.selectbox(
                     "Condition on regime (defaults to today's bucket)",
@@ -1547,8 +1629,7 @@ with tab_report:
     report = get_macro_research_report(
         raw,
         df,
-        current_raw,
-        current_df,
+        dashboard_views.current_monitoring,
         baseline_method,
         sample_mode,
         report_market_result.market_closes,
@@ -1557,6 +1638,11 @@ with tab_report:
     )
     if not report.available:
         st.warning(report.reason or "Report unavailable.")
+        if not report.current_scenario_table.empty:
+            st.dataframe(
+                style_regime_cells(report.current_scenario_table),
+                width="stretch",
+            )
     else:
         if not meta.live_safe:
             st.warning(
@@ -1574,13 +1660,16 @@ with tab_report:
         )
 
         # Executive read: reuse tab 1's snapshot-card pattern over the same
-        # latest_signal_snapshot values the report builder uses internally, so the
+        # observed-history-calibrated base snapshot the report builder uses, so the
         # headline + current regime read as cards instead of prose. Presentation
         # only — no number changes.
-        report_snapshot = latest_signal_snapshot(current_df)
+        report_snapshot = status_snapshot
         if report_snapshot.get("available"):
+            report_regime_label = (
+                "Base scenario regime" if scenario_applicable else "Observed-only regime"
+            )
             st.markdown(
-                f"**Regime:** {regime_badge(report_snapshot['regime'])}  |  "
+                f"**{report_regime_label}:** {regime_badge(report_snapshot['regime'])}  |  "
                 f"**Short-term pressure:** "
                 f"{validation_mod.pressure_label(report_snapshot['term_structure'])}  |  "
                 f"**CPI reference month:** "
@@ -1591,14 +1680,18 @@ with tab_report:
             rcol1, rcol2, rcol3, rcol4 = st.columns(4)
             # delta_color="off": regime reads (hot/cold), not good/bad outcomes.
             rcol1.metric(
-                "CPI YoY", f"{report_snapshot['inflation_yoy']:.2f}%",
-                delta=f"{r_eps:+.2f}pp vs baseline", delta_color="off",
+                "CPI YoY",
+                f"{report_snapshot['inflation_yoy']:.2f}%",
+                delta=f"{r_eps:+.2f}pp vs baseline",
+                delta_color="off",
             )
             rcol2.metric("Baseline", f"{report_snapshot['baseline']:.2f}%")
             rcol3.metric("TINF 4M", f"{report_snapshot['tinf_4m']:.2f} pp")
             rcol4.metric(
-                "TINF 4M Percentile", f"{r_pct:.1f}%",
-                delta=f"{r_pct - 50:+.0f} vs median", delta_color="off",
+                "TINF 4M Percentile",
+                f"{r_pct:.1f}%",
+                delta=f"{r_pct - 50:+.0f} vs median",
+                delta_color="off",
             )
 
         st.divider()
@@ -1607,6 +1700,15 @@ with tab_report:
         if not report.current_regime_table.empty:
             with st.expander("Current regime detail"):
                 st.dataframe(report.current_regime_table, width="stretch")
+        if not report.current_scenario_table.empty:
+            with st.expander("Low/base/high scenario detail", expanded=True):
+                st.dataframe(
+                    style_regime_cells(report.current_scenario_table),
+                    width="stretch",
+                )
+        if not report.section_lineage.empty:
+            with st.expander("Report policy and lineage"):
+                st.dataframe(report.section_lineage, width="stretch")
 
         st.divider()
         st.markdown("#### 2. Signal Confidence")
@@ -1779,8 +1881,10 @@ with tab_decay:
             dcol1.metric("Decayed in 6m", f"{float(headline_row['decay_6m_pct']):.0f}%")
             dcol2.metric("Decayed in 12m", f"{float(headline_row['decay_12m_pct']):.0f}%")
             dcol3.metric(
-                "Time to 95% (t*)", f"{float(headline_row['t_star_months']):.0f} mo",
-                delta=f"{float(headline_row['t_star_years']):.1f} yr", delta_color="off",
+                "Time to 95% (t*)",
+                f"{float(headline_row['t_star_months']):.0f} mo",
+                delta=f"{float(headline_row['t_star_years']):.1f} yr",
+                delta_color="off",
             )
 
         st.plotly_chart(plots_mod.rolling_rho_figure(rho_df), width="stretch")
@@ -2040,22 +2144,45 @@ with tab_robustness:
     st.subheader("Baseline robustness quick comparison")
     rows = []
     for method in BASELINE_META:
-        temp = add_transitory_inflation_features(raw, baseline_method=method)
-        snap = latest_signal_snapshot(temp)
-        if snap.get("available"):
-            rows.append(
-                {
-                    "baseline_method": method,
-                    "live_safe": BASELINE_META[method].live_safe,
-                    "date": snap["date"],
-                    "tinf_4m": snap["tinf_4m"],
-                    "percentile": snap["tinf_4m_percentile"],
-                    "regime": snap["regime"],
-                    "short_term_pressure": validation_mod.pressure_label(
-                        snap["term_structure"]
-                    ),
-                }
-            )
+        method_views = dashboard_mod.build_dashboard_data_views(
+            raw,
+            baseline_method=method,
+            warmup_raw=load_result.warmup_data,
+            sample_mode=sample_mode,
+        )
+        method_monitoring = method_views.current_monitoring
+        comparison_views = (
+            method_monitoring.scenarios.items()
+            if method_monitoring.applicable
+            else (("observed_only", method_monitoring.base),)
+        )
+        for scenario_id, scenario_view in comparison_views:
+            snap = scenario_view.snapshot
+            if snap.get("available"):
+                rows.append(
+                    {
+                        "baseline_method": method,
+                        "scenario_id": scenario_id,
+                        "live_safe": BASELINE_META[method].live_safe,
+                        "reference_month": snap["reference_month"],
+                        "tinf_4m": snap["tinf_4m"],
+                        "percentile": snap["tinf_4m_percentile"],
+                        "regime": snap["regime"],
+                        "short_term_pressure": snap["pressure"],
+                        "regime_stable_across_missing_cpi": (
+                            method_monitoring.stability.regime_stable
+                            if method_monitoring.applicable
+                            else pd.NA
+                        ),
+                        "pressure_stable_across_missing_cpi": (
+                            method_monitoring.stability.pressure_stable
+                            if method_monitoring.applicable
+                            else pd.NA
+                        ),
+                        "uses_estimated_input": snap.get("uses_estimated_input", False),
+                        "calibration_policy": snap.get("calibration_policy", "observed_only"),
+                    }
+                )
     baseline_quick = pd.DataFrame(rows)
     st.caption(
         "Regime cells are tinted hot (above baseline) or cold (disinflationary) so agreement "
@@ -2063,9 +2190,9 @@ with tab_robustness:
     )
     st.dataframe(style_regime_cells(baseline_quick), width="stretch")
     section_notes(
-        "Whether today's signal survives changing the baseline definition: the latest snapshot "
-        "(date, TINF 4M, percentile, regime, short-term pressure) recomputed under every baseline, "
-        "alongside each baseline's row-lookahead-safety flag.",
+        "Whether the current reading survives changing the baseline definition. When the "
+        "selected sample includes October 2025, each low/base/high snapshot is recomputed; "
+        "earlier samples show one unchanged observed-only row per baseline.",
         "A regime call that agrees across the row-lookahead-safe rows (rolling_36_shifted, "
         "expanding_shifted, fed_target) is robust; if it flips between baselines, the conclusion "
         "is baseline-dependent and must be quoted together with its baseline. The full_sample and "

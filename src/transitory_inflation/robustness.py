@@ -10,7 +10,11 @@ from transitory_inflation.data import (
     INFLATION_MEASURES,
     InflationMeasure,
 )
-from transitory_inflation.features import BASELINE_META, add_transitory_inflation_features
+from transitory_inflation.features import (
+    BASELINE_META,
+    add_transitory_inflation_features,
+    observed_only_historical_eligibility,
+)
 
 DEFAULT_ROBUSTNESS_HORIZONS: tuple[int, ...] = (3, 6, 12, 24, 36)
 DEFAULT_ROBUSTNESS_THRESHOLDS: tuple[float, ...] = (0.25, 0.50, 0.75, 1.00)
@@ -82,9 +86,14 @@ def inflation_measure_availability(
     measure_configs = _inflation_measure_configs(inflation_measures)
     rows: list[dict[str, object]] = []
     for sample_mode, raw in raw_frames_by_sample_mode.items():
+        historical_eligible = observed_only_historical_eligibility(raw)
         for measure in measure_configs:
             has_yoy = measure.yoy_col in raw.columns
-            valid = raw[measure.yoy_col].notna() if has_yoy else pd.Series(dtype=bool)
+            valid = (
+                raw[measure.yoy_col].notna() & historical_eligible
+                if has_yoy
+                else pd.Series(dtype=bool)
+            )
             if has_yoy and valid.any() and "date" in raw.columns:
                 latest_date = pd.Timestamp(pd.to_datetime(raw.loc[valid, "date"]).max())
             else:
@@ -133,12 +142,15 @@ def build_robustness_scorecard(
     for sample_mode, raw in sample_items:
         if raw.empty:
             continue
+        historical_eligible = observed_only_historical_eligibility(raw)
         for measure in measure_configs:
             if measure.yoy_col not in raw.columns or raw[measure.yoy_col].dropna().empty:
                 continue
             for baseline_method in baseline_methods:
+                historical_raw = raw.copy()
+                historical_raw.loc[~historical_eligible, measure.yoy_col] = float("nan")
                 featured = add_transitory_inflation_features(
-                    raw,
+                    historical_raw,
                     inflation_col=measure.yoy_col,
                     baseline_method=baseline_method,
                 )

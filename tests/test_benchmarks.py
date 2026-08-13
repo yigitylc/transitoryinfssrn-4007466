@@ -262,3 +262,39 @@ def test_alternative_measure_forecasts_do_not_use_future_outcomes() -> None:
     assert set(base_forecasts.index) == set(BENCHMARK_MODELS)
     assert changed_forecasts.index.tolist() == base_forecasts.index.tolist()
     assert changed_forecasts.to_numpy() == pytest.approx(base_forecasts.to_numpy())
+
+
+def test_benchmarks_reject_authoritative_estimate_only_origins_and_targets() -> None:
+    frame = _feature_frame(periods=100)
+    frame["imputation_policy"] = "observed_only"
+    frame["uses_estimated_input"] = False
+    frame["estimated_input_months"] = [()] * len(frame)
+    frame["signal_uses_imputed_input"] = False
+    frame["signal_uses_missing_input"] = False
+    frame["signal_observed_only_eligible"] = True
+    contaminated_pos = 60
+    contaminated_date = frame.loc[contaminated_pos, "date"]
+    affected_origin_date = frame.loc[contaminated_pos - 2, "date"]
+    frame.loc[contaminated_pos, "uses_estimated_input"] = True
+    changed = frame.copy()
+    changed.loc[contaminated_pos, ["inflation_yoy", "baseline", "epsilon"]] += 100.0
+
+    tables = benchmark_comparison_tables(
+        frame,
+        horizon=2,
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+    changed_tables = benchmark_comparison_tables(
+        changed,
+        horizon=2,
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+    forecasts = tables[0]
+
+    assert contaminated_date not in set(forecasts["date"])
+    assert affected_origin_date not in set(forecasts["date"])
+    assert set(forecasts["model"]) == set(BENCHMARK_MODELS)
+    for base_table, changed_table in zip(tables, changed_tables, strict=True):
+        pd.testing.assert_frame_equal(base_table, changed_table)

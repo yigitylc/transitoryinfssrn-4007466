@@ -9,7 +9,7 @@ from . import benchmarks as benchmark_mod
 from . import market_linkage as market_linkage_mod
 from . import robustness as robustness_mod
 from . import validation as validation_mod
-from .dashboard import current_signal_imputation_notice
+from .dashboard import CurrentMonitoringBundle, current_signal_imputation_notice
 from .data import (
     HEADLINE_INFLATION_MEASURE,
     INFLATION_MEASURES,
@@ -18,7 +18,12 @@ from .data import (
     latest_valid_observation_date,
     timestamp_label,
 )
-from .features import BASELINE_META, add_transitory_inflation_features, latest_signal_snapshot
+from .features import (
+    BASELINE_META,
+    add_transitory_inflation_features,
+    latest_signal_snapshot,
+    observed_only_historical_eligibility,
+)
 from .market_data import available_market_variables
 from .models import decay_summaries_for_windows
 
@@ -102,8 +107,7 @@ REGIME_PLAYBOOK: dict[str, tuple[tuple[str, str], ...]] = {
         ),
         (
             "Rates & curve",
-            "Rates tend to trade ranges; carry and roll-down dominate directional inflation "
-            "views.",
+            "Rates tend to trade ranges; carry and roll-down dominate directional inflation views.",
         ),
         (
             "Inflation markets",
@@ -207,6 +211,12 @@ class MacroResearchReport:
     caveats: tuple[str, ...] = field(default_factory=tuple)
     watchlist: tuple[str, ...] = field(default_factory=tuple)
     current_regime_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    current_scenario_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    scenario_stability: Mapping[str, bool] = field(default_factory=dict)
+    scenario_status: str = "not_provided"
+    scenario_reason: str | None = None
+    scenario_lineage: Mapping[str, object] = field(default_factory=dict)
+    section_lineage: pd.DataFrame = field(default_factory=pd.DataFrame)
     benchmark_metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
     benchmark_comparisons: pd.DataFrame = field(default_factory=pd.DataFrame)
     robustness_verdict: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -223,6 +233,30 @@ def _status_get(status: object | None, key: str, default: object = None) -> obje
     if isinstance(status, Mapping):
         return status.get(key, default)
     return getattr(status, key, default)
+
+
+def _require_observed_only_authority(frame: pd.DataFrame, *, label: str) -> None:
+    """Require at least one row admitted by the canonical historical gate.
+
+    Individual ineligible rows remain in calendar order so lag and horizon
+    construction cannot collapse time. Every historical consumer applies the
+    same row mask before membership or scoring.
+    """
+
+    if frame is None or frame.empty:
+        return
+    if not observed_only_historical_eligibility(frame).any():
+        raise ValueError(f"{label} has no observed-only eligible rows")
+
+
+def _complete_observed_signal_endpoint(featured: pd.DataFrame) -> pd.Timestamp | None:
+    required = ("tinf_4m", "tinf_8m", "tinf_12m", "tinf_term_structure")
+    if "date" not in featured.columns or not set(required).issubset(featured.columns):
+        return None
+    complete = featured[list(required)].notna().all(axis=1)
+    complete &= observed_only_historical_eligibility(featured)
+    dates = pd.to_datetime(featured.loc[complete, "date"], errors="coerce")
+    return pd.Timestamp(dates.max()) if not dates.empty else None
 
 
 def _tinf_state(value: object, near_zero_threshold: float = 0.05) -> str:
@@ -378,9 +412,13 @@ def _robustness_lines(
         f"and {beats_ar1_rmse:.0%} by RMSE."
     )
 
-    measures = ", ".join(str(value) for value in verdict["inflation_measure_label"].dropna().unique())
+    measures = ", ".join(
+        str(value) for value in verdict["inflation_measure_label"].dropna().unique()
+    )
     baselines = ", ".join(str(value) for value in verdict["baseline_method"].dropna().unique())
-    lines.append(f"Covered inflation measures: {measures or 'none'}; baselines: {baselines or 'none'}.")
+    lines.append(
+        f"Covered inflation measures: {measures or 'none'}; baselines: {baselines or 'none'}."
+    )
     if not verdict["baseline_live_safe"].dropna().astype(bool).all():
         lines.append(
             "Rows using full_sample or other non-row-lookahead-safe baselines are ex-post / paper-style "
@@ -411,6 +449,9 @@ def _historical_analog_table(
         epsilon_threshold_pp=threshold_pp,
         fed_target_threshold_pp=threshold_pp,
     )
+    historical_eligible = observed_only_historical_eligibility(validation_df)
+    if not historical_eligible.any():
+        return pd.DataFrame()
     validation_df["historical_tinf_state"] = validation_df["tinf_4m"].map(_tinf_state)
 
     current_regime = str(snapshot["regime"])
@@ -418,7 +459,8 @@ def _historical_analog_table(
     current_tinf_state = _tinf_state(snapshot["tinf_4m"])
     analog_group = f"{current_regime} / {current_pressure} / {current_tinf_state} TINF"
     analog_mask = (
-        (validation_df["historical_regime"] == current_regime)
+        historical_eligible
+        & (validation_df["historical_regime"] == current_regime)
         & (validation_df["historical_short_term_pressure"] == current_pressure)
         & (validation_df["historical_tinf_state"] == current_tinf_state)
     )
@@ -445,13 +487,42 @@ def _historical_analog_table(
         inflation_rows = validation_df.loc[analog_mask & validation_df[cpi_col].notna()]
         inflation_count = int(len(inflation_rows))
         inflation_summary = {
+            "scenario_id": snapshot.get("scenario_id", pd.NA),
+            "estimate_method": snapshot.get("estimate_method", pd.NA),
+            "estimated_reference_month": snapshot.get("estimated_reference_month", pd.NaT),
+            "estimate_value": snapshot.get("estimate_value", float("nan")),
+            "estimate_available_at": snapshot.get("estimate_available_at", pd.NaT),
+            "estimate_availability_basis": snapshot.get("estimate_availability_basis", pd.NA),
+            "uses_estimated_input": bool(snapshot.get("uses_estimated_input", False)),
+            "estimated_input_months": snapshot.get("estimated_input_months", ()),
+            "calibration_policy": snapshot.get("calibration_policy", pd.NA),
+            "sample_mode": snapshot.get("sample_mode", pd.NA),
+            "baseline_method": snapshot.get("baseline_method", pd.NA),
+            "ex_post_status": snapshot.get("ex_post_status", pd.NA),
+            "lookahead_status": snapshot.get("lookahead_status", pd.NA),
+            "signal_reference_month": snapshot.get(
+                "signal_reference_month",
+                snapshot.get("reference_month", pd.NaT),
+            ),
+            "signal_information_timestamp": snapshot.get(
+                "signal_information_timestamp",
+                snapshot.get("information_timestamp", pd.NaT),
+            ),
+            "signal_timing_status": snapshot.get(
+                "signal_timing_status",
+                snapshot.get("timing_status", pd.NA),
+            ),
+            "data_vintage_status": snapshot.get(
+                "data_vintage_status", "latest_revised_non_vintage"
+            ),
+            "retrieved_at": snapshot.get("retrieved_at", pd.NaT),
+            "series_lineage": snapshot.get("series_lineage", {}),
+            "historical_population_policy": "observed_only",
             "analog_group": analog_group,
             "conditioning_signal_date": date_label(
                 snapshot.get("reference_month", snapshot["date"])
             ),
-            "conditioning_signal_date_semantics": (
-                REFERENCE_MONTH_COMPATIBILITY_SEMANTICS
-            ),
+            "conditioning_signal_date_semantics": (REFERENCE_MONTH_COMPATIBILITY_SEMANTICS),
             "conditioning_reference_month": date_label(
                 snapshot.get("reference_month", snapshot["date"])
             ),
@@ -515,7 +586,9 @@ def _historical_analog_table(
                         "market_variable": variable,
                         "count": count,
                         "avg_market_change_bp": float(changes.mean()) if count else float("nan"),
-                        "median_market_change_bp": float(changes.median()) if count else float("nan"),
+                        "median_market_change_bp": float(changes.median())
+                        if count
+                        else float("nan"),
                         "weak_evidence": count < WEAK_EVIDENCE_MIN_COUNT,
                         "evidence_note": _weak_evidence_note(count),
                     }
@@ -527,22 +600,39 @@ def _historical_analog_table(
 def _historical_analog_lines(analogs: pd.DataFrame) -> tuple[str, ...]:
     if analogs.empty:
         return ("No historical analog table is available for the current regime/pressure state.",)
-    group_name = str(analogs["analog_group"].iloc[0])
-    reference_month = str(analogs["conditioning_reference_month"].iloc[0])
-    information_timestamp = str(
-        analogs["conditioning_information_timestamp"].iloc[0]
-    )
-    timing_status = str(analogs["conditioning_timing_status"].iloc[0])
-    counts = pd.to_numeric(analogs["future_inflation_count"], errors="coerce").dropna()
-    weak_rows = int(analogs["weak_evidence"].fillna(False).astype(bool).sum())
     lines = [
-        f"Observed-only analog conditioning reference month {reference_month}: {group_name}.",
-        f"Conditioning information timestamp {information_timestamp}; timing status {timing_status}.",
-        f"Future CPI and epsilon changes are summarized across {int(counts.max()) if len(counts) else 0} "
-        "matching historical reference months at the richest horizon sample.",
+        "Historical analog populations and outcomes are observed-only; an estimated current "
+        "scenario is used only as the conditioning key."
     ]
-    if weak_rows:
-        lines.append(f"{weak_rows} analog-market rows are weak evidence with fewer than 30 observations.")
+    if "scenario_id" in analogs.columns and analogs["scenario_id"].notna().any():
+        scenario_order = {"low": 0, "base": 1, "high": 2}
+        scenario_groups = sorted(
+            analogs.loc[analogs["scenario_id"].notna()].groupby("scenario_id"),
+            key=lambda item: scenario_order.get(str(item[0]), 99),
+        )
+    else:
+        scenario_groups = [("observed", analogs)]
+
+    for scenario_id, scenario_rows in scenario_groups:
+        group_name = str(scenario_rows["analog_group"].iloc[0])
+        reference_month = str(scenario_rows["conditioning_reference_month"].iloc[0])
+        information_timestamp = str(scenario_rows["conditioning_information_timestamp"].iloc[0])
+        timing_status = str(scenario_rows["conditioning_timing_status"].iloc[0])
+        counts = pd.to_numeric(
+            scenario_rows["future_inflation_count"],
+            errors="coerce",
+        ).dropna()
+        weak_rows = int(scenario_rows["weak_evidence"].fillna(False).astype(bool).sum())
+        lines.append(
+            f"{scenario_id} conditioning at reference month {reference_month}: "
+            f"{group_name}; richest-horizon historical count "
+            f"{int(counts.max()) if len(counts) else 0}; information timestamp "
+            f"{information_timestamp}; timing status {timing_status}."
+        )
+        if weak_rows:
+            lines.append(
+                f"{scenario_id}: {weak_rows} analog-market rows have fewer than 30 observations."
+            )
     return tuple(lines)
 
 
@@ -556,7 +646,11 @@ def _market_summary(
         "Nominal yields, breakevens, and real yields represent different macro channels.",
         "Market linkage is descriptive history; it is not a live trading signal.",
     ]
-    if market_monthly is None or market_monthly.empty or not available_market_variables(market_monthly):
+    if (
+        market_monthly is None
+        or market_monthly.empty
+        or not available_market_variables(market_monthly)
+    ):
         return (
             tuple(
                 [
@@ -626,12 +720,8 @@ def _market_summary(
         for timing in tables.timing_summary.to_dict(orient="records"):
             first_timestamp = timing.get("first_market_origin_timestamp")
             latest_timestamp = timing.get("latest_market_origin_timestamp")
-            first_observation_date = timing.get(
-                "first_market_origin_observation_date"
-            )
-            latest_observation_date = timing.get(
-                "latest_market_origin_observation_date"
-            )
+            first_observation_date = timing.get("first_market_origin_observation_date")
+            latest_observation_date = timing.get("latest_market_origin_observation_date")
             if pd.notna(first_timestamp):
                 first_origin = timestamp_label(first_timestamp)
                 latest_origin = timestamp_label(latest_timestamp)
@@ -677,7 +767,9 @@ def _market_summary(
         )
     lines.append("All CPI and market FRED values remain latest-revised and non-vintage.")
     if weak:
-        lines.append(f"{weak} market-linkage rows are weak evidence with fewer than 30 observations.")
+        lines.append(
+            f"{weak} market-linkage rows are weak evidence with fewer than 30 observations."
+        )
     return tuple(lines), channel_summary, series_timing_summary
 
 
@@ -694,25 +786,34 @@ def _current_regime_section(
 
     measure = INFLATION_MEASURES[HEADLINE_INFLATION_MEASURE]
     official_level_col = (
-        measure.observed_level_col if measure.observed_level_col in raw.columns else measure.level_col
+        measure.observed_level_col
+        if measure.observed_level_col in raw.columns
+        else measure.level_col
     )
     latest_cpi_observation = latest_valid_observation_date(raw, official_level_col)
     latest_cpi_yoy = latest_valid_observation_date(raw, "inflation_yoy")
-    raw_end = pd.to_datetime(raw["date"].max()).date() if "date" in raw.columns and not raw.empty else "unknown"
-    imputation_applied = bool(snapshot.get("uses_imputed_input", False))
-    pressure = validation_mod.pressure_label(str(snapshot.get("term_structure", "mixed")))
+    raw_end = (
+        pd.to_datetime(raw["date"].max()).date()
+        if "date" in raw.columns and not raw.empty
+        else "unknown"
+    )
+    imputation_applied = bool(
+        snapshot.get("uses_estimated_input", snapshot.get("uses_imputed_input", False))
+    )
+    pressure = str(
+        snapshot.get(
+            "pressure",
+            validation_mod.pressure_label(str(snapshot.get("term_structure", "mixed"))),
+        )
+    )
     table = pd.DataFrame(
         [
             {
                 "latest_valid_signal_date": date_label(
                     snapshot.get("reference_month", snapshot["date"])
                 ),
-                "latest_valid_signal_date_semantics": (
-                    REFERENCE_MONTH_COMPATIBILITY_SEMANTICS
-                ),
-                "reference_month": date_label(
-                    snapshot.get("reference_month", snapshot["date"])
-                ),
+                "latest_valid_signal_date_semantics": (REFERENCE_MONTH_COMPATIBILITY_SEMANTICS),
+                "reference_month": date_label(snapshot.get("reference_month", snapshot["date"])),
                 "release_timestamp": timestamp_label(snapshot.get("release_timestamp")),
                 "information_timestamp": timestamp_label(snapshot.get("information_timestamp")),
                 "release_timestamp_provenance": snapshot.get(
@@ -747,7 +848,32 @@ def _current_regime_section(
                 "latest_valid_cpi_yoy_date": date_label(latest_cpi_yoy),
                 "cpi_imputation_applied": imputation_applied,
                 "imputation_policy": snapshot.get("imputation_policy", "unspecified"),
+                "scenario_id": snapshot.get("scenario_id", pd.NA),
+                "estimate_method": snapshot.get("estimate_method", pd.NA),
+                "estimated_reference_month": snapshot.get("estimated_reference_month", pd.NaT),
+                "estimate_value": snapshot.get("estimate_value", float("nan")),
+                "estimated_input_months": snapshot.get("estimated_input_months", ()),
+                "calibration_policy": snapshot.get("calibration_policy", pd.NA),
+                "historical_population_policy": snapshot.get(
+                    "historical_population_policy", "observed_only"
+                ),
+                "ex_post_status": snapshot.get("ex_post_status", pd.NA),
+                "lookahead_status": snapshot.get("lookahead_status", pd.NA),
+                "signal_reference_month": snapshot.get(
+                    "signal_reference_month",
+                    snapshot.get("reference_month", pd.NaT),
+                ),
+                "signal_information_timestamp": snapshot.get(
+                    "signal_information_timestamp",
+                    snapshot.get("information_timestamp", pd.NaT),
+                ),
+                "signal_timing_status": snapshot.get(
+                    "signal_timing_status",
+                    snapshot.get("timing_status", pd.NA),
+                ),
+                "series_lineage": snapshot.get("series_lineage", {}),
                 "current_signal_uses_imputed_input": imputation_applied,
+                "current_signal_uses_estimated_input": imputation_applied,
                 "current_signal_observed_only_eligible": bool(
                     snapshot.get("observed_only_eligible", True)
                 ),
@@ -794,7 +920,10 @@ def _watchlist(raw: pd.DataFrame, featured: pd.DataFrame, baseline_method: str) 
             f"Next PCE update: confirm whether FRED PCE inflation advances beyond {date_label(latest_pce)}.",
         )
     else:
-        lines.insert(1, "Next PCE update: monitor availability; selected data do not currently expose PCE YoY.")
+        lines.insert(
+            1,
+            "Next PCE update: monitor availability; selected data do not currently expose PCE YoY.",
+        )
     if threshold is not None and snapshot.get("available"):
         direction = "below" if float(snapshot["tinf_4m"]) > 0 else "above"
         lines.append(
@@ -810,6 +939,7 @@ def _caveats(
     macro_status: object | None,
     market_status: object | None,
     signal_notice: str | None,
+    scenario_applicable: bool,
 ) -> tuple[str, ...]:
     meta = BASELINE_META[baseline_method]
     caveats = [
@@ -817,10 +947,6 @@ def _caveats(
         "TINF/regime is an interpretable inflation-regime diagnostic and should not be treated as robustly beating AR(1) as a CPI point-forecast model unless the benchmark tables show that across settings.",
         "Market linkage is descriptive and may not hold out of sample.",
         "Some regime and market buckets may have small sample sizes; rows below 30 observations are flagged as weak evidence.",
-        "Live-snapshot regime labels and historical walk-forward validation labels are related "
-        "but not identical: historical validation uses walk-forward thresholds while the live "
-        "snapshot uses the current configured signal context, so historical analogs are "
-        "historical comparisons, not exact regime-identity matches.",
         "Full-sample baselines are ex-post / paper-style and are not row-lookahead-safe.",
         "Data freshness matters; report the latest CPI reference month separately from any "
         "trustworthy signal information timestamp.",
@@ -836,6 +962,21 @@ def _caveats(
         f"Macro data source used: {_status_get(macro_status, 'data_source_used', 'unknown')}; "
         f"market data source used: {_status_get(market_status, 'market_data_source_used', 'unknown')}.",
     ]
+    if scenario_applicable:
+        caveats.insert(
+            4,
+            "Current scenario classifications use thresholds calibrated only from prior "
+            "observed-only eligible history and therefore match the walk-forward threshold "
+            "discipline used for historical labels. Historical analog populations remain "
+            "observed-only.",
+        )
+    else:
+        caveats.insert(
+            4,
+            "Missing-October-2025 CPI scenarios are not applicable to this sample; "
+            "current and historical report evidence remain observed-only, and historical "
+            "classification uses row-lookahead-safe walk-forward labels.",
+        )
     if signal_notice:
         caveats.append(signal_notice)
     else:
@@ -859,22 +1000,165 @@ def build_macro_research_report(
     robustness_inflation_measures: tuple[str, ...] = DEFAULT_REPORT_INFLATION_MEASURES,
     current_raw: pd.DataFrame | None = None,
     current_featured: pd.DataFrame | None = None,
+    current_monitoring: CurrentMonitoringBundle | None = None,
 ) -> MacroResearchReport:
     """Build the report with separate current-monitoring and research authorities."""
 
-    if "imputation_policy" in raw.columns:
-        research_policies = set(raw["imputation_policy"].dropna().astype(str))
-        if research_policies and research_policies != {"observed_only"}:
-            raise ValueError("Macro report research inputs must use observed_only data")
+    _require_observed_only_authority(raw, label="Macro report research inputs")
+    _require_observed_only_authority(
+        featured,
+        label="Macro report historical evidence",
+    )
 
     current_raw = raw if current_raw is None else current_raw
     current_featured = featured if current_featured is None else current_featured
-    current_snapshot = latest_signal_snapshot(current_featured)
-    research_snapshot = latest_signal_snapshot(featured)
+    scenario_status = "not_provided"
+    scenario_reason: str | None = None
+    scenario_lineage: Mapping[str, object] = {}
+    if current_monitoring is None:
+        _require_observed_only_authority(
+            current_raw,
+            label="Macro report current fallback without a scenario bundle",
+        )
+        _require_observed_only_authority(
+            current_featured,
+            label="Macro report current fallback without a scenario bundle",
+        )
+        current_snapshot = latest_signal_snapshot(current_featured)
+        if bool(
+            current_snapshot.get(
+                "uses_estimated_input",
+                current_snapshot.get("uses_imputed_input", False),
+            )
+        ):
+            raise ValueError(
+                "Macro report current fallback without a scenario bundle cannot "
+                "use estimated CPI inputs"
+            )
+        scenario_snapshots: dict[str, dict[str, object]] = {
+            "observed": current_snapshot,
+        }
+        current_scenario_table = pd.DataFrame()
+        stability_values = {
+            "regime_stable": False,
+            "pressure_stable": False,
+            "fully_stable": False,
+            "scenario_sensitive": False,
+            "unavailable": not bool(current_snapshot.get("available", False)),
+            "not_applicable": True,
+        }
+        historical_endpoint = _complete_observed_signal_endpoint(featured)
+    else:
+        scenario_status = current_monitoring.status
+        scenario_reason = current_monitoring.reason
+        scenario_lineage = current_monitoring.to_dict()
+        current_raw = current_monitoring.base.raw
+        current_featured = current_monitoring.base.featured
+        current_snapshot = current_monitoring.base.snapshot
+        scenario_snapshots = (
+            {
+                scenario_id: view.snapshot
+                for scenario_id, view in current_monitoring.scenarios.items()
+            }
+            if current_monitoring.applicable
+            else {"observed": current_snapshot}
+        )
+        current_scenario_table = current_monitoring.scenario_table()
+        stability_values = {
+            "regime_stable": current_monitoring.stability.regime_stable,
+            "pressure_stable": current_monitoring.stability.pressure_stable,
+            "fully_stable": current_monitoring.stability.fully_stable,
+            "scenario_sensitive": current_monitoring.stability.scenario_sensitive,
+            "unavailable": current_monitoring.stability.unavailable,
+            "not_applicable": current_monitoring.stability.not_applicable,
+        }
+        historical_endpoint = current_monitoring.historical_evidence_endpoint
     if not current_snapshot.get("available"):
+        unavailable_uses_estimate = bool(
+            current_snapshot.get(
+                "uses_estimated_input",
+                current_snapshot.get("uses_imputed_input", False),
+            )
+        )
+        unavailable_reference_value = current_snapshot.get(
+            "reference_month",
+            current_snapshot.get("date", pd.NaT),
+        )
+        unavailable_reference_month = date_label(unavailable_reference_value)
+        unavailable_information_timestamp = timestamp_label(
+            current_snapshot.get("information_timestamp", pd.NaT)
+        )
+        unavailable_timing_value = current_snapshot.get("timing_status", pd.NA)
+        unavailable_timing_status = (
+            str(unavailable_timing_value) if pd.notna(unavailable_timing_value) else None
+        )
+        unavailable_lineage = pd.DataFrame(
+            [
+                {
+                    "section": "current_regime_headline_watchlist",
+                    "input_policy": "unavailable_current_scenario_bundle",
+                    "scenario_status": scenario_status,
+                    "scenario_reason": scenario_reason,
+                    "estimated_inputs_allowed": unavailable_uses_estimate,
+                    "population_estimated_inputs_allowed": False,
+                    "conditioning_estimated_inputs_allowed": unavailable_uses_estimate,
+                    "reference_month": unavailable_reference_month,
+                    "historical_population_policy": "observed_only",
+                    "endpoint_semantics": "unavailable current monitoring reference month",
+                    "data_source_used": _status_get(
+                        macro_status,
+                        "data_source_used",
+                        "unknown",
+                    ),
+                    "cache_file_used": _status_get(
+                        macro_status,
+                        "cache_file_used",
+                        pd.NA,
+                    ),
+                    "sample_mode": sample_mode,
+                    "baseline_method": baseline_method,
+                    "ex_post_status": current_snapshot.get(
+                        "ex_post_status",
+                        pd.NA,
+                    ),
+                    "lookahead_status": current_snapshot.get(
+                        "lookahead_status",
+                        pd.NA,
+                    ),
+                    "signal_reference_month": current_snapshot.get(
+                        "signal_reference_month",
+                        unavailable_reference_value,
+                    ),
+                    "signal_information_timestamp": current_snapshot.get(
+                        "signal_information_timestamp",
+                        current_snapshot.get("information_timestamp", pd.NaT),
+                    ),
+                    "signal_timing_status": current_snapshot.get(
+                        "signal_timing_status",
+                        unavailable_timing_value,
+                    ),
+                    "data_vintage_status": current_snapshot.get(
+                        "data_vintage_status",
+                        "latest_revised_non_vintage",
+                    ),
+                    "retrieved_at": current_snapshot.get("retrieved_at", pd.NaT),
+                    "series_lineage": current_snapshot.get("series_lineage", {}),
+                }
+            ]
+        )
         return MacroResearchReport(
             available=False,
             reason=current_snapshot.get("reason", "No complete current signal is available."),
+            as_of=unavailable_reference_month,
+            reference_month=unavailable_reference_month,
+            information_timestamp=unavailable_information_timestamp,
+            timing_status=unavailable_timing_status,
+            current_scenario_table=current_scenario_table,
+            scenario_stability=stability_values,
+            scenario_status=scenario_status,
+            scenario_reason=scenario_reason,
+            scenario_lineage=scenario_lineage,
+            section_lineage=unavailable_lineage,
         )
 
     current_lines, current_table = _current_regime_section(
@@ -885,6 +1169,23 @@ def build_macro_research_report(
         sample_mode,
         macro_status,
     )
+    if current_monitoring is not None and current_monitoring.applicable:
+        scenario_lines = tuple(
+            f"{scenario_id}: TINF 4M {float(snapshot['tinf_4m']):+.2f}pp, "
+            f"regime '{snapshot['regime']}', pressure '{snapshot['pressure']}'."
+            for scenario_id, snapshot in scenario_snapshots.items()
+            if snapshot.get("available")
+        )
+        current_lines = (
+            *current_lines,
+            f"Scenario stability: {current_monitoring.stability.label}; regime "
+            f"stable={current_monitoring.stability.regime_stable}; pressure "
+            f"stable={current_monitoring.stability.pressure_stable}.",
+            "The complete observed-only TINF/pressure signal ends "
+            f"{date_label(historical_endpoint)} and excludes estimated CPI inputs; "
+            "scored evidence endpoints vary by horizon.",
+            *scenario_lines,
+        )
     benchmark_metrics, benchmark_comparisons = _benchmark_tables(
         featured,
         horizons=benchmark_horizons,
@@ -893,6 +1194,11 @@ def build_macro_research_report(
     signal_confidence_lines = _benchmark_lines(benchmark_comparisons)
 
     robust_frames = robustness_sample_frames or {sample_mode: raw}
+    for frame_name, robust_frame in robust_frames.items():
+        _require_observed_only_authority(
+            robust_frame,
+            label=f"Macro report robustness frame '{frame_name}'",
+        )
     availability, robustness_verdict, robustness_win_rates = _robustness_tables(
         robust_frames,
         baselines=robustness_baselines,
@@ -904,13 +1210,18 @@ def build_macro_research_report(
         availability,
     )
 
-    analogs = _historical_analog_table(
-        featured,
-        research_snapshot,
-        market_monthly=market_monthly,
-        horizons=market_horizons,
-        threshold_pp=threshold_pp,
-    )
+    analog_frames = [
+        _historical_analog_table(
+            featured,
+            snapshot,
+            market_monthly=market_monthly,
+            horizons=market_horizons,
+            threshold_pp=threshold_pp,
+        )
+        for snapshot in scenario_snapshots.values()
+        if snapshot.get("available")
+    ]
+    analogs = pd.concat(analog_frames, ignore_index=True) if analog_frames else pd.DataFrame()
     analog_lines = _historical_analog_lines(analogs)
     market_lines, market_summary, market_series_timing_summary = _market_summary(
         featured,
@@ -918,22 +1229,136 @@ def build_macro_research_report(
         horizons=market_horizons,
     )
     signal_notice = current_signal_imputation_notice(current_snapshot)
-    reference_month = date_label(
-        current_snapshot.get("reference_month", current_snapshot["date"])
-    )
-    information_timestamp = timestamp_label(
-        current_snapshot.get("information_timestamp")
-    )
-    timing_status = str(
-        current_snapshot.get("timing_status", "reference_month_only")
-    )
+    reference_month = date_label(current_snapshot.get("reference_month", current_snapshot["date"]))
+    information_timestamp = timestamp_label(current_snapshot.get("information_timestamp"))
+    timing_status = str(current_snapshot.get("timing_status", "reference_month_only"))
     as_of = reference_month
-    headline = (
-        f"CPI reference month {as_of}: {current_snapshot['regime']} inflation regime, "
-        f"short-term pressure "
-        f"{validation_mod.pressure_label(str(current_snapshot.get('term_structure', 'mixed')))}, "
-        f"TINF 4M {float(current_snapshot['tinf_4m']):+.2f}pp."
+    if current_monitoring is None or not current_monitoring.applicable:
+        headline = (
+            f"CPI reference month {as_of}: observed-only regime "
+            f"{current_snapshot['regime']}, pressure "
+            f"{current_snapshot.get('pressure', 'mixed')}, TINF 4M "
+            f"{float(current_snapshot['tinf_4m']):+.2f}pp. Missing-CPI "
+            "scenarios are not applicable to this sample."
+        )
+    elif stability_values["unavailable"]:
+        headline = (
+            f"CPI reference month {as_of}: at least one required current scenario "
+            "is unavailable, so no stable classification is reported."
+        )
+    elif stability_values["fully_stable"]:
+        headline = (
+            f"CPI reference month {as_of}: regime {current_snapshot['regime']} and "
+            f"pressure {current_snapshot.get('pressure', 'mixed')} are stable across "
+            f"low/base/high; base TINF 4M {float(current_snapshot['tinf_4m']):+.2f}pp."
+        )
+    else:
+        classifications = ", ".join(
+            f"{scenario_id}={snapshot.get('regime')}/{snapshot.get('pressure')}"
+            for scenario_id, snapshot in scenario_snapshots.items()
+        )
+        headline = (
+            f"CPI reference month {as_of}: scenario-sensitive classification "
+            f"({classifications}); no modal regime is reported."
+        )
+
+    scenario_conditioning = bool(current_monitoring is not None and current_monitoring.applicable)
+    section_lineage = pd.DataFrame(
+        [
+            {
+                "section": "current_regime_headline_watchlist",
+                "input_policy": (
+                    "low_base_high_current_monitoring_scenarios"
+                    if scenario_conditioning
+                    else "observed_only"
+                ),
+                "estimated_inputs_allowed": scenario_conditioning,
+                "population_estimated_inputs_allowed": pd.NA,
+                "conditioning_estimated_inputs_allowed": scenario_conditioning,
+                "reference_month": reference_month,
+                "historical_population_policy": "observed_only",
+                "endpoint_semantics": "current monitoring reference month",
+            },
+            {
+                "section": "historical_analogs",
+                "input_policy": (
+                    "observed_only_population_scenario_conditioning"
+                    if scenario_conditioning
+                    else "observed_only"
+                ),
+                "estimated_inputs_allowed": scenario_conditioning,
+                "population_estimated_inputs_allowed": False,
+                "conditioning_estimated_inputs_allowed": scenario_conditioning,
+                "reference_month": date_label(historical_endpoint),
+                "historical_population_policy": "observed_only",
+                "endpoint_semantics": (
+                    "latest complete observed-only signal origin; outcome endpoints vary by horizon"
+                ),
+            },
+            {
+                "section": "benchmarks_robustness_market_linkage",
+                "input_policy": "observed_only",
+                "estimated_inputs_allowed": False,
+                "population_estimated_inputs_allowed": False,
+                "conditioning_estimated_inputs_allowed": False,
+                "reference_month": date_label(historical_endpoint),
+                "historical_population_policy": "observed_only",
+                "endpoint_semantics": (
+                    "complete observed-only signal endpoint; each score/linkage table "
+                    "retains its own horizon-specific endpoint"
+                ),
+            },
+        ]
     )
+    section_lineage["data_source_used"] = _status_get(
+        macro_status,
+        "data_source_used",
+        "unknown",
+    )
+    section_lineage["cache_file_used"] = _status_get(
+        macro_status,
+        "cache_file_used",
+        pd.NA,
+    )
+    section_lineage["scenario_status"] = scenario_status
+    section_lineage["scenario_reason"] = scenario_reason
+    section_lineage["sample_mode"] = sample_mode
+    section_lineage["baseline_method"] = baseline_method
+    section_lineage["ex_post_status"] = current_snapshot.get("ex_post_status", pd.NA)
+    section_lineage["lookahead_status"] = current_snapshot.get("lookahead_status", pd.NA)
+    section_lineage["signal_reference_month"] = current_snapshot.get(
+        "signal_reference_month",
+        current_snapshot.get("reference_month", pd.NaT),
+    )
+    section_lineage["signal_information_timestamp"] = current_snapshot.get(
+        "signal_information_timestamp",
+        current_snapshot.get("information_timestamp", pd.NaT),
+    )
+    section_lineage["signal_timing_status"] = current_snapshot.get(
+        "signal_timing_status",
+        current_snapshot.get("timing_status", pd.NA),
+    )
+    section_lineage["data_vintage_status"] = current_snapshot.get(
+        "data_vintage_status", "latest_revised_non_vintage"
+    )
+    section_lineage["retrieved_at"] = current_snapshot.get("retrieved_at", pd.NaT)
+    section_lineage["series_lineage"] = [
+        current_snapshot.get("series_lineage", {}) for _ in range(len(section_lineage))
+    ]
+    watchlist = _watchlist(current_raw, current_featured, baseline_method)
+    if current_monitoring is not None and current_monitoring.applicable:
+        watchlist = (
+            *watchlist,
+            "The numerical next-print threshold uses the base scenario; compare low/high "
+            "before treating it as robust.",
+            f"Missing-CPI classification status: {current_monitoring.stability.label}.",
+        )
+    elif current_monitoring is not None:
+        watchlist = (
+            *watchlist,
+            "Missing-October-2025 CPI scenarios are not applicable to this sample; "
+            "the report remains observed-only.",
+        )
 
     return MacroResearchReport(
         available=True,
@@ -954,9 +1379,16 @@ def build_macro_research_report(
             macro_status=macro_status,
             market_status=market_status,
             signal_notice=signal_notice,
+            scenario_applicable=scenario_conditioning,
         ),
-        watchlist=_watchlist(current_raw, current_featured, baseline_method),
+        watchlist=watchlist,
         current_regime_table=current_table,
+        current_scenario_table=current_scenario_table,
+        scenario_stability=stability_values,
+        scenario_status=scenario_status,
+        scenario_reason=scenario_reason,
+        scenario_lineage=scenario_lineage,
+        section_lineage=section_lineage,
         benchmark_metrics=benchmark_metrics,
         benchmark_comparisons=benchmark_comparisons,
         robustness_verdict=robustness_verdict,

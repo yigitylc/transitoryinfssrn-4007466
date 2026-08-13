@@ -11,17 +11,17 @@ did the approved FRED rate instruments historically do over the next
 the current bucket and exposing the forward-change distribution plus the analog
 months behind it.
 
-The current bucket is taken from row-lookahead-safe walk-forward labels
-(``historical_regime`` / ``historical_short_term_pressure``), NOT from
-``features.latest_signal_snapshot``'s full-sample (ex-post) regime, so the
-current state is matched against history in the same label space and
-methodology.
+The current query bucket is supplied by the approved low/base/high
+current-monitoring snapshots, whose classifications use thresholds calibrated
+only from strictly prior observed-only eligible history. The query is matched
+against the historical walk-forward label population only after the canonical
+observed-only eligibility gate has excluded estimated or imputed rows.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import pandas as pd
 
@@ -32,6 +32,7 @@ from .data import (
     TIMING_STATUS_RELEASE_ALIGNED,
     _has_explicit_timezone,
 )
+from .features import observed_only_historical_eligibility
 from .market_data import MARKET_VALUE_COLUMNS
 from .market_linkage import (
     DEFAULT_MARKET_LINKAGE_HORIZONS,
@@ -69,6 +70,47 @@ class CurrentBucket:
     as_of_semantics: str = REFERENCE_MONTH_COMPATIBILITY_SEMANTICS
     regime_count: int = 0
     regime_pressure_count: int = 0
+    scenario_id: str | None = None
+    estimate_method: str | None = None
+    estimated_reference_month: pd.Timestamp | None = None
+    estimate_value: float | None = None
+    estimate_available_at: object | None = None
+    estimate_availability_basis: str | None = None
+    uses_estimated_input: bool = False
+    uses_imputed_input: bool = False
+    estimated_input_months: tuple[str, ...] = ()
+    calibration_policy: str | None = None
+    data_vintage_status: str | None = None
+    retrieved_at: object | None = None
+    sample_mode: str | None = None
+    baseline_method: str | None = None
+    ex_post_status: str | None = None
+    lookahead_status: str | None = None
+    classification_status: str | None = None
+    series_lineage: Mapping[str, object] = field(default_factory=dict)
+    historical_population_policy: str = "observed_only"
+    historical_evidence_endpoint: pd.Timestamp | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-compatible in-memory export of the bucket lineage."""
+
+        def normalize(value: object) -> object:
+            if isinstance(value, Mapping):
+                return {str(key): normalize(item) for key, item in value.items()}
+            if isinstance(value, (tuple, list)):
+                return [normalize(item) for item in value]
+            if isinstance(value, pd.Timestamp):
+                return None if pd.isna(value) else value.isoformat()
+            if value is None or value is pd.NA:
+                return None
+            try:
+                if bool(pd.isna(value)):
+                    return None
+            except (TypeError, ValueError):
+                pass
+            return value
+
+        return normalize(asdict(self))  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)
@@ -87,13 +129,37 @@ class TraderResearchView:
 
 
 def _ensure_walk_forward_labels(df: pd.DataFrame) -> pd.DataFrame:
-    """Add row-lookahead-safe walk-forward labels if they are not already present."""
+    """Recompute labels when canonical eligibility invalidates any source row."""
 
     out = df
-    if REGIME_COL not in out.columns:
+    recompute = not observed_only_historical_eligibility(out).all()
+    if recompute or REGIME_COL not in out.columns:
         out = add_walk_forward_regime_labels(out)
-    if PRESSURE_COL not in out.columns:
+    if recompute or PRESSURE_COL not in out.columns:
         out = add_short_term_pressure_labels(out)
+    return out
+
+
+def _mask_ineligible_historical_signals(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep calendar rows but blank signals rejected by the canonical gate."""
+
+    out = df.copy()
+    eligible = observed_only_historical_eligibility(out)
+    out["signal_observed_only_eligible"] = eligible
+    signal_columns = [
+        column
+        for column in out.columns
+        if column in {"inflation_yoy", "baseline", "epsilon"}
+        or (
+            column.startswith("tinf_")
+            and "_uses_" not in column
+            and column != "tinf_term_structure"
+        )
+    ]
+    if signal_columns:
+        out.loc[~eligible, signal_columns] = float("nan")
+    if "tinf_term_structure" in out.columns:
+        out.loc[~eligible, "tinf_term_structure"] = pd.NA
     return out
 
 
@@ -129,9 +195,7 @@ def _bucket_timing(latest: pd.Series) -> tuple[pd.Timestamp | None, str]:
         if not dependency_used:
             continue
         timestamp_value = latest.get(timestamp_column, pd.NaT)
-        status_value = str(
-            latest.get(status_column, TIMING_STATUS_REFERENCE_MONTH_ONLY)
-        )
+        status_value = str(latest.get(status_column, TIMING_STATUS_REFERENCE_MONTH_ONLY))
         provenance_value = str(latest.get(provenance_column, ""))
         dependency_exact = (
             status_value == TIMING_STATUS_RELEASE_ALIGNED
@@ -143,9 +207,7 @@ def _bucket_timing(latest: pd.Series) -> tuple[pd.Timestamp | None, str]:
             dependency_timestamps.append(pd.Timestamp(timestamp_value))
 
     if not dependency_metadata_present:
-        incoming_status = str(
-            latest.get("timing_status", TIMING_STATUS_REFERENCE_MONTH_ONLY)
-        )
+        incoming_status = str(latest.get("timing_status", TIMING_STATUS_REFERENCE_MONTH_ONLY))
         if not generic_exact:
             return None, incoming_status
         return pd.Timestamp(information_value), TIMING_STATUS_RELEASE_ALIGNED
@@ -169,8 +231,9 @@ def latest_walk_forward_bucket(df: pd.DataFrame) -> CurrentBucket:
     if df is None or df.empty or "tinf_4m" not in df.columns:
         return CurrentBucket(available=False, reason="No signal frame is available.")
 
-    labeled = _ensure_walk_forward_labels(df)
-    valid = labeled[REGIME_COL].notna() & labeled[PRESSURE_COL].notna()
+    labeled = _ensure_walk_forward_labels(_mask_ineligible_historical_signals(df))
+    eligible = observed_only_historical_eligibility(labeled)
+    valid = eligible & labeled[REGIME_COL].notna() & labeled[PRESSURE_COL].notna()
     if not valid.any():
         return CurrentBucket(
             available=False,
@@ -191,12 +254,10 @@ def latest_walk_forward_bucket(df: pd.DataFrame) -> CurrentBucket:
         latest.get("date", pd.NaT),
     )
     reference_month = (
-        pd.Timestamp(reference_month_value)
-        if pd.notna(reference_month_value)
-        else None
+        pd.Timestamp(reference_month_value) if pd.notna(reference_month_value) else None
     )
     information_timestamp, timing_status = _bucket_timing(latest)
-    regime_mask = labeled[REGIME_COL] == regime
+    regime_mask = eligible & labeled[REGIME_COL].eq(regime)
     return CurrentBucket(
         available=True,
         regime=regime,
@@ -207,6 +268,152 @@ def latest_walk_forward_bucket(df: pd.DataFrame) -> CurrentBucket:
         as_of=reference_month,
         regime_count=int(regime_mask.sum()),
         regime_pressure_count=int((regime_mask & (labeled[PRESSURE_COL] == pressure)).sum()),
+    )
+
+
+def current_bucket_from_snapshot(
+    snapshot: Mapping[str, object],
+    observed_history: pd.DataFrame,
+) -> CurrentBucket:
+    """Map one scenario snapshot to a strict observed historical population.
+
+    The candidate regime/pressure is supplied by the current scenario snapshot,
+    whose thresholds were calibrated separately. This function only supplies
+    the comparable historical counts and refuses estimated historical inputs.
+    """
+
+    series_lineage_value = snapshot.get("series_lineage", {})
+    series_lineage = series_lineage_value if isinstance(series_lineage_value, Mapping) else {}
+    headline_lineage_value = series_lineage.get("headline_cpi", {})
+    headline_lineage = headline_lineage_value if isinstance(headline_lineage_value, Mapping) else {}
+    input_months = snapshot.get("estimated_input_months", ())
+    if not isinstance(input_months, tuple):
+        input_months = tuple(input_months) if input_months else ()
+    estimated_reference_value = snapshot.get(
+        "estimated_reference_month",
+        headline_lineage.get("missing_reference_month", pd.NaT),
+    )
+    estimated_reference_month = (
+        pd.Timestamp(estimated_reference_value) if pd.notna(estimated_reference_value) else None
+    )
+    estimate_value = snapshot.get(
+        "estimate_value",
+        headline_lineage.get("estimate_value", float("nan")),
+    )
+    estimate_value_out = float(estimate_value) if pd.notna(estimate_value) else None
+    scenario_id = (
+        str(snapshot["scenario_id"]) if pd.notna(snapshot.get("scenario_id", pd.NA)) else None
+    )
+    reference_value = snapshot.get("reference_month", snapshot.get("date", pd.NaT))
+    reference_month = pd.Timestamp(reference_value) if pd.notna(reference_value) else None
+    information_value = snapshot.get("information_timestamp", pd.NaT)
+    information_timestamp = pd.Timestamp(information_value) if pd.notna(information_value) else None
+    timing_value = snapshot.get("timing_status", pd.NA)
+    timing_status = str(timing_value) if pd.notna(timing_value) else None
+    snapshot_timing_kwargs: dict[str, object] = {
+        "reference_month": reference_month,
+        "information_timestamp": information_timestamp,
+        "timing_status": timing_status,
+        "as_of": reference_month,
+    }
+    lineage_kwargs: dict[str, object] = {
+        "scenario_id": scenario_id,
+        "estimate_method": (
+            str(snapshot["estimate_method"])
+            if pd.notna(snapshot.get("estimate_method", pd.NA))
+            else (
+                str(headline_lineage["estimate_method"])
+                if pd.notna(headline_lineage.get("estimate_method", pd.NA))
+                else None
+            )
+        ),
+        "estimated_reference_month": estimated_reference_month,
+        "estimate_value": estimate_value_out,
+        "estimate_available_at": snapshot.get("estimate_available_at"),
+        "estimate_availability_basis": (
+            str(snapshot["estimate_availability_basis"])
+            if pd.notna(snapshot.get("estimate_availability_basis", pd.NA))
+            else None
+        ),
+        "uses_estimated_input": bool(snapshot.get("uses_estimated_input", False)),
+        "uses_imputed_input": bool(snapshot.get("uses_imputed_input", False)),
+        "estimated_input_months": input_months,
+        "calibration_policy": str(snapshot.get("calibration_policy", "unspecified")),
+        "data_vintage_status": str(
+            snapshot.get("data_vintage_status", "latest_revised_non_vintage")
+        ),
+        "retrieved_at": snapshot.get("retrieved_at"),
+        "sample_mode": (
+            str(snapshot["sample_mode"]) if pd.notna(snapshot.get("sample_mode", pd.NA)) else None
+        ),
+        "baseline_method": (
+            str(snapshot["baseline_method"])
+            if pd.notna(snapshot.get("baseline_method", pd.NA))
+            else None
+        ),
+        "ex_post_status": (
+            str(snapshot["ex_post_status"])
+            if pd.notna(snapshot.get("ex_post_status", pd.NA))
+            else None
+        ),
+        "lookahead_status": (
+            str(snapshot["lookahead_status"])
+            if pd.notna(snapshot.get("lookahead_status", pd.NA))
+            else None
+        ),
+        "classification_status": (
+            str(snapshot["classification_status"])
+            if pd.notna(snapshot.get("classification_status", pd.NA))
+            else None
+        ),
+        "series_lineage": series_lineage,
+    }
+
+    if not bool(snapshot.get("available", False)):
+        return CurrentBucket(
+            available=False,
+            reason=str(snapshot.get("reason", "Current scenario is unavailable.")),
+            **snapshot_timing_kwargs,
+            **lineage_kwargs,
+        )
+    if observed_history is None or observed_history.empty:
+        return CurrentBucket(
+            available=False,
+            reason="No observed-only historical population is available.",
+            **snapshot_timing_kwargs,
+            **lineage_kwargs,
+        )
+    labeled = _ensure_walk_forward_labels(_mask_ineligible_historical_signals(observed_history))
+    eligible = observed_only_historical_eligibility(labeled)
+    eligible_labels = eligible & labeled[REGIME_COL].notna() & labeled[PRESSURE_COL].notna()
+    if not eligible_labels.any():
+        return CurrentBucket(
+            available=False,
+            reason="No observed-only eligible historical population is available.",
+            **snapshot_timing_kwargs,
+            **lineage_kwargs,
+        )
+    regime = str(snapshot.get("regime"))
+    pressure = str(snapshot.get("pressure"))
+    regime_mask = eligible & labeled[REGIME_COL].eq(regime)
+    history_dates = pd.to_datetime(
+        labeled.loc[eligible_labels, "date"],
+        errors="coerce",
+    )
+    history_endpoint = pd.Timestamp(history_dates.max()) if not history_dates.empty else None
+    return CurrentBucket(
+        available=True,
+        regime=regime,
+        pressure=pressure,
+        reference_month=reference_month,
+        information_timestamp=information_timestamp,
+        timing_status=str(snapshot.get("timing_status", "reference_month_only")),
+        as_of=reference_month,
+        regime_count=int(regime_mask.sum()),
+        regime_pressure_count=int((regime_mask & labeled[PRESSURE_COL].eq(pressure)).sum()),
+        historical_population_policy="observed_only",
+        historical_evidence_endpoint=history_endpoint,
+        **lineage_kwargs,
     )
 
 
@@ -387,9 +594,7 @@ def build_trader_research_view(
 
     panel = tables.panel
     market_columns = tuple(
-        column
-        for column in MARKET_VALUE_COLUMNS
-        if panel is not None and column in panel.columns
+        column for column in MARKET_VALUE_COLUMNS if panel is not None and column in panel.columns
     )
     if not market_columns:
         return TraderResearchView(

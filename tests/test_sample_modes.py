@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -10,14 +11,20 @@ import pytest
 from transitory_inflation.config import DEFAULT_SAMPLE_MODE, SAMPLE_MODES, resolve_sample_mode
 from transitory_inflation.data import (
     BASE_FRED_SERIES,
+    CURRENT_MONITORING_ESTIMATE_METHODS,
+    CURRENT_MONITORING_SCENARIOS,
     FRED_API_URL,
     INFLATION_MEASURES,
     MACRO_CACHE_SCHEMA_COLUMN,
     MACRO_CACHE_SCHEMA_VERSION,
     RELEASE_TIMESTAMP_PROVENANCE_ACTUAL,
     TIMING_STATUS_RELEASE_ALIGNED,
+    VALUE_PROVENANCE_OFFICIAL_FRED,
+    VALUE_PROVENANCE_UNVERIFIED,
+    MacroDataLoadResult,
     apply_sample_mode,
     build_base_frame,
+    build_current_monitoring_scenario_frame,
     build_macro_cache_frame,
     find_cached_macro_data_file,
     latest_valid_observation_date,
@@ -31,6 +38,27 @@ from transitory_inflation.features import add_transitory_inflation_features, lat
 def _monthly_frame(start: str, end: str) -> pd.DataFrame:
     dates = pd.date_range(start, end, freq="ME")
     return pd.DataFrame({"date": dates, "value": np.arange(len(dates))})
+
+
+def _official_october_gap_raw(
+    start: str = "2014-01-31",
+    end: str = "2026-10-31",
+) -> pd.DataFrame:
+    dates = pd.date_range(start, end, freq="ME")
+    trend = np.arange(len(dates), dtype=float)
+    headline = 100.0 * (1.002**trend)
+    core = 95.0 * (1.0018**trend)
+    gap = dates == pd.Timestamp("2025-10-31")
+    headline[gap] = np.nan
+    core[gap] = np.nan
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "CPIAUCSL": headline,
+            "CPILFESL": core,
+            "TB3MS": np.linspace(0.5, 4.0, len(dates)),
+        }
+    )
 
 
 def test_sample_mode_registry_matches_spec() -> None:
@@ -90,6 +118,355 @@ def test_build_base_frame_warmup_defines_yoy_at_sample_start() -> None:
     assert abs(out["inflation_yoy"].iloc[0] - expected_yoy) < 1e-9
 
 
+def test_current_monitoring_scenarios_preserve_official_nulls_and_exact_formulas() -> None:
+    observed = build_base_frame(
+        _official_october_gap_raw(),
+        imputation_policy="observed_only",
+    )
+    gap_date = pd.Timestamp("2025-10-31")
+    prior_date = pd.Timestamp("2025-09-30")
+    following_date = pd.Timestamp("2025-11-30")
+    observed_gap = observed.loc[observed["date"] == gap_date].iloc[0]
+    prior = observed.loc[observed["date"] == prior_date].iloc[0]
+    following = observed.loc[observed["date"] == following_date].iloc[0]
+    expected_headline = {
+        "low": float(prior["cpi_observed_level"]),
+        "base": float(
+            np.sqrt(float(prior["cpi_observed_level"]) * float(following["cpi_observed_level"]))
+        ),
+        "high": float(following["cpi_observed_level"]),
+    }
+    expected_core = {
+        "low": float(prior["core_cpi_observed_level"]),
+        "base": float(
+            np.sqrt(
+                float(prior["core_cpi_observed_level"])
+                * float(following["core_cpi_observed_level"])
+            )
+        ),
+        "high": float(following["core_cpi_observed_level"]),
+    }
+
+    assert pd.isna(observed_gap["cpi_observed_level"])
+    assert pd.isna(observed_gap["core_cpi_observed_level"])
+    assert pd.isna(observed_gap["cpi_level"])
+    assert pd.isna(observed_gap["core_cpi_level"])
+
+    for scenario_id in CURRENT_MONITORING_SCENARIOS:
+        scenario = build_current_monitoring_scenario_frame(
+            observed,
+            scenario_id=scenario_id,
+        )
+        gap = scenario.loc[scenario["date"] == gap_date].iloc[0]
+
+        assert pd.isna(gap["cpi_observed_level"])
+        assert pd.isna(gap["core_cpi_observed_level"])
+        assert gap["cpi_originally_missing"]
+        assert gap["core_cpi_originally_missing"]
+        assert gap["cpi_imputed"]
+        assert gap["core_cpi_imputed"]
+        assert gap["cpi_level"] == pytest.approx(expected_headline[scenario_id])
+        assert gap["core_cpi_level"] == pytest.approx(expected_core[scenario_id])
+        assert gap["estimate_value"] == pytest.approx(expected_headline[scenario_id])
+        assert gap["core_cpi_estimate_value"] == pytest.approx(expected_core[scenario_id])
+        assert gap["estimate_method"] == CURRENT_MONITORING_ESTIMATE_METHODS[scenario_id]
+        assert gap["estimated_reference_month"] == gap_date
+        assert gap["scenario_id"] == scenario_id
+        assert gap["scenario_bundle_available"]
+        assert gap["uses_estimated_input"]
+        assert gap["estimated_input_months"] == ("2025-10-31",)
+        assert (
+            gap["imputation_availability_basis"]
+            == "following_reference_month_end_plus_one_month_proxy"
+        )
+        assert pd.isna(gap["cpi_level_information_timestamp"])
+        assert gap["inflation_yoy_timing_status"] == "reference_month_only"
+        pre_scenario = scenario.loc[scenario["date"] < gap_date]
+        assert pre_scenario["estimate_method"].isna().all()
+        assert pre_scenario["estimated_reference_month"].isna().all()
+        assert pre_scenario["estimate_value"].isna().all()
+
+
+def test_current_scenario_requires_exact_november_when_december_remains() -> None:
+    observed = build_base_frame(
+        _official_october_gap_raw(),
+        imputation_policy="observed_only",
+    )
+    observed = observed.loc[~observed["date"].eq(pd.Timestamp("2025-11-30"))].reset_index(drop=True)
+
+    for scenario_id in CURRENT_MONITORING_SCENARIOS:
+        scenario = build_current_monitoring_scenario_frame(
+            observed,
+            scenario_id=scenario_id,
+        )
+        gap = scenario.loc[scenario["date"].eq(pd.Timestamp("2025-10-31"))].iloc[0]
+        latest = scenario.iloc[-1]
+
+        assert pd.Timestamp("2025-12-31") in set(scenario["date"])
+        assert not latest["scenario_bundle_available"]
+        assert set(latest["scenario_failed_series"]) == {
+            "headline_cpi",
+            "core_cpi",
+        }
+        assert not gap["cpi_imputed"]
+        assert not gap["core_cpi_imputed"]
+        assert pd.isna(gap["cpi_level"])
+        assert pd.isna(gap["core_cpi_level"])
+        assert pd.isna(gap["estimate_value"])
+        assert pd.isna(gap["core_cpi_estimate_value"])
+        for lineage in latest["scenario_series_lineage"].values():
+            assert lineage["failure_code"] == "november_endpoint_absent"
+            assert lineage["november_endpoint"]["month"] == ("2025-11-30T00:00:00")
+            assert lineage["november_endpoint"]["value"] is None
+
+
+@pytest.mark.parametrize(
+    ("endpoint_month", "failure_code"),
+    [
+        (pd.Timestamp("2025-09-30"), "september_endpoint_ambiguous"),
+        (pd.Timestamp("2025-11-30"), "november_endpoint_ambiguous"),
+    ],
+)
+def test_current_scenario_preserves_raw_exact_endpoint_ambiguity(
+    endpoint_month: pd.Timestamp,
+    failure_code: str,
+) -> None:
+    raw = _official_october_gap_raw()
+    duplicate = raw.loc[raw["date"].eq(endpoint_month)].copy()
+    duplicate["CPIAUCSL"] = 999.0
+    duplicate["CPILFESL"] = 888.0
+    observed = build_base_frame(
+        pd.concat([raw, duplicate], ignore_index=True),
+        imputation_policy="observed_only",
+    )
+
+    scenario = build_current_monitoring_scenario_frame(
+        observed,
+        scenario_id="base",
+    )
+    latest = scenario.iloc[-1]
+
+    assert observed["date"].eq(endpoint_month).sum() == 1
+    assert not latest["scenario_bundle_available"]
+    assert set(latest["scenario_failed_series"]) == {
+        "headline_cpi",
+        "core_cpi",
+    }
+    for lineage in latest["scenario_series_lineage"].values():
+        assert not lineage["available"]
+        assert lineage["failure_code"] == failure_code
+        endpoint = (
+            lineage["september_endpoint"]
+            if endpoint_month.month == 9
+            else lineage["november_endpoint"]
+        )
+        assert endpoint["month"] == endpoint_month.isoformat()
+        assert endpoint["value"] is None
+
+
+def test_current_scenario_value_acceptance_is_independent_of_release_precision() -> None:
+    observed = build_base_frame(
+        _official_october_gap_raw(),
+        imputation_policy="observed_only",
+    )
+    scenario = build_current_monitoring_scenario_frame(
+        observed,
+        scenario_id="base",
+    )
+    lineage = scenario.iloc[-1]["scenario_series_lineage"]
+
+    assert scenario.iloc[-1]["scenario_bundle_available"]
+    for series_lineage in lineage.values():
+        assert series_lineage["available"]
+        assert series_lineage["september_endpoint"]["timing_status"] == ("reference_month_only")
+        assert series_lineage["november_endpoint"]["timing_status"] == ("reference_month_only")
+        assert series_lineage["november_endpoint"]["release_timestamp"] is None
+
+
+def test_partial_endpoint_failure_retains_attempted_lineage_without_applying_it() -> None:
+    observed = build_base_frame(
+        _official_october_gap_raw(),
+        imputation_policy="observed_only",
+    )
+    november = observed["date"].eq(pd.Timestamp("2025-11-30"))
+    observed.loc[november, "core_cpi_value_provenance"] = VALUE_PROVENANCE_UNVERIFIED
+
+    scenario = build_current_monitoring_scenario_frame(
+        observed,
+        scenario_id="base",
+    )
+    gap = scenario.loc[scenario["date"].eq(pd.Timestamp("2025-10-31"))].iloc[0]
+    latest = scenario.iloc[-1]
+    lineage = latest["scenario_series_lineage"]
+
+    assert not latest["scenario_bundle_available"]
+    assert latest["scenario_failed_series"] == ("core_cpi",)
+    assert lineage["headline_cpi"]["estimate_attempted"]
+    assert lineage["headline_cpi"]["estimate_value"] is not None
+    assert not lineage["core_cpi"]["estimate_attempted"]
+    assert lineage["core_cpi"]["failure_code"] == ("november_endpoint_invalid_provenance")
+    assert not gap["cpi_imputed"]
+    assert not gap["core_cpi_imputed"]
+    assert pd.isna(gap["cpi_level"])
+    assert pd.isna(gap["core_cpi_level"])
+    assert latest["uses_estimated_input"]
+    assert latest["uses_imputed_input"]
+    assert latest["estimated_input_months"] == ("2025-10-31",)
+    assert json.loads(json.dumps(lineage)) == lineage
+
+
+def test_missing_preserved_value_provenance_fails_closed() -> None:
+    observed = build_base_frame(
+        _official_october_gap_raw(),
+        imputation_policy="observed_only",
+    ).drop(columns="core_cpi_value_provenance")
+
+    scenario = build_current_monitoring_scenario_frame(
+        observed,
+        scenario_id="base",
+    )
+    core_lineage = scenario.iloc[-1]["core_cpi_scenario_lineage"]
+
+    assert not scenario.iloc[-1]["scenario_bundle_available"]
+    assert core_lineage["failure_code"] == "september_endpoint_invalid_provenance"
+    assert core_lineage["september_endpoint"]["value_provenance"] == (VALUE_PROVENANCE_UNVERIFIED)
+    assert not scenario["cpi_imputed"].any()
+    assert not scenario["core_cpi_imputed"].any()
+
+
+def test_missing_required_core_series_returns_structured_unavailable_frame() -> None:
+    observed = build_base_frame(
+        _official_october_gap_raw(),
+        imputation_policy="observed_only",
+    )
+    core_columns = [column for column in observed.columns if column.startswith("core_cpi")]
+    scenario = build_current_monitoring_scenario_frame(
+        observed.drop(columns=core_columns),
+        scenario_id="base",
+    )
+    latest = scenario.iloc[-1]
+
+    assert not latest["scenario_bundle_available"]
+    assert latest["scenario_failed_series"] == ("core_cpi",)
+    assert latest["scenario_series_lineage"]["core_cpi"]["failure_code"] == (
+        "required_series_absent"
+    )
+    assert "core_cpi_level" in scenario.columns
+    assert scenario["core_cpi_level"].isna().all()
+    assert not scenario["cpi_imputed"].any()
+
+
+@pytest.mark.parametrize(
+    ("missing_series", "expected_key", "expected_yoy"),
+    [
+        ("CPIAUCSL", "headline_cpi", "inflation_yoy"),
+        ("CPILFESL", "core_cpi", "core_cpi_yoy"),
+    ],
+)
+def test_raw_required_series_absence_remains_structured_through_scenario_routing(
+    missing_series: str,
+    expected_key: str,
+    expected_yoy: str,
+) -> None:
+    observed = build_base_frame(
+        _official_october_gap_raw().drop(columns=missing_series),
+        imputation_policy="observed_only",
+    )
+
+    scenario = build_current_monitoring_scenario_frame(
+        observed,
+        scenario_id="base",
+    )
+    latest = scenario.iloc[-1]
+
+    assert expected_yoy in observed.columns
+    assert observed[expected_yoy].isna().all()
+    assert not latest["scenario_bundle_available"]
+    assert latest["scenario_series_lineage"][expected_key]["failure_code"] == (
+        "required_series_absent"
+    )
+
+
+def test_direct_scenario_rejects_a_sample_trimmed_warmup_authority() -> None:
+    full = build_base_frame(
+        _official_october_gap_raw(start="1981-01-31"),
+        imputation_policy="observed_only",
+    )
+    processed_trimmed = full.loc[full["date"].ge(pd.Timestamp("1982-01-31"))].reset_index(drop=True)
+    raw_trimmed = _official_october_gap_raw(start="1982-01-31")
+
+    for trimmed in (processed_trimmed, raw_trimmed):
+        with pytest.raises(ValueError, match="12 consecutive pre-sample months"):
+            build_current_monitoring_scenario_frame(
+                trimmed,
+                scenario_id="base",
+                start_date="1982-01-01",
+            )
+
+
+def test_macro_data_load_result_preserves_former_six_positional_arguments() -> None:
+    data = pd.DataFrame({"date": [pd.Timestamp("2025-01-31")]})
+    result = MacroDataLoadResult(
+        data,
+        "cached_fred",
+        "cache ok",
+        "fred_base_macro_max_history.csv",
+        True,
+        "ex_post_continuity",
+    )
+
+    assert result.data is data
+    assert result.data_source_used == "cached_fred"
+    assert result.live_fetch_status == "cache ok"
+    assert result.cache_file_used == "fred_base_macro_max_history.csv"
+    assert result.api_key_configured is True
+    assert result.imputation_policy == "ex_post_continuity"
+    assert result.warmup_data is None
+
+
+def test_scenarios_use_the_same_warmup_authority_before_sample_slicing() -> None:
+    raw = _official_october_gap_raw("2024-12-31", "2026-10-31")
+    observed_warmup = build_base_frame(raw, imputation_policy="observed_only")
+    observed_selected = build_base_frame(
+        raw,
+        start_date="2026-01-01",
+        imputation_policy="observed_only",
+    )
+    first_date = pd.Timestamp("2026-01-31")
+    affected_date = pd.Timestamp("2026-10-31")
+
+    assert observed_selected["date"].iloc[0] == first_date
+    assert pd.notna(observed_selected["inflation_yoy"].iloc[0])
+
+    for scenario_id in CURRENT_MONITORING_SCENARIOS:
+        scenario = build_current_monitoring_scenario_frame(
+            observed_warmup,
+            scenario_id=scenario_id,
+            start_date="2026-01-01",
+        )
+
+        assert scenario["date"].iloc[0] == first_date
+        assert scenario["inflation_yoy"].iloc[0] == pytest.approx(
+            observed_selected["inflation_yoy"].iloc[0]
+        )
+        unaffected = ~scenario["date"].isin([pd.Timestamp("2025-10-31"), affected_date])
+        pd.testing.assert_series_equal(
+            scenario.loc[unaffected, "inflation_yoy"].reset_index(drop=True),
+            observed_selected.loc[unaffected, "inflation_yoy"].reset_index(drop=True),
+        )
+        scenario_featured = add_transitory_inflation_features(
+            scenario,
+            baseline_method="fed_target",
+        )
+        affected = scenario_featured.loc[scenario_featured["date"] == affected_date].iloc[0]
+        expected_yoy = (
+            float(affected["cpi_observed_level"]) / float(affected["estimate_value"]) - 1.0
+        ) * 100.0
+        assert affected["inflation_yoy"] == pytest.approx(expected_yoy)
+        assert affected["inflation_yoy_uses_imputed_input"]
+        assert affected["estimated_input_months"] == ("2025-10-31",)
+
+
 def test_build_base_frame_end_date_trims_inclusively() -> None:
     dates = pd.date_range("1981-01-01", "2022-12-01", freq="MS")
     cpi = 100.0 * (1.005 ** np.arange(len(dates)))
@@ -107,9 +484,7 @@ def test_build_base_frame_defaults_to_observed_only_with_explicit_lineage() -> N
     gap_pos = 16
     levels[gap_pos] = np.nan
 
-    out = build_base_frame(
-        pd.DataFrame({"date": dates, "CPIAUCSL": levels, "TB3MS": 1.0})
-    )
+    out = build_base_frame(pd.DataFrame({"date": dates, "CPIAUCSL": levels, "TB3MS": 1.0}))
 
     gap = out.iloc[gap_pos]
     lagged_effect = out.iloc[gap_pos + 12]
@@ -129,9 +504,7 @@ def test_pre_series_rows_are_unavailable_not_officially_missing_inputs() -> None
     dates = pd.date_range("2010-01-31", periods=30, freq="ME")
     levels = np.concatenate([np.full(5, np.nan), 100.0 + np.arange(25, dtype=float)])
 
-    out = build_base_frame(
-        pd.DataFrame({"date": dates, "CPIAUCSL": levels, "TB3MS": 1.0})
-    )
+    out = build_base_frame(pd.DataFrame({"date": dates, "CPIAUCSL": levels, "TB3MS": 1.0}))
 
     assert out.loc[:4, "cpi_source_unavailable"].all()
     assert not out.loc[:4, "cpi_originally_missing"].any()
@@ -288,7 +661,9 @@ def _workspace_temp_dir() -> TemporaryDirectory[str]:
     return TemporaryDirectory(dir=artifacts)
 
 
-def _fred_observations(series_id: str, periods: int = 15, missing_index: int | None = None) -> list[dict[str, str]]:
+def _fred_observations(
+    series_id: str, periods: int = 15, missing_index: int | None = None
+) -> list[dict[str, str]]:
     dates = pd.date_range("2020-01-01", periods=periods, freq="MS")
     observations = []
     for index, date in enumerate(dates):
@@ -337,9 +712,7 @@ def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_polic
         levels = 100.0 + np.arange(30, dtype=float)
         gap_pos = 16
         levels[gap_pos] = np.nan
-        releases = (
-            dates + pd.offsets.Day(15) + pd.offsets.Hour(13)
-        ).tz_localize("UTC")
+        releases = (dates + pd.offsets.Day(15) + pd.offsets.Hour(13)).tz_localize("UTC")
         processed = build_base_frame(
             pd.DataFrame(
                 {
@@ -347,9 +720,7 @@ def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_polic
                     "CPIAUCSL": levels,
                     "TB3MS": 1.0,
                     "release_timestamp": releases,
-                    "release_timestamp_provenance": (
-                        RELEASE_TIMESTAMP_PROVENANCE_ACTUAL
-                    ),
+                    "release_timestamp_provenance": (RELEASE_TIMESTAMP_PROVENANCE_ACTUAL),
                     "timing_status": TIMING_STATUS_RELEASE_ALIGNED,
                 }
             ),
@@ -360,6 +731,7 @@ def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_polic
         assert cache[MACRO_CACHE_SCHEMA_COLUMN].eq(MACRO_CACHE_SCHEMA_VERSION).all()
         assert pd.isna(cache.loc[gap_pos, "CPIAUCSL"])
         assert cache.loc[gap_pos, "cpi_originally_missing"]
+        assert cache["cpi_value_provenance"].eq(VALUE_PROVENANCE_OFFICIAL_FRED).all()
         assert "cpi_level" not in cache.columns
         assert "cpi_imputed" not in cache.columns
         assert cache.loc[gap_pos + 1, "release_timestamp"] == releases[gap_pos + 1]
@@ -373,6 +745,7 @@ def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_polic
         )
 
         assert observed.loc[gap_pos, "cpi_originally_missing"]
+        assert observed["cpi_value_provenance"].eq(VALUE_PROVENANCE_OFFICIAL_FRED).all()
         assert pd.isna(observed.loc[gap_pos, "cpi_level"])
         assert not observed.loc[gap_pos, "cpi_imputed"]
         assert continuity.loc[gap_pos, "cpi_originally_missing"]
@@ -385,6 +758,56 @@ def test_versioned_cache_round_trip_preserves_raw_missingness_and_rebuilds_polic
             continuity.loc[gap_pos, "imputation_availability_basis"]
             == "following_release_timestamp"
         )
+
+
+def test_scenario_estimates_cannot_be_promoted_to_cache_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _workspace_temp_dir() as cache_dir:
+        cache_path = Path(cache_dir)
+        monkeypatch.setattr("transitory_inflation.data.RAW_DATA_DIR", cache_path)
+        gap_date = pd.Timestamp("2025-10-31")
+        observed = build_base_frame(
+            _official_october_gap_raw("2018-01-31", "2026-06-30"),
+            imputation_policy="observed_only",
+        )
+        scenario = build_current_monitoring_scenario_frame(
+            observed,
+            scenario_id="base",
+        )
+        scenario_gap = scenario.loc[scenario["date"] == gap_date].iloc[0]
+        assert scenario_gap["cpi_imputed"]
+        assert scenario_gap["core_cpi_imputed"]
+        assert pd.notna(scenario_gap["estimate_value"])
+        assert pd.notna(scenario_gap["core_cpi_estimate_value"])
+
+        cache = build_macro_cache_frame(scenario)
+        cache_gap = cache.loc[cache["date"] == gap_date].iloc[0]
+
+        assert pd.isna(cache_gap["CPIAUCSL"])
+        assert pd.isna(cache_gap["CPILFESL"])
+        assert cache_gap["cpi_originally_missing"]
+        assert cache_gap["core_cpi_originally_missing"]
+        assert {
+            "cpi_level",
+            "core_cpi_level",
+            "cpi_imputed",
+            "core_cpi_imputed",
+            "scenario_id",
+            "estimate_value",
+            "core_cpi_estimate_value",
+        }.isdisjoint(cache.columns)
+
+        cache.to_csv(cache_path / "fred_base_macro_max_history.csv", index=False)
+        reloaded = load_cached_macro_data_for_mode("max_history")
+        reloaded_gap = reloaded.loc[reloaded["date"] == gap_date].iloc[0]
+
+        assert pd.isna(reloaded_gap["cpi_observed_level"])
+        assert pd.isna(reloaded_gap["core_cpi_observed_level"])
+        assert pd.isna(reloaded_gap["cpi_level"])
+        assert pd.isna(reloaded_gap["core_cpi_level"])
+        assert not reloaded_gap["cpi_imputed"]
+        assert not reloaded_gap["core_cpi_imputed"]
 
 
 def test_cached_macro_loader_uses_max_history_superset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,13 +838,16 @@ def test_cached_macro_loader_prefers_exact_mode_cache(monkeypatch: pytest.Monkey
     with _workspace_temp_dir() as cache_dir:
         cache_path = Path(cache_dir)
         monkeypatch.setattr("transitory_inflation.data.RAW_DATA_DIR", cache_path)
+        exact_dates = pd.date_range("1981-01-31", "1982-03-31", freq="ME")
+        cached_imputation = [False] * len(exact_dates)
+        cached_imputation[-2] = True
         exact = pd.DataFrame(
             {
-                "date": pd.date_range("1982-01-31", periods=3, freq="ME"),
-                "cpi_level": [100.0, 101.0, 102.0],
-                "tbill_3m": [4.0, 4.1, 4.2],
-                "inflation_yoy": [2.0, 2.1, 2.2],
-                "cpi_imputed": [False, True, False],
+                "date": exact_dates,
+                "cpi_level": 100.0 + np.arange(len(exact_dates), dtype=float),
+                "tbill_3m": np.linspace(4.0, 4.2, len(exact_dates)),
+                "inflation_yoy": -999.0,
+                "cpi_imputed": cached_imputation,
             }
         )
         exact.to_csv(cache_path / "fred_base_macro_live_dashboard.csv", index=False)
@@ -435,7 +861,51 @@ def test_cached_macro_loader_prefers_exact_mode_cache(monkeypatch: pytest.Monkey
         assert out["cpi_imputed"].tolist() == [False, False, False]
         assert out["cpi_originally_missing"].tolist() == [False, True, False]
         assert pd.isna(out.loc[1, "cpi_level"])
-        assert not out["inflation_yoy"].equals(exact["inflation_yoy"])
+        assert not out["inflation_yoy"].eq(-999.0).any()
+
+
+def test_cached_macro_loader_rejects_exact_cache_without_required_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _workspace_temp_dir() as cache_dir:
+        cache_path = Path(cache_dir)
+        monkeypatch.setattr("transitory_inflation.data.RAW_DATA_DIR", cache_path)
+        exact = pd.DataFrame(
+            {
+                "date": pd.date_range("1982-01-31", periods=3, freq="ME"),
+                "CPIAUCSL": [100.0, 101.0, 102.0],
+                "TB3MS": 4.0,
+            }
+        )
+        exact.to_csv(cache_path / "fred_base_macro_live_dashboard.csv", index=False)
+
+        with pytest.raises(ValueError, match="required 12-month pre-sample warm-up"):
+            load_cached_macro_data_for_mode("live_dashboard")
+
+
+def test_cached_macro_loader_rejects_an_incomplete_warmup_calendar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _workspace_temp_dir() as cache_dir:
+        cache_path = Path(cache_dir)
+        monkeypatch.setattr("transitory_inflation.data.RAW_DATA_DIR", cache_path)
+        dates = pd.DatetimeIndex([pd.Timestamp("1981-01-31")]).append(
+            pd.date_range("1982-01-31", periods=3, freq="ME")
+        )
+        incomplete = pd.DataFrame(
+            {
+                "date": dates,
+                "CPIAUCSL": 100.0 + np.arange(len(dates), dtype=float),
+                "TB3MS": 4.0,
+            }
+        )
+        incomplete.to_csv(
+            cache_path / "fred_base_macro_live_dashboard.csv",
+            index=False,
+        )
+
+        with pytest.raises(ValueError, match="12 consecutive pre-sample months"):
+            load_cached_macro_data_for_mode("live_dashboard")
 
 
 def test_legacy_processed_cache_without_missingness_provenance_fails_closed(

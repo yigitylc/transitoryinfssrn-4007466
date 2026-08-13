@@ -11,6 +11,7 @@ from .data import (
     TIMING_STATUS_RELEASE_ALIGNED,
     _has_explicit_timezone,
 )
+from .features import observed_only_historical_eligibility
 from .market_data import (
     MARKET_TIMESTAMP_COLUMN,
     MARKET_TIMESTAMP_PROVENANCE_ACTUAL,
@@ -714,20 +715,11 @@ def build_market_linkage_panel(
         }
         & set(signal.columns)
     )
-    if "signal_observed_only_eligible" in signal.columns:
-        eligible = signal["signal_observed_only_eligible"].fillna(False).astype(bool)
-    else:
-        imputed = signal.get(
-            "signal_uses_imputed_input",
-            pd.Series(False, index=signal.index, dtype=bool),
-        ).fillna(False).astype(bool)
-        missing = signal.get(
-            "signal_uses_missing_input",
-            pd.Series(False, index=signal.index, dtype=bool),
-        ).fillna(False).astype(bool)
-        eligible = ~(imputed | missing)
-
+    eligible = observed_only_historical_eligibility(signal)
     invalid = ~eligible
+    has_lineage = has_lineage or bool(invalid.any())
+    signal["signal_observed_only_eligible"] = eligible
+
     signal.loc[invalid, list(DEFAULT_SIGNAL_COLUMNS)] = float("nan")
     for label_col in ("historical_regime", "historical_short_term_pressure"):
         if label_col in signal.columns:
@@ -741,20 +733,86 @@ def build_market_linkage_panel(
         signal.loc[invalid, ["historical_regime", "historical_short_term_pressure"]] = pd.NA
 
     if "date" not in market_monthly.columns:
-        return _align_market_outcomes(
+        panel = _align_market_outcomes(
             signal,
             market_monthly,
             horizons=horizons,
             market_columns=(),
         )
+        market_columns: tuple[str, ...] = ()
+    else:
+        market_columns = _available_market_columns(market_monthly)
+        panel = _align_market_outcomes(
+            signal,
+            market_monthly,
+            horizons=horizons,
+            market_columns=market_columns,
+        )
 
-    market_columns = _available_market_columns(market_monthly)
-    return _align_market_outcomes(
-        signal,
-        market_monthly,
-        horizons=horizons,
-        market_columns=market_columns,
-    )
+    invalid_panel = ~panel["signal_observed_only_eligible"].fillna(False).astype(bool)
+    if not invalid_panel.any():
+        return panel
+
+    unavailable_timestamps = [
+        "market_origin_target_timestamp",
+        "market_origin_target_observation_date",
+        "market_origin_timestamp",
+        "market_origin_observation_date",
+    ]
+    for variable in market_columns:
+        unavailable_timestamps.extend(
+            [
+                f"{variable}_origin_target_timestamp",
+                f"{variable}_origin_target_observation_date",
+                f"{variable}_origin_timestamp",
+                f"{variable}_origin_observation_date",
+                *(
+                    column
+                    for horizon in horizons
+                    for column in (
+                        f"{variable}_fwd_{horizon}m_timestamp",
+                        f"{variable}_fwd_{horizon}m_observation_date",
+                    )
+                ),
+            ]
+        )
+        value_columns = [
+            variable,
+            *(
+                column
+                for horizon in horizons
+                for column in (
+                    f"{variable}_fwd_{horizon}m",
+                    _change_col(variable, horizon),
+                )
+            ),
+        ]
+        for column in value_columns:
+            if column in panel.columns:
+                panel.loc[invalid_panel, column] = float("nan")
+        origin_basis_col = f"{variable}_origin_basis"
+        timing_status_col = f"{variable}_timing_status"
+        if origin_basis_col in panel.columns:
+            panel.loc[invalid_panel, origin_basis_col] = MARKET_ORIGIN_UNAVAILABLE
+        if timing_status_col in panel.columns:
+            panel.loc[invalid_panel, timing_status_col] = MARKET_TIMING_UNAVAILABLE
+
+    for column in unavailable_timestamps:
+        if column in panel.columns:
+            panel.loc[invalid_panel, column] = pd.NaT
+    if "market_available_series_count" in panel.columns:
+        panel["market_available_series_count"] = panel[
+            "market_available_series_count"
+        ].mask(invalid_panel, 0)
+    if "market_availability_status" in panel.columns:
+        panel.loc[invalid_panel, "market_availability_status"] = (
+            MARKET_AVAILABILITY_UNAVAILABLE
+        )
+    if "market_origin_basis" in panel.columns:
+        panel.loc[invalid_panel, "market_origin_basis"] = MARKET_ORIGIN_UNAVAILABLE
+    if "market_timing_status" in panel.columns:
+        panel.loc[invalid_panel, "market_timing_status"] = MARKET_TIMING_UNAVAILABLE
+    return panel
 
 
 def _forward_market_change_summary_by_groups(

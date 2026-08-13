@@ -96,7 +96,7 @@ def test_forward_outcomes_exclude_imputed_origins_and_targets_with_lineage() -> 
     assert not summary.iloc[0]["uses_missing_input"]
 
 
-def test_observed_validation_values_match_ex_post_values_after_lineage_exclusions() -> None:
+def test_ex_post_policy_cannot_enter_historical_validation() -> None:
     dates = pd.date_range("2010-01-31", periods=120, freq="ME")
     levels = 100.0 * (1.002 ** np.arange(120, dtype=float))
     levels[60] = np.nan
@@ -120,28 +120,72 @@ def test_observed_validation_values_match_ex_post_values_after_lineage_exclusion
         forward_horizons=(1,),
         label_horizons=(1,),
     )
-    columns = [
-        "inflation_yoy",
-        "epsilon",
-        "tinf_4m",
-        "historical_regime",
-        "cpi_yoy_fwd_1m",
-        "epsilon_fwd_1m",
-    ]
-    pd.testing.assert_frame_equal(
-        observed_validation[columns],
-        continuity_validation[columns],
+    assert observed_validation["inflation_yoy"].notna().any()
+    assert observed_validation["cpi_yoy_fwd_1m"].notna().any()
+    assert not continuity_validation["signal_observed_only_eligible"].any()
+    assert continuity_validation["inflation_yoy"].isna().all()
+    assert continuity_validation["cpi_yoy_fwd_1m"].isna().all()
+
+
+def test_authoritative_estimate_marker_excludes_validation_origin_and_target() -> None:
+    frame = _validation_frame(periods=8)
+    frame["baseline"] = 2.0
+    frame["imputation_policy"] = "observed_only"
+    frame["uses_estimated_input"] = False
+    frame["estimated_input_months"] = [()] * len(frame)
+    frame["signal_uses_imputed_input"] = False
+    frame["signal_uses_missing_input"] = False
+    frame["signal_observed_only_eligible"] = True
+    contaminated_pos = 3
+    frame.loc[contaminated_pos, "uses_estimated_input"] = True
+
+    out = build_historical_validation_frame(
+        frame,
+        forward_horizons=(2,),
+        label_horizons=(2,),
     )
 
-    observed_summary = forward_outcome_summary_by_regime(
-        add_outcome_labels(observed_validation, horizons=(1,)),
-        horizons=(1,),
+    assert not out.loc[contaminated_pos, "signal_observed_only_eligible"]
+    assert pd.isna(out.loc[contaminated_pos, "inflation_yoy"])
+    assert pd.isna(out.loc[contaminated_pos, "historical_regime"])
+    assert not out.loc[contaminated_pos - 2, "observed_only_eligible_2m"]
+    assert pd.isna(out.loc[contaminated_pos - 2, "cpi_yoy_fwd_2m"])
+    assert pd.isna(out.loc[contaminated_pos, "positive_shock_eligible"])
+
+
+def test_generic_missing_marker_propagates_to_origin_and_target_lineage() -> None:
+    frame = _validation_frame(periods=7)
+    frame["baseline"] = 2.0
+    frame["imputation_policy"] = "observed_only"
+    frame["uses_missing_input"] = False
+    frame.loc[3, "uses_missing_input"] = True
+
+    out = add_forward_outcomes(frame, horizons=(2,))
+
+    assert out.loc[3, "outcome_2m_uses_missing_input"]
+    assert not out.loc[3, "observed_only_eligible_2m"]
+    assert out.loc[1, "outcome_2m_uses_missing_input"]
+    assert not out.loc[1, "observed_only_eligible_2m"]
+
+
+def test_above_threshold_row_after_ineligible_month_is_not_false_neutral() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2020-01-31", periods=50, freq="ME"),
+            "tinf_4m": np.linspace(-0.4, 0.4, 50),
+            "imputation_policy": "observed_only",
+            "uses_estimated_input": False,
+        }
     )
-    continuity_summary = forward_outcome_summary_by_regime(
-        add_outcome_labels(continuity_validation, horizons=(1,)),
-        horizons=(1,),
-    )
-    pd.testing.assert_frame_equal(observed_summary, continuity_summary)
+    frame.loc[40, "tinf_4m"] = 999.0
+    frame.loc[40, "uses_estimated_input"] = True
+    frame.loc[41, "tinf_4m"] = 10.0
+
+    labelled = add_walk_forward_regime_labels(frame)
+
+    assert pd.isna(labelled.loc[40, "historical_regime"])
+    assert labelled.loc[41, "tinf_4m"] > labelled.loc[41, "historical_regime_upper_threshold"]
+    assert pd.isna(labelled.loc[41, "historical_regime"])
 
 
 def test_normalization_labels_follow_configured_thresholds() -> None:
@@ -535,9 +579,7 @@ def test_walk_forward_regime_thresholds_use_only_prior_tinf_history() -> None:
 def test_walk_forward_regime_timing_includes_delayed_prior_threshold_input() -> None:
     dates = pd.date_range("2024-01-31", periods=6, freq="ME")
     delayed_prior = pd.Timestamp("2025-01-01 00:00:00.000000001+00:00")
-    timestamp_values = list(
-        (dates + pd.offsets.Day(12) + pd.offsets.Hour(13)).tz_localize("UTC")
-    )
+    timestamp_values = list((dates + pd.offsets.Day(12) + pd.offsets.Hour(13)).tz_localize("UTC"))
     timestamp_values[1] = delayed_prior
     timestamps = pd.Series(timestamp_values, dtype="datetime64[ns, UTC]")
     frame = pd.DataFrame(
@@ -545,14 +587,10 @@ def test_walk_forward_regime_timing_includes_delayed_prior_threshold_input() -> 
             "date": dates,
             "tinf_4m": [0.0, 0.2, 0.1, 0.8, 0.5, 0.4],
             "tinf_4m_information_timestamp": timestamps,
-            "tinf_4m_information_timestamp_provenance": (
-                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
-            ),
+            "tinf_4m_information_timestamp_provenance": (INFORMATION_TIMESTAMP_PROVENANCE_RELEASES),
             "tinf_4m_timing_status": "release_aligned",
             "information_timestamp": timestamps,
-            "information_timestamp_provenance": (
-                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
-            ),
+            "information_timestamp_provenance": (INFORMATION_TIMESTAMP_PROVENANCE_RELEASES),
             "timing_status": "release_aligned",
         }
     )
@@ -569,9 +607,7 @@ def test_walk_forward_regime_timing_includes_delayed_prior_threshold_input() -> 
 
 def test_walk_forward_regime_timing_fails_closed_for_nonexact_prior_input() -> None:
     dates = pd.date_range("2024-01-31", periods=6, freq="ME")
-    timestamps = pd.Series(
-        (dates + pd.offsets.Day(12) + pd.offsets.Hour(13)).tz_localize("UTC")
-    )
+    timestamps = pd.Series((dates + pd.offsets.Day(12) + pd.offsets.Hour(13)).tz_localize("UTC"))
     status = pd.Series("release_aligned", index=range(len(dates)), dtype="string")
     status.iloc[1] = "proxy"
     frame = pd.DataFrame(
@@ -579,14 +615,10 @@ def test_walk_forward_regime_timing_fails_closed_for_nonexact_prior_input() -> N
             "date": dates,
             "tinf_4m": [0.0, 0.2, 0.1, 0.8, 0.5, 0.4],
             "tinf_4m_information_timestamp": timestamps,
-            "tinf_4m_information_timestamp_provenance": (
-                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
-            ),
+            "tinf_4m_information_timestamp_provenance": (INFORMATION_TIMESTAMP_PROVENANCE_RELEASES),
             "tinf_4m_timing_status": status,
             "information_timestamp": timestamps,
-            "information_timestamp_provenance": (
-                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
-            ),
+            "information_timestamp_provenance": (INFORMATION_TIMESTAMP_PROVENANCE_RELEASES),
             "timing_status": "release_aligned",
         }
     )
@@ -608,9 +640,7 @@ def test_short_term_pressure_is_unavailable_when_term_structure_is_missing() -> 
         {
             "tinf_term_structure": [pd.NA],
             "information_timestamp": [pd.Timestamp("2024-02-13 13:00:00+00:00")],
-            "information_timestamp_provenance": [
-                INFORMATION_TIMESTAMP_PROVENANCE_RELEASES
-            ],
+            "information_timestamp_provenance": [INFORMATION_TIMESTAMP_PROVENANCE_RELEASES],
             "timing_status": ["release_aligned"],
         }
     )
@@ -619,10 +649,6 @@ def test_short_term_pressure_is_unavailable_when_term_structure_is_missing() -> 
 
     assert pd.isna(row["historical_short_term_pressure"])
     assert pd.isna(row["historical_short_term_pressure_information_timestamp"])
-    assert row["historical_short_term_pressure_timing_status"] == (
-        "derived_value_unavailable"
-    )
-    assert row["information_timestamp"] == pd.Timestamp(
-        "2024-02-13 13:00:00+00:00"
-    )
+    assert row["historical_short_term_pressure_timing_status"] == ("derived_value_unavailable")
+    assert row["information_timestamp"] == pd.Timestamp("2024-02-13 13:00:00+00:00")
     assert row["timing_status"] == "release_aligned"

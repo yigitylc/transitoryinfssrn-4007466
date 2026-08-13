@@ -756,6 +756,44 @@ def test_market_linkage_masks_imputed_signal_rows_without_compressing_horizons()
     ]
 
 
+def test_market_linkage_rejects_authoritative_estimate_only_origins() -> None:
+    signal = _signal_frame(periods=60)
+    signal["imputation_policy"] = "observed_only"
+    signal["uses_estimated_input"] = False
+    signal["estimated_input_months"] = [()] * len(signal)
+    signal["signal_uses_imputed_input"] = False
+    signal["signal_uses_missing_input"] = False
+    signal["signal_observed_only_eligible"] = True
+    contaminated_pos = 40
+    signal.loc[contaminated_pos, "uses_estimated_input"] = True
+    market = pd.DataFrame(
+        {
+            "date": signal["date"],
+            "yield_2y": np.arange(len(signal), dtype=float),
+        }
+    )
+
+    panel = build_market_linkage_panel(signal, market, horizons=(2,))
+    summaries = forward_market_change_summary_by_regime(panel, horizons=(2,))
+
+    assert not panel.loc[contaminated_pos, "signal_observed_only_eligible"]
+    assert pd.isna(panel.loc[contaminated_pos, "tinf_4m"])
+    assert pd.isna(panel.loc[contaminated_pos, "historical_regime"])
+    assert pd.isna(panel.loc[contaminated_pos, "yield_2y"])
+    assert pd.isna(panel.loc[contaminated_pos, "yield_2y_fwd_2m"])
+    assert panel.loc[contaminated_pos, "market_origin_basis"] == (
+        MARKET_ORIGIN_UNAVAILABLE
+    )
+    assert panel.loc[contaminated_pos, "market_availability_status"] == (
+        MARKET_AVAILABILITY_UNAVAILABLE
+    )
+    eligible_complete = (
+        panel["historical_regime"].notna()
+        & panel["yield_2y_change_2m_bp"].notna()
+    )
+    assert summaries["count"].sum() == int(eligible_complete.sum())
+
+
 def test_market_summary_excludes_rows_without_full_forward_market_data() -> None:
     signal = pd.DataFrame(
         {

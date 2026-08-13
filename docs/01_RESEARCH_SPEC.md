@@ -36,6 +36,9 @@ Sample: `paper_replication`, fixed 1982-01-01 through 2021-07-31. The slice is
 applied at load time, before any baseline is computed, so the `full_sample`
 baseline cannot see post-2021 data.
 
+Paper reconstruction uses official observed-only CPI. The October 2025 current-monitoring
+scenarios are outside the fixed paper sample and may not enter the reconstruction path.
+
 Expected outputs:
 
 - CPI and TINF summary statistics
@@ -47,14 +50,15 @@ Expected outputs:
 - rolling AR(1) persistence estimates
 - decay/convergence table
 
-### 2. Live signal mode (no full-sample lookahead; latest-revised and non-vintage)
+### 2. Live signal mode (current monitoring; latest-revised and non-vintage)
 
-Purpose: make the signal usable as a current macro indicator. The shifted construction is
-`row-lookahead-safe`: it uses no future rows or full-sample information. This does not mean
-release-aligned or vintage-safe. The loader uses latest-revised FRED data, and missing CPI release
-metadata remains explicitly `reference_month_only`. Exact publication/information timing also
-requires explicit provenance and a timezone-bearing timestamp; timestamp times are not reduced to
-calendar dates.
+Purpose: make the signal usable as a current macro indicator while keeping current monitoring
+separate from historical evidence. A shifted baseline is row-lookahead-safe as a formula, but a
+current signal that uses an October 2025 scenario is explicitly ex-post because the scenario bundle
+uses the following November observation. That current signal is not live-like, release-aligned, or
+vintage-safe. The loader uses latest-revised FRED data, and missing CPI release metadata remains
+explicitly `reference_month_only`. Exact publication/information timing also requires explicit
+provenance and a timezone-bearing timestamp; timestamp times are not reduced to calendar dates.
 
 Sample: `live_dashboard`, 1982-01-01 through the latest available FRED data.
 Use `max_history` to check robustness of the same outputs over the longest
@@ -64,10 +68,54 @@ Requirements:
 
 - avoid full-sample lookahead
 - prefer shifted rolling or shifted expanding baselines
+- keep the official October 2025 headline/core CPI levels null in raw data and caches
+- derive observed and current-scenario views from one full raw warm-up superset before applying the
+  selected sample window
+- fail closed with a contract error when that common warm-up authority is absent or truncated; never
+  substitute the already-sliced research frame
+- classify current scenarios against prior observed-only eligible history from the selected sample
+  mode; never let an estimate change the threshold population
 - show only timing metadata actually supplied for each point and fail closed when it is unavailable
 - label row-lookahead-safe and ex-post construction separately from timing/vintage status
 - expose reference month, actual publication/information time when available, and the
   latest-revised non-vintage limitation
+
+#### Current-monitoring scenarios
+
+For the permanently unavailable October 2025 headline and core CPI levels, current-facing
+descriptive surfaces use three explicit assumptions:
+
+- `low`: October equals September;
+- `base`: October is the geometric midpoint (log-linear bridge) of September and November;
+- `high`: October equals November.
+
+The assumptions are applied separately to headline and core CPI. The base bridge and endpoint
+scenarios are unofficial, ex-post, latest-revised, and non-vintage; they are not probabilities or
+confidence intervals. They may feed the Sidebar Current Reading, Current Macro Signal, current
+TINF/regime/pressure, Trader Research current bucket, report headline/regime/watchlist, and the
+separately labelled current baseline comparison.
+
+September and November mean exactly 2025-09-30 and 2025-11-30 for each series. Physical adjacency
+cannot substitute December or another row. Each endpoint must be one coherent normalized official
+observation with a present value, approved value provenance, and no estimated/imputed lineage.
+Official value authority is separate from release-time precision: a value may be used with
+conservative `reference_month_only` timing, while its actual H5 status remains disclosed. Either
+series failing any requirement makes the complete bundle unavailable and suppresses all current
+classifications while preserving diagnostic lineage.
+
+The dashboard reports every scenario's values and classification. It reports `regime_stable` only
+when all three regimes agree, `pressure_stable` only when all three pressures agree, and
+`fully_stable` only when both conditions hold. A disagreement is `scenario_sensitive`; if any
+scenario cannot be calculated, the aggregate state is `unavailable`. No modal state or scenario
+probability is reported.
+
+`live_dashboard` and `max_history` each use their own selected-mode observed-only calibration
+history. Changing the sample mode may therefore change thresholds and classifications, but not the
+scenario formulas. Current-monitoring and historical-evidence endpoints are displayed separately.
+All historical consumers and calibration use one fail-closed eligibility rule that treats
+`uses_estimated_input=True` as authoritative contamination. Paper Window ends before the affected
+month, so its scenario status is `not_applicable`; it keeps its observed-only calculations and does
+not display low/base/high stability.
 
 #### Historical signal validation
 
@@ -78,6 +126,11 @@ forward information about inflation persistence. Signal columns are constructed
 first, then future CPI outcomes are appended only for scoring historical rows.
 Future values must never feed back into baseline, epsilon, TINF, pressure, or
 regime construction.
+
+Historical validation, hit rates, benchmark scoring, historical robustness, historical
+market-linkage origins, and historical analog populations remain strictly observed-only. A signal
+origin or outcome that depends on estimated CPI is excluded with its reason and denominator impact
+retained.
 
 Default row-lookahead-safe settings:
 
@@ -109,13 +162,18 @@ can use information unavailable at month t.
 Purpose: study, descriptively, how markets behaved after past inflation-persistence
 states.
 
-Scope (decided 2026-06-24): descriptive only, rates-only, and row-lookahead-safe. It ships as
-the **Trader Research** Streamlit tab, which conditions on the latest row-lookahead-safe
-walk-forward regime bucket (`historical_regime` / `historical_short_term_pressure`)
+Scope (decided 2026-06-24; current-bucket routing amended 2026-07-16): descriptive only and
+rates-only. It ships as the **Trader Research** Streamlit tab, which may condition on an explicitly
+estimated current scenario bucket. That current bucket uses thresholds calibrated only from prior
+observed-only eligible history. It queries the strict observed-only walk-forward analog population
+(`historical_regime` / `historical_short_term_pressure`)
 and reports, for the six approved FRED rate instruments, the forward-change
 distribution (median, p25-p75, increase/decrease hit rates, sample count,
 weak-evidence) plus the analog months behind it. It reuses the Phase 4 market-linkage
 tables (`market_linkage.build_market_linkage_tables`) and adds no new market series.
+The current estimate never enters the analog population or historical market-linkage origins. If
+the low/base/high buckets differ, their conditional results remain separately selectable (and the
+report lists them separately) rather than being collapsed to a modal bucket.
 Exact market measurement begins at the first eligible market-close timestamp greater than or equal
 to the full signal information timestamp, but only when both timestamps have explicit trustworthy
 status, provenance, and timezone information. Standard FRED rate observations are date-only and
