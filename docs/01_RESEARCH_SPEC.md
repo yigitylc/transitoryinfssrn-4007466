@@ -132,6 +132,15 @@ market-linkage origins, and historical analog populations remain strictly observ
 origin or outcome that depends on estimated CPI is excluded with its reason and denominator impact
 retained.
 
+Benchmark scoring additionally requires one universal common-origin panel per horizon: every
+registered model, including AR(1), is scored on identical origins, so point-loss, directional, and
+classification denominators match and ranks are mutually comparable. Restricting to that panel only
+removes origins from the observed-only frame, so it does not relax any exclusion above. Each model's
+own native sample stays visible as a coverage diagnostic and is never ranked. Until the overlapping-
+outcome uncertainty treatment exists, benchmark results are stated as point estimates — lower or
+higher point loss, and loss differentials — never as one model beating another. See
+`docs/PHASE0_RESEARCH_CONTRACTS.md` section 6.
+
 Default row-lookahead-safe settings:
 
 - `sample_mode = live_dashboard`

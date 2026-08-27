@@ -279,19 +279,20 @@ VALIDATION_RATE_SPECS = (
     ),
     ("positive_shock_persistent_rate", "Positive-shock persisted", plots_mod.HOT),
 )
-# Robustness win-rate series, as (column-stem, label, color). Colors identify the
-# benchmark (categorical), not a hot/cold sign read. The MAE/RMSE specs reuse the
-# same benchmarks; presentation only over the existing win_rates table.
-_WIN_RATE_BENCHMARKS = (
-    ("no_change", "Beats no-change", plots_mod.COLD),
-    ("mean_reversion", "Beats mean-reversion", "#8e44ad"),
-    ("ar1", "Beats AR(1)", plots_mod.NEUTRAL),
+# Robustness lower-point-loss series, as (column-stem, label, color). Colors
+# identify the benchmark (categorical), not a hot/cold sign read. The MAE/RMSE
+# specs reuse the same benchmarks; presentation only over the existing
+# lower-loss-rate table.
+_LOWER_LOSS_BENCHMARKS = (
+    ("no_change", "Lower loss than no-change", plots_mod.COLD),
+    ("mean_reversion", "Lower loss than mean-reversion", "#8e44ad"),
+    ("ar1", "Lower loss than AR(1)", plots_mod.NEUTRAL),
 )
-WIN_RATE_SPECS_MAE = tuple(
-    (f"beats_{key}_mae_rate", label, color) for key, label, color in _WIN_RATE_BENCHMARKS
+LOWER_LOSS_SPECS_MAE = tuple(
+    (f"lower_mae_than_{key}_rate", label, color) for key, label, color in _LOWER_LOSS_BENCHMARKS
 )
-WIN_RATE_SPECS_RMSE = tuple(
-    (f"beats_{key}_rmse_rate", label, color) for key, label, color in _WIN_RATE_BENCHMARKS
+LOWER_LOSS_SPECS_RMSE = tuple(
+    (f"lower_rmse_than_{key}_rate", label, color) for key, label, color in _LOWER_LOSS_BENCHMARKS
 )
 
 with st.sidebar:
@@ -377,7 +378,7 @@ def get_robustness_tables(
     baseline_methods: tuple[str, ...],
     inflation_measures: tuple[str, ...],
 ):
-    scorecard, verdict, win_rates = robustness_mod.robustness_tables(
+    scorecard, verdict, lower_loss_rates, coverage = robustness_mod.robustness_tables(
         robustness_raw,
         baseline_methods=baseline_methods,
         inflation_measures=inflation_measures,
@@ -386,7 +387,7 @@ def get_robustness_tables(
         robustness_raw,
         inflation_measures=inflation_measures,
     )
-    return scorecard, verdict, win_rates, availability
+    return scorecard, verdict, lower_loss_rates, availability, coverage
 
 
 @st.cache_data(show_spinner=True)
@@ -1526,71 +1527,120 @@ with tab_benchmarks:
             format="%.2f",
         )
 
-    forecasts, benchmark_metrics, benchmark_improvements, benchmark_confusion = (
-        get_benchmark_tables(df, benchmark_horizon, float(benchmark_threshold))
-    )
+    benchmark_panel_error = ""
+    try:
+        (
+            forecasts,
+            benchmark_metrics,
+            benchmark_improvements,
+            benchmark_confusion,
+            benchmark_coverage,
+        ) = get_benchmark_tables(df, benchmark_horizon, float(benchmark_threshold))
+    except benchmark_mod.EmptyCommonOriginPanelError as exc:
+        benchmark_panel_error = str(exc)
+        forecasts = benchmark_metrics = benchmark_improvements = pd.DataFrame()
+        benchmark_confusion = pd.DataFrame()
+        benchmark_coverage = exc.coverage
 
-    if benchmark_metrics.empty:
+    if benchmark_panel_error:
+        st.error(
+            "No common forecast origin is shared by all benchmark models at this horizon, so "
+            "no headline comparison is reported. Scoring models on their own unequal samples "
+            "would confuse coverage with accuracy."
+        )
+        st.caption(benchmark_panel_error)
+        if not benchmark_coverage.empty:
+            st.markdown("#### Model coverage diagnostic (why no panel exists)")
+            st.caption(
+                "What each model could have forecast on its own. These native samples are not "
+                "comparable to each other as accuracy."
+            )
+            st.dataframe(benchmark_coverage, width="stretch")
+    elif benchmark_metrics.empty:
         st.info("No benchmark comparison is available for the selected horizon and sample.")
     else:
         tinf_rows = benchmark_metrics.loc[benchmark_metrics["model"] == "tinf_regime_bucket"]
         if not tinf_rows.empty:
             tinf_row = tinf_rows.iloc[0]
-            beats_no_change = (
+            lower_loss_vs_no_change = (
                 tinf_row["mae_improvement_vs_no_change_pct"] > 0
                 or tinf_row["rmse_improvement_vs_no_change_pct"] > 0
             )
-            beats_mean_reversion = (
+            lower_loss_vs_mean_reversion = (
                 tinf_row["mae_improvement_vs_mean_reversion_pct"] > 0
                 or tinf_row["rmse_improvement_vs_mean_reversion_pct"] > 0
             )
+            panel_n = int(tinf_row.get("common_origin_n", tinf_row["count"]))
+            panel_start = macro_data.date_label(tinf_row.get("common_origin_start"))
+            panel_end = macro_data.date_label(tinf_row.get("common_origin_end"))
             verdict_col1, verdict_col2 = st.columns(2)
             verdict_col1.metric(
                 "vs no-change",
-                "🔵 TINF wins" if beats_no_change else "🔴 TINF trails",
+                "🔵 Lower MAE or RMSE" if lower_loss_vs_no_change else "🔴 Neither lower",
+                delta_color="off",
             )
             verdict_col2.metric(
                 "vs mean-reversion",
-                "🔵 TINF wins" if beats_mean_reversion else "🔴 TINF trails",
+                "🔵 Lower MAE or RMSE" if lower_loss_vs_mean_reversion else "🔴 Neither lower",
+                delta_color="off",
             )
             st.caption(
-                f"Verdict at {benchmark_horizon} months: 'wins' = lower MAE or RMSE than that "
-                "baseline on the common scored sample. Exact percentages are in the chart hover "
-                "and the improvement table below."
+                f"At {benchmark_horizon} months, every model is scored on the same "
+                f"{panel_n} common origins ({panel_start} to {panel_end}). Each badge reports "
+                "only whether TINF/regime's MAE **or** RMSE point estimate is the smaller "
+                "number — it is not a significance test, and it does not mean both metrics "
+                "are lower. Exact percentages are in the chart hover and the differential "
+                "table below."
             )
-            if not beats_no_change and not beats_mean_reversion:
+            if not lower_loss_vs_no_change and not lower_loss_vs_mean_reversion:
                 st.warning(
-                    "Under the current settings, the TINF/regime bucket does not improve on "
-                    "the simple no-change or mean-reversion baselines by MAE/RMSE."
+                    "Under the current settings, the TINF/regime bucket has a higher MAE and "
+                    "RMSE point estimate than both the no-change and mean-reversion baselines."
                 )
 
-        st.markdown(f"#### TINF improvement vs benchmarks ({benchmark_horizon} months)")
+        st.markdown(f"#### TINF loss differential vs benchmarks ({benchmark_horizon} months)")
         st.caption(
-            "Diverging bars: positive (cold) means TINF reduced MAE or RMSE versus that baseline; "
-            "negative (hot) means it trailed. Same percentages as the improvement table below."
+            "Diverging bars: positive (cold) means TINF's point loss was lower than that "
+            "baseline's on the common-origin panel; negative (hot) means higher. Same "
+            "percentages as the differential table below. Point estimates only."
         )
         st.plotly_chart(
             plots_mod.improvement_diverging_figure(
                 benchmark_improvements,
-                title=f"TINF improvement vs benchmarks ({benchmark_horizon} months)",
+                title=f"TINF loss differential vs benchmarks ({benchmark_horizon} months)",
             ),
             width="stretch",
         )
 
-        st.markdown("#### Benchmark metric summary")
+        st.markdown("#### Benchmark metric summary (common-origin panel)")
         st.caption(
-            "MAE and RMSE score CPI YoY forecast errors. Directional accuracy scores whether "
-            "the forecast got the direction of the CPI YoY change right. Hit, false-positive, "
-            "and false-negative rates classify persistent high-inflation outcomes for current "
-            "positive-shock rows. Note: no-change forecasts zero CPI change, so its directional "
+            "Every model is scored on one shared set of forecast origins, so `count` and "
+            "`classification_count` are identical across models and the rows are directly "
+            "comparable. MAE and RMSE score CPI YoY forecast errors. Directional accuracy "
+            "scores whether the forecast got the direction of the CPI YoY change right. Hit, "
+            "false-positive, and false-negative rates classify persistent high-inflation "
+            "outcomes for current positive-shock rows. All values are point estimates with no "
+            "significance test. Note: no-change forecasts zero CPI change, so its directional "
             "accuracy is ~0 by construction rather than a skill signal."
         )
         st.dataframe(benchmark_metrics, width="stretch")
 
-        with st.expander("Benchmark-relative improvement table"):
+        with st.expander("Model coverage diagnostic (native samples — not a comparison)"):
             st.caption(
-                "Positive values mean the model reduced MAE or RMSE versus the comparison baseline. "
-                "These are historical validation statistics, not optimized thresholds."
+                "How many origins each model could have forecast on its own, and why those "
+                "native samples differ. Models become available at different dates because "
+                "their warm-up requirements differ, and early origins are typically the "
+                "hardest to forecast — so native-sample errors are **not** comparable across "
+                "models. This table explains coverage only; the metric summary above is the "
+                "comparison."
+            )
+            st.dataframe(benchmark_coverage, width="stretch")
+
+        with st.expander("Benchmark loss-differential table"):
+            st.caption(
+                "Positive values mean the model's MAE or RMSE point estimate was lower than the "
+                "comparison baseline's on the common-origin panel. These are historical "
+                "validation statistics, not optimized thresholds and not significance results."
             )
             st.dataframe(benchmark_improvements, width="stretch")
 
@@ -1726,9 +1776,13 @@ with tab_report:
         if not report.inflation_measure_availability.empty:
             with st.expander("Inflation measure availability"):
                 st.dataframe(report.inflation_measure_availability, width="stretch")
-        if not report.robustness_win_rates.empty:
-            with st.expander("Aggregate TINF/regime win rates"):
-                st.dataframe(report.robustness_win_rates, width="stretch")
+        if not report.robustness_lower_loss_rates.empty:
+            with st.expander("Aggregate TINF/regime lower-point-loss rates"):
+                st.caption(
+                    "Share of settings in which TINF/regime posts the lower point estimate on "
+                    "that setting's common-origin panel. Not a significance result."
+                )
+                st.dataframe(report.robustness_lower_loss_rates, width="stretch")
         if not report.robustness_verdict.empty:
             with st.expander("Robustness verdict detail"):
                 st.dataframe(report.robustness_verdict, width="stretch")
@@ -1941,9 +1995,11 @@ with tab_robustness:
         "Does the benchmark conclusion survive reasonable choices of horizon, threshold, baseline, "
         "sample, and inflation measure? A signal that only works under one setting is weaker than "
         "one that holds across the grid.",
-        "Read the win-rate bars as how often TINF/regime beats each naive baseline across the fixed "
-        "horizon×threshold grid, per setting; bars above the dotted 50% line mean it wins more often "
-        "than not. The scorecard and verdict behind the expanders hold every underlying cell.",
+        "Read the bars as how often TINF/regime posts the lower point estimate versus each naive "
+        "baseline across the fixed horizon×threshold grid, per setting; bars above the dotted 50% "
+        "line mean it is the lower number more often than not. Every cell is scored on its own "
+        "common-origin panel, and no significance test is applied. The scorecard and verdict "
+        "behind the expanders hold every underlying cell.",
     )
     scope_caveats(
         "Robustness diagnostics across settings — thresholds are reported, not optimized.",
@@ -2013,7 +2069,7 @@ with tab_robustness:
                 }
             )
 
-        scorecard, verdict, win_rates, availability = get_robustness_tables(
+        scorecard, verdict, lower_loss_rates, availability, coverage = get_robustness_tables(
             robustness_raw,
             tuple(robustness_baselines),
             tuple(robustness_inflation_measures),
@@ -2033,39 +2089,47 @@ with tab_robustness:
         if scorecard.empty:
             st.info("No robustness scorecard is available for the selected settings.")
         else:
-            if win_rates.empty:
-                st.info("No aggregate win rates are available for the selected settings.")
+            if lower_loss_rates.empty:
+                st.info(
+                    "No aggregate lower-point-loss rates are available for the selected settings."
+                )
             else:
                 # Presentation-only compact label per (sample, measure, baseline) row so the
                 # grouped bars stay legible; the identity columns are otherwise unchanged.
-                setting_label = win_rates["baseline_method"].astype(str)
+                setting_label = lower_loss_rates["baseline_method"].astype(str)
                 if len(robustness_inflation_measures) > 1:
                     setting_label = (
-                        win_rates["inflation_measure_label"].astype(str) + " · " + setting_label
-                    )
-                if len(robustness_sample_modes) > 1:
-                    setting_label = (
-                        win_rates["sample_mode"].map(MODE_LABELS).fillna(win_rates["sample_mode"])
+                        lower_loss_rates["inflation_measure_label"].astype(str)
                         + " · "
                         + setting_label
                     )
-                win_rates_plot = win_rates.assign(setting_label=setting_label)
+                if len(robustness_sample_modes) > 1:
+                    setting_label = (
+                        lower_loss_rates["sample_mode"]
+                        .map(MODE_LABELS)
+                        .fillna(lower_loss_rates["sample_mode"])
+                        + " · "
+                        + setting_label
+                    )
+                lower_loss_plot = lower_loss_rates.assign(setting_label=setting_label)
 
-                st.markdown("#### TINF/regime win rates by setting")
+                st.markdown("#### TINF/regime lower-point-loss rates by setting")
                 st.caption(
-                    "How often TINF/regime beats each naive baseline across the fixed "
-                    "horizon×threshold grid, per setting. The dotted line marks 50% (wins as often "
-                    "as it loses); bars above it favor TINF. Same rates as the table below."
+                    "How often TINF/regime's point estimate is the lower number versus each "
+                    "naive baseline across the fixed horizon×threshold grid, per setting. Every "
+                    "cell is scored on its own common-origin panel. The dotted line marks 50% "
+                    "(lower as often as higher). Point estimates only — no significance test. "
+                    "Same rates as the table below."
                 )
                 win_col1, win_col2 = st.columns(2)
                 with win_col1:
                     st.plotly_chart(
                         plots_mod.hit_rate_bar_figure(
-                            win_rates_plot,
+                            lower_loss_plot,
                             "setting_label",
-                            WIN_RATE_SPECS_MAE,
-                            title="Win rate by setting — MAE",
-                            yaxis_title="Win rate",
+                            LOWER_LOSS_SPECS_MAE,
+                            title="Lower-point-loss rate by setting — MAE",
+                            yaxis_title="Lower-point-loss rate",
                             reference=0.5,
                         ),
                         width="stretch",
@@ -2073,22 +2137,23 @@ with tab_robustness:
                 with win_col2:
                     st.plotly_chart(
                         plots_mod.hit_rate_bar_figure(
-                            win_rates_plot,
+                            lower_loss_plot,
                             "setting_label",
-                            WIN_RATE_SPECS_RMSE,
-                            title="Win rate by setting — RMSE",
-                            yaxis_title="Win rate",
+                            LOWER_LOSS_SPECS_RMSE,
+                            title="Lower-point-loss rate by setting — RMSE",
+                            yaxis_title="Lower-point-loss rate",
                             reference=0.5,
                         ),
                         width="stretch",
                     )
-                with st.expander("Aggregate win-rate table"):
+                with st.expander("Aggregate lower-point-loss table"):
                     st.caption(
-                        "Win rates summarize how often TINF/regime beats each benchmark across the "
-                        "visible horizon and threshold grid. They are diagnostics, not a setting "
-                        "selection rule."
+                        "These rates summarize how often TINF/regime posts the lower point "
+                        "estimate versus each benchmark across the visible horizon and threshold "
+                        "grid. They are diagnostics, not a setting selection rule, and not "
+                        "evidence of outperformance."
                     )
-                    st.dataframe(win_rates, width="stretch")
+                    st.dataframe(lower_loss_rates, width="stretch")
 
             with st.expander("Robustness scorecard (all models × settings)"):
                 scorecard_cols = [
@@ -2103,6 +2168,9 @@ with tab_robustness:
                     "horizon_months",
                     "threshold_pp",
                     "count",
+                    "common_origin_n",
+                    "common_origin_start",
+                    "common_origin_end",
                     "mae",
                     "rmse",
                     "directional_accuracy",
@@ -2127,19 +2195,62 @@ with tab_robustness:
                     "horizon_months",
                     "threshold_pp",
                     "count",
+                    "common_origin_n",
+                    "common_origin_start",
+                    "common_origin_end",
                     "tinf_mae",
                     "tinf_rmse",
                     "tinf_directional_accuracy",
                     "tinf_rank_by_mae",
                     "tinf_rank_by_rmse",
-                    "beats_no_change_mae",
-                    "beats_no_change_rmse",
-                    "beats_mean_reversion_mae",
-                    "beats_mean_reversion_rmse",
-                    "beats_ar1_mae",
-                    "beats_ar1_rmse",
+                    "tinf_lowest_mae",
+                    "tinf_lowest_rmse",
+                    "mae_differential_vs_no_change_pp",
+                    "rmse_differential_vs_no_change_pp",
+                    "mae_differential_vs_mean_reversion_pp",
+                    "rmse_differential_vs_mean_reversion_pp",
+                    "mae_differential_vs_ar1_pp",
+                    "rmse_differential_vs_ar1_pp",
+                    "lower_mae_than_no_change",
+                    "lower_rmse_than_no_change",
+                    "lower_mae_than_mean_reversion",
+                    "lower_rmse_than_mean_reversion",
+                    "lower_mae_than_ar1",
+                    "lower_rmse_than_ar1",
                 ]
+                st.caption(
+                    "`tinf_lowest_*` and `lower_*_than_*` order point estimates on that setting's "
+                    "common-origin panel; the `*_differential_*_pp` columns give the signed size "
+                    "of each gap in percentage points (negative = TINF/regime lower). No "
+                    "significance test is applied."
+                )
                 st.dataframe(verdict.loc[:, verdict_cols], width="stretch")
+
+            with st.expander("Robustness coverage & unscored settings"):
+                st.caption(
+                    "Per-model native coverage behind each cell's common-origin panel, plus every "
+                    "grid cell that produced no scored row and why. Coverage does not vary across "
+                    "the threshold dimension, so it is recorded once per horizon. Native counts "
+                    "explain availability only — they are not comparable as accuracy."
+                )
+                if coverage.empty:
+                    st.info("No robustness coverage rows for the selected settings.")
+                else:
+                    unscored = coverage.loc[~coverage["scored"].astype(bool)]
+                    if unscored.empty:
+                        st.success("Every requested robustness cell produced a scored panel.")
+                    else:
+                        unscored_settings = unscored.loc[
+                            :,
+                            ["sample_mode", "baseline_method", "horizon_months", "unscored_detail"],
+                        ].drop_duplicates()
+                        st.warning(
+                            f"{len(unscored_settings)} requested robustness cell(s) produced no "
+                            "scored row and are omitted from the scorecard, verdict, and rates "
+                            "above."
+                        )
+                        st.dataframe(unscored_settings, width="stretch")
+                    st.dataframe(coverage, width="stretch")
 
     st.subheader("Baseline robustness quick comparison")
     rows = []

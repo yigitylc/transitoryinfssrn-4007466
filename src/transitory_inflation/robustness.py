@@ -64,7 +64,7 @@ def _benchmark_comparison_tables(
     inflation_col: str,
     ar_min_observations: int,
     bucket_min_observations: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Compute the benchmark tables for one robustness cell."""
 
     return benchmark_mod.benchmark_comparison_tables(
@@ -75,6 +75,20 @@ def _benchmark_comparison_tables(
         ar_min_observations=ar_min_observations,
         bucket_min_observations=bucket_min_observations,
     )
+
+
+#: Why one robustness cell produced no scored row. Cells are disclosed rather
+#: than dropped silently, so an absent setting is visible as an absence.
+UNSCORED_CELL_REASONS: dict[str, str] = {
+    "no_eligible_origins": (
+        "No model could forecast an observed-only origin with an available outcome in this "
+        "setting, so there is nothing to score."
+    ),
+    "empty_common_origin_panel": (
+        "Models produced forecasts but shared no common origin, so headline metrics were "
+        "refused rather than reported on unequal samples."
+    ),
+}
 
 
 def inflation_measure_availability(
@@ -119,7 +133,74 @@ def inflation_measure_availability(
     return pd.DataFrame(rows)
 
 
-def build_robustness_scorecard(
+ROBUSTNESS_COVERAGE_COLUMNS: tuple[str, ...] = (
+    "sample_mode",
+    "inflation_measure",
+    "inflation_measure_label",
+    "baseline_method",
+    "baseline_label",
+    "horizon_months",
+    "model",
+    "native_count",
+    "native_start",
+    "native_end",
+    "common_origin_n",
+    "common_origin_start",
+    "common_origin_end",
+    "origins_outside_common_panel",
+    "common_share_of_native_origins",
+    "scored",
+    "unscored_reason",
+    "unscored_detail",
+    "native_exclusion_reason",
+)
+
+
+def _cell_coverage(
+    coverage: pd.DataFrame,
+    sample_mode: str,
+    measure: InflationMeasure,
+    baseline_method: str,
+    horizon: int,
+    unscored_reason: str,
+) -> pd.DataFrame:
+    """Attach setting identity to one cell's per-model coverage diagnostic."""
+
+    if coverage.empty:
+        out = pd.DataFrame(
+            {
+                "model": list(benchmark_mod.BENCHMARK_MODELS),
+                "horizon_months": int(horizon),
+                "native_count": 0,
+                "native_start": pd.NaT,
+                "native_end": pd.NaT,
+                "common_origin_n": 0,
+                "common_origin_start": pd.NaT,
+                "common_origin_end": pd.NaT,
+                "origins_outside_common_panel": 0,
+                "common_share_of_native_origins": float("nan"),
+                "native_exclusion_reason": [
+                    benchmark_mod.NATIVE_EXCLUSION_REASONS.get(model, "")
+                    for model in benchmark_mod.BENCHMARK_MODELS
+                ],
+            }
+        )
+    else:
+        out = coverage.copy()
+        out["horizon_months"] = int(horizon)
+
+    out.insert(0, "sample_mode", sample_mode)
+    out.insert(1, "inflation_measure", measure.key)
+    out.insert(2, "inflation_measure_label", measure.label)
+    out.insert(3, "baseline_method", baseline_method)
+    out.insert(4, "baseline_label", _baseline_label(baseline_method))
+    out["scored"] = not unscored_reason
+    out["unscored_reason"] = unscored_reason or pd.NA
+    out["unscored_detail"] = UNSCORED_CELL_REASONS.get(unscored_reason, pd.NA)
+    return out.loc[:, list(ROBUSTNESS_COVERAGE_COLUMNS)]
+
+
+def _run_robustness_grid(
     raw_frames_by_sample_mode: Mapping[str, pd.DataFrame],
     horizons: tuple[int, ...] = DEFAULT_ROBUSTNESS_HORIZONS,
     thresholds: tuple[float, ...] = DEFAULT_ROBUSTNESS_THRESHOLDS,
@@ -127,8 +208,13 @@ def build_robustness_scorecard(
     inflation_measures: tuple[str, ...] = DEFAULT_ROBUSTNESS_INFLATION_MEASURES,
     ar_min_observations: int = 24,
     bucket_min_observations: int = 8,
-) -> pd.DataFrame:
-    """Run robustness benchmarks across reasonable settings and inflation measures."""
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run the grid once and return the scorecard plus its coverage disclosure.
+
+    Coverage is recorded per sample/measure/baseline/horizon. Thresholds change
+    only classification labels, never a forecast or a common-origin panel, so
+    coverage does not vary across the threshold dimension.
+    """
 
     sample_items = tuple(raw_frames_by_sample_mode.items())
     if not sample_items:
@@ -139,6 +225,7 @@ def build_robustness_scorecard(
     measure_configs = _inflation_measure_configs(inflation_measures)
 
     rows: list[pd.DataFrame] = []
+    coverage_rows: list[pd.DataFrame] = []
     for sample_mode, raw in sample_items:
         if raw.empty:
             continue
@@ -156,14 +243,38 @@ def build_robustness_scorecard(
                 )
                 for horizon in horizons:
                     for threshold in thresholds:
-                        _, metrics, _, _ = _benchmark_comparison_tables(
-                            featured,
-                            horizon=horizon,
-                            threshold=threshold,
-                            inflation_col=measure.yoy_col,
-                            ar_min_observations=ar_min_observations,
-                            bucket_min_observations=bucket_min_observations,
-                        )
+                        unscored_reason = ""
+                        coverage = pd.DataFrame()
+                        try:
+                            _, metrics, _, _, coverage = _benchmark_comparison_tables(
+                                featured,
+                                horizon=horizon,
+                                threshold=threshold,
+                                inflation_col=measure.yoy_col,
+                                ar_min_observations=ar_min_observations,
+                                bucket_min_observations=bucket_min_observations,
+                            )
+                        except benchmark_mod.EmptyCommonOriginPanelError as exc:
+                            # Disclosed as an unscored cell rather than dropped
+                            # silently or allowed to abort the whole grid. The
+                            # error carries the native coverage, so the reason
+                            # keeps its per-model detail.
+                            metrics = pd.DataFrame()
+                            coverage = exc.coverage
+                            unscored_reason = "empty_common_origin_panel"
+                        if metrics.empty and not unscored_reason:
+                            unscored_reason = "no_eligible_origins"
+                        if threshold == thresholds[0]:
+                            coverage_rows.append(
+                                _cell_coverage(
+                                    coverage,
+                                    sample_mode=sample_mode,
+                                    measure=measure,
+                                    baseline_method=baseline_method,
+                                    horizon=horizon,
+                                    unscored_reason=unscored_reason,
+                                )
+                            )
                         if metrics.empty:
                             continue
                         current = metrics.copy()
@@ -178,8 +289,13 @@ def build_robustness_scorecard(
                         current.insert(8, "threshold_pp", threshold)
                         rows.append(current)
 
+    coverage_frame = (
+        pd.concat(coverage_rows, ignore_index=True)
+        if coverage_rows
+        else pd.DataFrame(columns=list(ROBUSTNESS_COVERAGE_COLUMNS))
+    )
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(), coverage_frame
 
     scorecard = pd.concat(rows, ignore_index=True)
     setting_cols = [
@@ -189,17 +305,53 @@ def build_robustness_scorecard(
         "horizon_months",
         "threshold_pp",
     ]
+    # Ranks are point-estimate orderings on one common-origin panel per setting,
+    # not significance statements.
     scorecard["rank_by_mae"] = (
         scorecard.groupby(setting_cols)["mae"].rank(method="min", ascending=True).astype("Int64")
     )
     scorecard["rank_by_rmse"] = (
         scorecard.groupby(setting_cols)["rmse"].rank(method="min", ascending=True).astype("Int64")
     )
+    return scorecard, coverage_frame
+
+
+def build_robustness_scorecard(
+    raw_frames_by_sample_mode: Mapping[str, pd.DataFrame],
+    horizons: tuple[int, ...] = DEFAULT_ROBUSTNESS_HORIZONS,
+    thresholds: tuple[float, ...] = DEFAULT_ROBUSTNESS_THRESHOLDS,
+    baseline_methods: tuple[str, ...] = DEFAULT_ROBUSTNESS_BASELINES,
+    inflation_measures: tuple[str, ...] = DEFAULT_ROBUSTNESS_INFLATION_MEASURES,
+    ar_min_observations: int = 24,
+    bucket_min_observations: int = 8,
+) -> pd.DataFrame:
+    """Run robustness benchmarks across reasonable settings and inflation measures.
+
+    Every cell is scored on its own universal common-origin panel, so the ranks
+    compare models on identical origins.
+    """
+
+    scorecard, _ = _run_robustness_grid(
+        raw_frames_by_sample_mode,
+        horizons=horizons,
+        thresholds=thresholds,
+        baseline_methods=baseline_methods,
+        inflation_measures=inflation_measures,
+        ar_min_observations=ar_min_observations,
+        bucket_min_observations=bucket_min_observations,
+    )
     return scorecard
 
 
 def tinf_regime_verdict(scorecard: pd.DataFrame) -> pd.DataFrame:
-    """Return one row per setting showing whether TINF/regime beats key baselines."""
+    """Return one row per setting comparing TINF/regime point loss to key baselines.
+
+    Every comparison is a point-estimate ordering on that setting's common
+    origins: ``lower_mae_than_<model>`` says TINF/regime's MAE point estimate is
+    the smaller number, and ``mae_differential_vs_<model>_pp`` gives the signed
+    size of that difference. No significance test is applied (see H10), so these
+    are not statements that one model beats another.
+    """
 
     if scorecard.empty:
         return pd.DataFrame()
@@ -226,13 +378,16 @@ def tinf_regime_verdict(scorecard: pd.DataFrame) -> pd.DataFrame:
         row.update(
             {
                 "count": int(tinf_row["count"]),
+                "common_origin_n": int(tinf_row.get("common_origin_n", tinf_row["count"])),
+                "common_origin_start": tinf_row.get("common_origin_start", pd.NaT),
+                "common_origin_end": tinf_row.get("common_origin_end", pd.NaT),
                 "tinf_mae": float(tinf_row["mae"]),
                 "tinf_rmse": float(tinf_row["rmse"]),
                 "tinf_directional_accuracy": float(tinf_row["directional_accuracy"]),
                 "tinf_rank_by_mae": int(tinf_row["rank_by_mae"]),
                 "tinf_rank_by_rmse": int(tinf_row["rank_by_rmse"]),
-                "tinf_best_by_mae": int(tinf_row["rank_by_mae"]) == 1,
-                "tinf_best_by_rmse": int(tinf_row["rank_by_rmse"]) == 1,
+                "tinf_lowest_mae": int(tinf_row["rank_by_mae"]) == 1,
+                "tinf_lowest_rmse": int(tinf_row["rank_by_rmse"]) == 1,
                 "mae_improvement_vs_no_change_pct": float(
                     tinf_row["mae_improvement_vs_no_change_pct"]
                 ),
@@ -250,19 +405,32 @@ def tinf_regime_verdict(scorecard: pd.DataFrame) -> pd.DataFrame:
         for benchmark in ("no_change", "mean_reversion", "ar1"):
             other = group.loc[group["model"] == benchmark]
             if other.empty:
-                row[f"beats_{benchmark}_mae"] = pd.NA
-                row[f"beats_{benchmark}_rmse"] = pd.NA
+                row[f"lower_mae_than_{benchmark}"] = pd.NA
+                row[f"lower_rmse_than_{benchmark}"] = pd.NA
+                row[f"mae_differential_vs_{benchmark}_pp"] = float("nan")
+                row[f"rmse_differential_vs_{benchmark}_pp"] = float("nan")
             else:
                 other_row = other.iloc[0]
-                row[f"beats_{benchmark}_mae"] = bool(tinf_row["mae"] < other_row["mae"])
-                row[f"beats_{benchmark}_rmse"] = bool(tinf_row["rmse"] < other_row["rmse"])
+                row[f"lower_mae_than_{benchmark}"] = bool(tinf_row["mae"] < other_row["mae"])
+                row[f"lower_rmse_than_{benchmark}"] = bool(tinf_row["rmse"] < other_row["rmse"])
+                row[f"mae_differential_vs_{benchmark}_pp"] = float(
+                    tinf_row["mae"] - other_row["mae"]
+                )
+                row[f"rmse_differential_vs_{benchmark}_pp"] = float(
+                    tinf_row["rmse"] - other_row["rmse"]
+                )
         rows.append(row)
 
     return pd.DataFrame(rows)
 
 
-def robustness_win_rate_summary(verdict: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate TINF/regime win rates across robustness settings."""
+def robustness_lower_loss_rate_summary(verdict: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate how often TINF/regime posts the lower point loss across settings.
+
+    Each rate is the share of settings in which TINF/regime's point estimate is
+    the smaller number on that setting's common origins. It is a frequency of
+    point-estimate orderings, not a win rate and not a significance result.
+    """
 
     if verdict.empty:
         return pd.DataFrame()
@@ -278,14 +446,14 @@ def robustness_win_rate_summary(verdict: pd.DataFrame) -> pd.DataFrame:
         "baseline_label",
     ]
     rate_cols = [
-        "tinf_best_by_mae",
-        "tinf_best_by_rmse",
-        "beats_no_change_mae",
-        "beats_no_change_rmse",
-        "beats_mean_reversion_mae",
-        "beats_mean_reversion_rmse",
-        "beats_ar1_mae",
-        "beats_ar1_rmse",
+        "tinf_lowest_mae",
+        "tinf_lowest_rmse",
+        "lower_mae_than_no_change",
+        "lower_rmse_than_no_change",
+        "lower_mae_than_mean_reversion",
+        "lower_rmse_than_mean_reversion",
+        "lower_mae_than_ar1",
+        "lower_rmse_than_ar1",
     ]
     rows: list[dict[str, object]] = []
     for keys, group in verdict.groupby(group_cols, dropna=False, sort=False):
@@ -305,10 +473,15 @@ def robustness_tables(
     inflation_measures: tuple[str, ...] = DEFAULT_ROBUSTNESS_INFLATION_MEASURES,
     ar_min_observations: int = 24,
     bucket_min_observations: int = 8,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Return scorecard, TINF/regime verdict, and aggregate win-rate tables."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Return scorecard, verdict, lower-loss rates, and the coverage disclosure.
 
-    scorecard = build_robustness_scorecard(
+    The fourth table records every grid cell's per-model native coverage, its
+    common-origin panel, and — for cells that produced no scored row — why, so
+    an absent setting is visible rather than silently missing.
+    """
+
+    scorecard, coverage = _run_robustness_grid(
         raw_frames_by_sample_mode,
         horizons=horizons,
         thresholds=thresholds,
@@ -318,5 +491,5 @@ def robustness_tables(
         bucket_min_observations=bucket_min_observations,
     )
     verdict = tinf_regime_verdict(scorecard)
-    wins = robustness_win_rate_summary(verdict)
-    return scorecard, verdict, wins
+    lower_loss_rates = robustness_lower_loss_rate_summary(verdict)
+    return scorecard, verdict, lower_loss_rates, coverage

@@ -220,7 +220,7 @@ class MacroResearchReport:
     benchmark_metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
     benchmark_comparisons: pd.DataFrame = field(default_factory=pd.DataFrame)
     robustness_verdict: pd.DataFrame = field(default_factory=pd.DataFrame)
-    robustness_win_rates: pd.DataFrame = field(default_factory=pd.DataFrame)
+    robustness_lower_loss_rates: pd.DataFrame = field(default_factory=pd.DataFrame)
     inflation_measure_availability: pd.DataFrame = field(default_factory=pd.DataFrame)
     historical_analogs: pd.DataFrame = field(default_factory=pd.DataFrame)
     market_channel_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -278,17 +278,31 @@ def _benchmark_tables(
     featured: pd.DataFrame,
     horizons: tuple[int, ...],
     threshold_pp: float,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, tuple[int, ...]]:
+    """Return metrics, comparisons, and any horizon with no common-origin panel.
+
+    Skipped horizons are returned rather than dropped so the report can say a
+    horizon is absent instead of quietly omitting it.
+    """
+
     metrics_frames: list[pd.DataFrame] = []
     comparison_rows: list[dict[str, object]] = []
+    unscored_horizons: list[int] = []
 
     for horizon in horizons:
-        _, metrics, _, _ = benchmark_mod.benchmark_comparison_tables(
-            featured,
-            horizon=horizon,
-            threshold_pp=threshold_pp,
-        )
+        try:
+            _, metrics, _, _, _ = benchmark_mod.benchmark_comparison_tables(
+                featured,
+                horizon=horizon,
+                threshold_pp=threshold_pp,
+            )
+        except benchmark_mod.EmptyCommonOriginPanelError:
+            # No shared origin at this horizon: disclose the gap rather than
+            # reporting a comparison built on unequal samples.
+            unscored_horizons.append(int(horizon))
+            continue
         if metrics.empty:
+            unscored_horizons.append(int(horizon))
             continue
         current_metrics = metrics.copy()
         current_metrics.insert(0, "threshold_pp", threshold_pp)
@@ -308,50 +322,85 @@ def _benchmark_tables(
                     "threshold_pp": threshold_pp,
                     "comparison_model": model,
                     "comparison_label": MODEL_LABELS.get(model, model),
+                    "common_origin_n": int(tinf.get("common_origin_n", tinf["count"])),
+                    "common_origin_start": tinf.get("common_origin_start", pd.NaT),
+                    "common_origin_end": tinf.get("common_origin_end", pd.NaT),
                     "tinf_count": int(tinf["count"]),
                     "comparison_count": int(other["count"]),
                     "tinf_mae": float(tinf["mae"]),
                     "comparison_mae": float(other["mae"]),
-                    "beats_mae": bool(tinf["mae"] < other["mae"]),
+                    "mae_differential_pp": float(tinf["mae"] - other["mae"]),
+                    "tinf_lower_mae": bool(tinf["mae"] < other["mae"]),
                     "tinf_rmse": float(tinf["rmse"]),
                     "comparison_rmse": float(other["rmse"]),
-                    "beats_rmse": bool(tinf["rmse"] < other["rmse"]),
+                    "rmse_differential_pp": float(tinf["rmse"] - other["rmse"]),
+                    "tinf_lower_rmse": bool(tinf["rmse"] < other["rmse"]),
                 }
             )
 
     metrics_all = pd.concat(metrics_frames, ignore_index=True) if metrics_frames else pd.DataFrame()
-    return metrics_all, pd.DataFrame(comparison_rows)
+    return metrics_all, pd.DataFrame(comparison_rows), tuple(unscored_horizons)
 
 
-def _benchmark_lines(comparisons: pd.DataFrame) -> tuple[str, ...]:
+def _unscored_horizon_line(unscored_horizons: tuple[int, ...]) -> str:
+    horizons = ", ".join(f"{horizon}M" for horizon in unscored_horizons)
+    return (
+        f"No benchmark comparison is reported at {horizons}: the models share no common "
+        "forecast origin there, so scoring them on unequal samples was refused."
+    )
+
+
+def _benchmark_lines(
+    comparisons: pd.DataFrame,
+    unscored_horizons: tuple[int, ...] = (),
+) -> tuple[str, ...]:
     if comparisons.empty:
-        return ("No benchmark comparison is available for the selected report settings.",)
+        base = ("No benchmark comparison is available for the selected report settings.",)
+        return base + ((_unscored_horizon_line(unscored_horizons),) if unscored_horizons else ())
 
     lines: list[str] = []
+    if unscored_horizons:
+        lines.append(_unscored_horizon_line(unscored_horizons))
+    panel_sizes = sorted({int(value) for value in comparisons["common_origin_n"]})
+    panel_label = (
+        f"{panel_sizes[0]} common origins"
+        if len(panel_sizes) == 1
+        else f"{panel_sizes[0]}-{panel_sizes[-1]} common origins by horizon"
+    )
+    lines.append(
+        f"All benchmark comparisons below are point estimates on one common-origin panel "
+        f"per horizon ({panel_label}); every model is scored on identical origins."
+    )
     for model in ("no_change", "cpi_persistence", "mean_reversion", "ar1"):
         group = comparisons.loc[comparisons["comparison_model"] == model]
         if group.empty:
             continue
-        mae_wins = int(group["beats_mae"].sum())
-        rmse_wins = int(group["beats_rmse"].sum())
+        mae_lower = int(group["tinf_lower_mae"].sum())
+        rmse_lower = int(group["tinf_lower_rmse"].sum())
         total = int(len(group))
         label = MODEL_LABELS.get(model, model)
         lines.append(
-            f"TINF/regime beats {label} in {mae_wins}/{total} tested horizons by MAE "
-            f"and {rmse_wins}/{total} by RMSE."
+            f"TINF/regime has the lower MAE point estimate than {label} at "
+            f"{mae_lower}/{total} tested horizons, and the lower RMSE point estimate at "
+            f"{rmse_lower}/{total}."
         )
 
     ar1 = comparisons.loc[comparisons["comparison_model"] == "ar1"]
     if not ar1.empty:
-        ar1_beats_mae = int((~ar1["beats_mae"]).sum())
-        ar1_beats_rmse = int((~ar1["beats_rmse"]).sum())
-        if ar1_beats_mae or ar1_beats_rmse:
+        ar1_lower_mae = int((~ar1["tinf_lower_mae"]).sum())
+        ar1_lower_rmse = int((~ar1["tinf_lower_rmse"]).sum())
+        if ar1_lower_mae or ar1_lower_rmse:
             lines.append(
-                "AR(1) has lower CPI point-forecast error than TINF/regime in "
-                f"{ar1_beats_mae}/{len(ar1)} horizons by MAE and "
-                f"{ar1_beats_rmse}/{len(ar1)} by RMSE; do not overstate TINF/regime "
+                "AR(1) posts the lower CPI point-forecast error at "
+                f"{ar1_lower_mae}/{len(ar1)} horizons by MAE and "
+                f"{ar1_lower_rmse}/{len(ar1)} by RMSE; do not overstate TINF/regime "
                 "as a pure CPI forecast model."
             )
+    lines.append(
+        "These counts order point estimates only. No significance test, uncertainty "
+        "interval, or overlap adjustment is applied, so a smaller number is not "
+        "evidence that one model outperforms another."
+    )
     lines.append(
         "Best framing: TINF/regime is an interpretable inflation-regime diagnostic; "
         "it does not automatically dominate simple point-forecast benchmarks."
@@ -371,17 +420,17 @@ def _robustness_tables(
         raw_frames_by_sample_mode,
         inflation_measures=inflation_measures,
     )
-    scorecard, verdict, win_rates = robustness_mod.robustness_tables(
+    scorecard, verdict, lower_loss_rates, _coverage = robustness_mod.robustness_tables(
         raw_frames_by_sample_mode,
         baseline_methods=baselines,
         inflation_measures=inflation_measures,
     )
-    return availability, verdict, win_rates
+    return availability, verdict, lower_loss_rates
 
 
 def _robustness_lines(
     verdict: pd.DataFrame,
-    win_rates: pd.DataFrame,
+    lower_loss_rates: pd.DataFrame,
     availability: pd.DataFrame,
 ) -> tuple[str, ...]:
     lines: list[str] = []
@@ -399,17 +448,20 @@ def _robustness_lines(
         return tuple(lines)
 
     settings_count = int(len(verdict))
-    best_mae = float(verdict["tinf_best_by_mae"].dropna().astype(float).mean())
-    best_rmse = float(verdict["tinf_best_by_rmse"].dropna().astype(float).mean())
-    beats_ar1_mae = float(verdict["beats_ar1_mae"].dropna().astype(float).mean())
-    beats_ar1_rmse = float(verdict["beats_ar1_rmse"].dropna().astype(float).mean())
+    lowest_mae = float(verdict["tinf_lowest_mae"].dropna().astype(float).mean())
+    lowest_rmse = float(verdict["tinf_lowest_rmse"].dropna().astype(float).mean())
+    lower_mae_ar1 = float(verdict["lower_mae_than_ar1"].dropna().astype(float).mean())
+    lower_rmse_ar1 = float(verdict["lower_rmse_than_ar1"].dropna().astype(float).mean())
     lines.append(
-        f"Across {settings_count} robustness settings, TINF/regime is best by MAE "
-        f"{best_mae:.0%} of the time and best by RMSE {best_rmse:.0%} of the time."
+        f"Across {settings_count} robustness settings — each scored on its own common-origin "
+        f"panel — TINF/regime holds the lowest MAE point estimate in {lowest_mae:.0%} of "
+        f"settings and the lowest RMSE point estimate in {lowest_rmse:.0%}."
     )
     lines.append(
-        f"Against AR(1), TINF/regime wins {beats_ar1_mae:.0%} of settings by MAE "
-        f"and {beats_ar1_rmse:.0%} by RMSE."
+        f"Against AR(1), TINF/regime posts the lower MAE point estimate in "
+        f"{lower_mae_ar1:.0%} of settings and the lower RMSE point estimate in "
+        f"{lower_rmse_ar1:.0%}. These are orderings of point estimates, not significance "
+        "results."
     )
 
     measures = ", ".join(
@@ -424,10 +476,10 @@ def _robustness_lines(
             "Rows using full_sample or other non-row-lookahead-safe baselines are ex-post / paper-style "
             "checks, not live-signal evidence."
         )
-    if not win_rates.empty:
+    if not lower_loss_rates.empty:
         lines.append(
-            "Aggregate win-rate rows are diagnostics across the fixed grid; they are not a "
-            "threshold-optimization rule."
+            "Aggregate lower-point-loss rates are diagnostics across the fixed grid; they are "
+            "not a threshold-optimization rule."
         )
     return tuple(lines)
 
@@ -1186,12 +1238,15 @@ def build_macro_research_report(
             "scored evidence endpoints vary by horizon.",
             *scenario_lines,
         )
-    benchmark_metrics, benchmark_comparisons = _benchmark_tables(
+    benchmark_metrics, benchmark_comparisons, unscored_benchmark_horizons = _benchmark_tables(
         featured,
         horizons=benchmark_horizons,
         threshold_pp=threshold_pp,
     )
-    signal_confidence_lines = _benchmark_lines(benchmark_comparisons)
+    signal_confidence_lines = _benchmark_lines(
+        benchmark_comparisons,
+        unscored_benchmark_horizons,
+    )
 
     robust_frames = robustness_sample_frames or {sample_mode: raw}
     for frame_name, robust_frame in robust_frames.items():
@@ -1199,14 +1254,14 @@ def build_macro_research_report(
             robust_frame,
             label=f"Macro report robustness frame '{frame_name}'",
         )
-    availability, robustness_verdict, robustness_win_rates = _robustness_tables(
+    availability, robustness_verdict, robustness_lower_loss_rates = _robustness_tables(
         robust_frames,
         baselines=robustness_baselines,
         inflation_measures=robustness_inflation_measures,
     )
     robustness_lines = _robustness_lines(
         robustness_verdict,
-        robustness_win_rates,
+        robustness_lower_loss_rates,
         availability,
     )
 
@@ -1392,7 +1447,7 @@ def build_macro_research_report(
         benchmark_metrics=benchmark_metrics,
         benchmark_comparisons=benchmark_comparisons,
         robustness_verdict=robustness_verdict,
-        robustness_win_rates=robustness_win_rates,
+        robustness_lower_loss_rates=robustness_lower_loss_rates,
         inflation_measure_availability=availability,
         historical_analogs=analogs,
         market_channel_summary=market_summary,

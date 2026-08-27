@@ -581,9 +581,10 @@ def forward_change_by_regime_channel_figure(
 
 
 # Batch-3 "evidence tab" figure (Benchmark). Diverging bars of one model's
-# MAE/RMSE improvement vs each naive baseline — cold when the model wins (lower
-# error), hot when it trails. Presentation only: plots the improvement
-# percentages the benchmark layer already computed, no rescoring.
+# MAE/RMSE loss differential vs each naive baseline — cold when the model's
+# point loss is lower, hot when it is higher. Presentation only: plots the
+# percentages the benchmark layer already computed on the common-origin panel,
+# no rescoring and no significance claim.
 _IMPROVEMENT_BASELINE_LABELS: dict[str, str] = {
     "no_change": "No-change",
     "mean_reversion": "Mean-reversion",
@@ -649,7 +650,7 @@ def improvement_diverging_figure(
     fig.add_vline(x=0, line_dash="dot", line_color=NEUTRAL)
     return apply_macro_theme(
         fig,
-        title=title or "TINF improvement vs benchmarks",
-        xaxis_title="MAE / RMSE improvement % (positive → TINF wins)",
+        title=title or "TINF loss differential vs benchmarks",
+        xaxis_title="MAE / RMSE loss differential % (positive → TINF lower point loss)",
         hovermode="closest",
     )

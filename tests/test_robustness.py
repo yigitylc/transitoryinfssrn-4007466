@@ -3,10 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from transitory_inflation.benchmarks import BENCHMARK_MODELS
 from transitory_inflation.robustness import (
     DEFAULT_ROBUSTNESS_HORIZONS,
     DEFAULT_ROBUSTNESS_INFLATION_MEASURES,
     DEFAULT_ROBUSTNESS_THRESHOLDS,
+    ROBUSTNESS_COVERAGE_COLUMNS,
+    UNSCORED_CELL_REASONS,
     build_robustness_scorecard,
     inflation_measure_availability,
     robustness_tables,
@@ -115,7 +118,7 @@ def test_full_sample_is_labeled_ex_post_when_included() -> None:
     assert set(scorecard["baseline_label"]) == {"ex-post / paper-style only"}
 
 
-def test_tinf_regime_verdict_has_benchmark_beat_flags() -> None:
+def test_tinf_regime_verdict_has_lower_loss_flags_and_differentials() -> None:
     scorecard = build_robustness_scorecard(
         {"unit_sample": _raw_cpi_frame()},
         horizons=(3,),
@@ -130,17 +133,25 @@ def test_tinf_regime_verdict_has_benchmark_beat_flags() -> None:
 
     assert not verdict.empty
     assert {
-        "beats_no_change_mae",
-        "beats_no_change_rmse",
-        "beats_mean_reversion_mae",
-        "beats_mean_reversion_rmse",
-        "beats_ar1_mae",
-        "beats_ar1_rmse",
+        "lower_mae_than_no_change",
+        "lower_rmse_than_no_change",
+        "lower_mae_than_mean_reversion",
+        "lower_rmse_than_mean_reversion",
+        "lower_mae_than_ar1",
+        "lower_rmse_than_ar1",
+        "mae_differential_vs_no_change_pp",
+        "rmse_differential_vs_no_change_pp",
+        "mae_differential_vs_mean_reversion_pp",
+        "rmse_differential_vs_mean_reversion_pp",
+        "mae_differential_vs_ar1_pp",
+        "rmse_differential_vs_ar1_pp",
     }.issubset(verdict.columns)
+    # Neutral point-estimate language only: no "beats"/"wins" claim columns.
+    assert not [column for column in verdict.columns if "beats" in column or "win" in column]
 
 
 def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
-    scorecard, verdict, win_rates = robustness_tables(
+    scorecard, verdict, lower_loss_rates, coverage = robustness_tables(
         {"unit_sample": _raw_multi_measure_frame()},
         horizons=(3,),
         thresholds=(0.50,),
@@ -163,6 +174,9 @@ def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
         "model",
         "horizon_months",
         "count",
+        "common_origin_n",
+        "common_origin_start",
+        "common_origin_end",
         "mae",
         "rmse",
         "directional_accuracy",
@@ -193,25 +207,34 @@ def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
         "horizon_months",
         "threshold_pp",
         "count",
+        "common_origin_n",
+        "common_origin_start",
+        "common_origin_end",
         "tinf_mae",
         "tinf_rmse",
         "tinf_directional_accuracy",
         "tinf_rank_by_mae",
         "tinf_rank_by_rmse",
-        "tinf_best_by_mae",
-        "tinf_best_by_rmse",
+        "tinf_lowest_mae",
+        "tinf_lowest_rmse",
         "mae_improvement_vs_no_change_pct",
         "rmse_improvement_vs_no_change_pct",
         "mae_improvement_vs_mean_reversion_pct",
         "rmse_improvement_vs_mean_reversion_pct",
-        "beats_no_change_mae",
-        "beats_no_change_rmse",
-        "beats_mean_reversion_mae",
-        "beats_mean_reversion_rmse",
-        "beats_ar1_mae",
-        "beats_ar1_rmse",
+        "lower_mae_than_no_change",
+        "lower_rmse_than_no_change",
+        "lower_mae_than_mean_reversion",
+        "lower_rmse_than_mean_reversion",
+        "lower_mae_than_ar1",
+        "lower_rmse_than_ar1",
+        "mae_differential_vs_no_change_pp",
+        "rmse_differential_vs_no_change_pp",
+        "mae_differential_vs_mean_reversion_pp",
+        "rmse_differential_vs_mean_reversion_pp",
+        "mae_differential_vs_ar1_pp",
+        "rmse_differential_vs_ar1_pp",
     }
-    expected_win_rate_columns = {
+    expected_lower_loss_rate_columns = {
         "sample_mode",
         "inflation_measure",
         "inflation_measure_label",
@@ -221,19 +244,26 @@ def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
         "baseline_live_safe",
         "baseline_label",
         "settings_count",
-        "tinf_best_by_mae_rate",
-        "tinf_best_by_rmse_rate",
-        "beats_no_change_mae_rate",
-        "beats_no_change_rmse_rate",
-        "beats_mean_reversion_mae_rate",
-        "beats_mean_reversion_rmse_rate",
-        "beats_ar1_mae_rate",
-        "beats_ar1_rmse_rate",
+        "tinf_lowest_mae_rate",
+        "tinf_lowest_rmse_rate",
+        "lower_mae_than_no_change_rate",
+        "lower_rmse_than_no_change_rate",
+        "lower_mae_than_mean_reversion_rate",
+        "lower_rmse_than_mean_reversion_rate",
+        "lower_mae_than_ar1_rate",
+        "lower_rmse_than_ar1_rate",
     }
 
     assert set(scorecard.columns) <= expected_scorecard_columns
     assert set(verdict.columns) <= expected_verdict_columns
-    assert set(win_rates.columns) <= expected_win_rate_columns
+    assert set(lower_loss_rates.columns) <= expected_lower_loss_rate_columns
+    assert set(coverage.columns) == set(ROBUSTNESS_COVERAGE_COLUMNS)
+    assert not [
+        column
+        for frame in (scorecard, verdict, lower_loss_rates, coverage)
+        for column in frame.columns
+        if "beats" in column or "win" in column
+    ]
 
 
 def test_robustness_rejects_authoritative_estimate_only_rows() -> None:
@@ -266,3 +296,93 @@ def test_robustness_rejects_authoritative_estimate_only_rows() -> None:
 
     pd.testing.assert_frame_equal(base_scorecard, changed_scorecard)
     assert availability["valid_observations"] == len(raw) - 1
+
+
+def test_robustness_coverage_discloses_unscored_cells_and_common_panels() -> None:
+    """H2: absent grid cells are visible as an absence, not silently dropped."""
+
+    raw = _raw_cpi_frame()
+    scorecard, _, _, coverage = robustness_tables(
+        {"unit_sample": raw},
+        # 3M is scoreable on this fixture; the long horizon leaves no shared origin.
+        horizons=(3, 120),
+        thresholds=(0.50,),
+        baseline_methods=("rolling_36_shifted",),
+        inflation_measures=("headline_cpi",),
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+
+    assert not coverage.empty
+    assert set(coverage["model"]) == set(BENCHMARK_MODELS)
+    # Coverage is recorded once per horizon, for every requested horizon,
+    # including the ones that produced no scored row.
+    assert set(coverage["horizon_months"]) == {3, 120}
+
+    scored = coverage.loc[coverage["horizon_months"] == 3]
+    assert scored["scored"].all()
+    assert scored["unscored_reason"].isna().all()
+    assert scored["common_origin_n"].gt(0).all()
+    assert scored["common_origin_start"].notna().all()
+    assert scored["common_origin_end"].notna().all()
+
+    unscored = coverage.loc[coverage["horizon_months"] == 120]
+    assert not unscored["scored"].any()
+    assert unscored["unscored_reason"].isin(set(UNSCORED_CELL_REASONS)).all()
+    assert unscored["unscored_detail"].map(bool).all()
+    # The unscored horizon is genuinely absent from the scored tables.
+    assert 120 not in set(scorecard["horizon_months"])
+
+
+def test_robustness_scorecard_scores_every_model_on_one_common_panel() -> None:
+    scorecard, verdict, _, _ = robustness_tables(
+        {"unit_sample": _raw_cpi_frame()},
+        horizons=(3, 6),
+        thresholds=(0.50,),
+        baseline_methods=("rolling_36_shifted",),
+        inflation_measures=("headline_cpi",),
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+
+    setting_cols = ["sample_mode", "inflation_measure", "baseline_method", "horizon_months"]
+    for _, group in scorecard.groupby(setting_cols, sort=False):
+        assert set(group["model"]) == set(BENCHMARK_MODELS)
+        assert group["count"].nunique() == 1
+        assert group["classification_count"].nunique() == 1
+        assert group["common_origin_n"].nunique() == 1
+        assert int(group["count"].iloc[0]) == int(group["common_origin_n"].iloc[0])
+        # Ranks are over models scored on identical origins.
+        assert sorted(group["rank_by_mae"].tolist()) == list(range(1, len(BENCHMARK_MODELS) + 1))
+
+    assert verdict["common_origin_n"].gt(0).all()
+
+
+def test_unscored_cell_keeps_native_coverage_when_the_panel_is_empty() -> None:
+    """An empty common panel is disclosed with each model's native counts intact."""
+
+    _, _, _, coverage = robustness_tables(
+        {"unit_sample": _raw_cpi_frame()},
+        # No origin survives to a 120-month outcome once the regime warm-up bites,
+        # yet the simplest models still produce forecasts.
+        horizons=(120,),
+        thresholds=(0.50,),
+        baseline_methods=("rolling_36_shifted",),
+        inflation_measures=("headline_cpi",),
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+
+    assert not coverage["scored"].any()
+    assert (coverage["unscored_reason"] == "empty_common_origin_panel").all()
+    assert (
+        coverage["unscored_detail"] == UNSCORED_CELL_REASONS["empty_common_origin_panel"]
+    ).all()
+    # The panel is empty, but the diagnostic still reports what each model had.
+    assert coverage["common_origin_n"].eq(0).all()
+    assert coverage["native_count"].max() > 0
+    by_model = coverage.set_index("model")
+    assert int(by_model.loc["no_change", "native_count"]) > 0
+    assert int(by_model.loc["tinf_regime_bucket", "native_count"]) == 0
+    # Nothing is claimed as shared, so every native origin sits outside the panel.
+    assert (coverage["origins_outside_common_panel"] == coverage["native_count"]).all()

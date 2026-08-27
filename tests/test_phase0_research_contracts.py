@@ -51,13 +51,6 @@ PENDING_H1_CACHE_PROVENANCE = pytest.mark.xfail(
         "ex-post imputation lineage"
     ),
 )
-PENDING_H2_COMMON_SAMPLE = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "H2 common sample: every benchmark model must use one universal "
-        "origin set per horizon"
-    ),
-)
 PENDING_H4_DENOMINATORS = pytest.mark.xfail(
     strict=True,
     reason=(
@@ -559,7 +552,6 @@ def test_perfect_forecast_and_actual_use_the_same_origin_baseline() -> None:
     assert bool(row["actual_persistent_high_inflation"])
 
 
-@PENDING_H2_COMMON_SAMPLE
 def test_benchmark_forecasts_use_one_universal_origin_set_for_all_models() -> None:
     forecasts = build_benchmark_forecasts(
         _benchmark_feature_frame(90),
@@ -653,7 +645,6 @@ def test_unrelated_phase0_findings_remain_strict_xfail_gates() -> None:
     expected_pending_tests = {
         "test_current_paper_surface_is_explicitly_paper_inspired",
         "test_paper_reconstruction_uses_literal_lag_and_a_separate_feature_path",
-        "test_benchmark_forecasts_use_one_universal_origin_set_for_all_models",
         "test_overlapping_horizons_do_not_emit_naive_uncertainty",
     }
 

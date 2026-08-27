@@ -853,3 +853,87 @@ def test_report_rejects_estimated_robustness_override() -> None:
             market_horizons=(3,),
             robustness_baselines=("fed_target",),
         )
+
+
+def test_macro_report_uses_common_origin_panels_and_neutral_loss_language() -> None:
+    """H2: report comparisons are common-origin point estimates, not win claims."""
+
+    raw = _raw_frame(months=180)
+    df = add_transitory_inflation_features(raw, baseline_method="fed_target")
+
+    report = build_macro_research_report(
+        raw,
+        df,
+        baseline_method="fed_target",
+        sample_mode="live_dashboard",
+        macro_status={"data_source_used": "unit"},
+        market_monthly=None,
+        market_status=None,
+        benchmark_horizons=(3, 6),
+        market_horizons=(3,),
+        robustness_baselines=("fed_target",),
+    )
+
+    comparisons = report.benchmark_comparisons
+    assert not comparisons.empty
+    assert {
+        "common_origin_n",
+        "common_origin_start",
+        "common_origin_end",
+        "tinf_lower_mae",
+        "tinf_lower_rmse",
+        "mae_differential_pp",
+        "rmse_differential_pp",
+    }.issubset(comparisons.columns)
+
+    # Both sides of every comparison are scored on the same origins.
+    assert (comparisons["tinf_count"] == comparisons["comparison_count"]).all()
+    assert (comparisons["tinf_count"] == comparisons["common_origin_n"]).all()
+
+    # Every benchmark model in the report is scored on its horizon's panel.
+    metrics = report.benchmark_metrics
+    for _, group in metrics.groupby("horizon_months", sort=False):
+        assert group["count"].nunique() == 1
+        assert group["common_origin_n"].nunique() == 1
+
+    # Neutral point-estimate language only; significance is deferred to H10.
+    prose = " ".join(
+        [*report.signal_confidence_lines, *report.robustness_lines, *report.caveats]
+    ).lower()
+    for banned in (" beats ", " wins ", "win rate", "best by mae", "best by rmse"):
+        assert banned not in prose
+    assert "point estimate" in prose
+    assert any("common-origin panel" in line for line in report.signal_confidence_lines)
+    # "outperform" may appear only inside the explicit no-significance disclaimer.
+    assert "not evidence that one model outperforms another" in prose
+    assert prose.count("outperform") == 1
+
+    offending = [
+        column
+        for frame in (report.benchmark_metrics, report.benchmark_comparisons,
+                      report.robustness_verdict, report.robustness_lower_loss_rates)
+        for column in frame.columns
+        if "beats" in str(column).lower() or "win" in str(column).lower()
+    ]
+    assert not offending
+
+
+def test_report_discloses_a_horizon_with_no_common_origin_panel() -> None:
+    """H2: an unscoreable horizon is named, never silently omitted."""
+
+    raw = _raw_frame(months=180)
+    df = add_transitory_inflation_features(raw, baseline_method="fed_target")
+
+    metrics, comparisons, unscored = report_mod._benchmark_tables(
+        df,
+        horizons=(3, 170),
+        threshold_pp=0.50,
+    )
+
+    assert 170 in unscored
+    assert 170 not in set(comparisons["horizon_months"])
+    assert 170 not in set(metrics["horizon_months"])
+
+    lines = report_mod._benchmark_lines(comparisons, unscored)
+    assert any("170M" in line for line in lines)
+    assert any("share no common forecast origin" in line for line in lines)

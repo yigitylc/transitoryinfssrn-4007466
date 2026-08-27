@@ -6,10 +6,13 @@ import pytest
 
 from transitory_inflation.benchmarks import (
     BENCHMARK_MODELS,
+    EmptyCommonOriginPanelError,
     benchmark_comparison_tables,
     benchmark_confusion_summary,
     benchmark_metric_summary,
     build_benchmark_forecasts,
+    build_native_benchmark_forecasts,
+    restrict_to_common_origins,
 )
 from transitory_inflation.features import add_transitory_inflation_features
 
@@ -46,7 +49,7 @@ def _classification_frame(periods: int = 50) -> pd.DataFrame:
 def test_benchmark_outputs_include_required_models_and_tables() -> None:
     df = _feature_frame()
 
-    forecasts, metrics, improvements, confusion = benchmark_comparison_tables(
+    forecasts, metrics, improvements, confusion, coverage = benchmark_comparison_tables(
         df,
         horizon=3,
         ar_min_observations=8,
@@ -64,6 +67,7 @@ def test_benchmark_outputs_include_required_models_and_tables() -> None:
         "mae_improvement_vs_no_change_pct",
         "rmse_improvement_vs_mean_reversion_pct",
     }.issubset(metrics.columns)
+    assert set(coverage["model"]) == set(BENCHMARK_MODELS)
 
 
 def test_benchmark_metrics_are_calculated_correctly() -> None:
@@ -298,3 +302,193 @@ def test_benchmarks_reject_authoritative_estimate_only_origins_and_targets() -> 
     assert set(forecasts["model"]) == set(BENCHMARK_MODELS)
     for base_table, changed_table in zip(tables, changed_tables, strict=True):
         pd.testing.assert_frame_equal(base_table, changed_table)
+
+
+def test_common_origin_panel_equalizes_every_metric_denominator() -> None:
+    """H2: point-loss, directional, and classification denominators must match."""
+
+    frame = _feature_frame(120)
+    forecasts, metrics, _, _, _ = benchmark_comparison_tables(
+        frame,
+        horizon=3,
+        ar_min_observations=24,
+        bucket_min_observations=8,
+    )
+
+    origins_by_model = {
+        model: frozenset(group["date"]) for model, group in forecasts.groupby("model", sort=False)
+    }
+    assert set(origins_by_model) == set(BENCHMARK_MODELS)
+    assert len(set(origins_by_model.values())) == 1
+
+    assert metrics["count"].nunique() == 1
+    assert metrics["classification_count"].nunique() == 1
+    assert metrics["common_origin_n"].nunique() == 1
+    assert int(metrics["count"].iloc[0]) == int(metrics["common_origin_n"].iloc[0])
+
+    panel = next(iter(origins_by_model.values()))
+    assert int(metrics["common_origin_n"].iloc[0]) == len(panel)
+    assert metrics["common_origin_start"].iloc[0] == min(panel)
+    assert metrics["common_origin_end"].iloc[0] == max(panel)
+
+
+def test_common_panel_only_removes_native_origins() -> None:
+    """Restriction is a strict subset, so observed-only gating is untouched."""
+
+    frame = _feature_frame(120)
+    native = build_native_benchmark_forecasts(
+        frame,
+        horizon=3,
+        ar_min_observations=24,
+        bucket_min_observations=8,
+    )
+    common = restrict_to_common_origins(native, horizon=3)
+
+    native_pairs = set(zip(native["model"], native["date"], strict=True))
+    common_pairs = set(zip(common["model"], common["date"], strict=True))
+    assert common_pairs <= native_pairs
+    assert not common_pairs - native_pairs
+
+    panel = frozenset(common["date"])
+    for model in BENCHMARK_MODELS:
+        model_native = frozenset(native.loc[native["model"] == model, "date"])
+        assert panel <= model_native
+
+
+def test_native_coverage_diagnostic_discloses_per_model_exclusions() -> None:
+    frame = _feature_frame(120)
+    _, metrics, _, _, coverage = benchmark_comparison_tables(
+        frame,
+        horizon=3,
+        ar_min_observations=24,
+        bucket_min_observations=8,
+    )
+
+    assert set(coverage["model"]) == set(BENCHMARK_MODELS)
+    assert coverage["native_exclusion_reason"].map(bool).all()
+    assert coverage["common_origin_n"].nunique() == 1
+    assert int(coverage["common_origin_n"].iloc[0]) == int(metrics["common_origin_n"].iloc[0])
+
+    by_model = coverage.set_index("model")
+    # Native samples are unequal, which is exactly why a common panel is needed.
+    assert by_model["native_count"].nunique() > 1
+    # No-change has the widest native sample and drops origins the panel excludes.
+    assert int(by_model.loc["no_change", "origins_outside_common_panel"]) > 0
+    # The narrowest model defines the panel, so nothing of its own is dropped.
+    narrowest = by_model["native_count"].idxmin()
+    assert int(by_model.loc[narrowest, "origins_outside_common_panel"]) == 0
+    for model in BENCHMARK_MODELS:
+        row = by_model.loc[model]
+        assert int(row["native_count"]) - int(row["origins_outside_common_panel"]) == int(
+            row["common_origin_n"]
+        )
+
+
+def test_empty_common_origin_panel_fails_explicitly() -> None:
+    """Never score silently on unequal samples when no origin is shared."""
+
+    frame = _feature_frame(48)
+    with pytest.raises(EmptyCommonOriginPanelError) as excinfo:
+        build_benchmark_forecasts(
+            frame,
+            horizon=12,
+            ar_min_observations=24,
+            bucket_min_observations=8,
+        )
+    message = str(excinfo.value)
+    assert "12m" in message
+    assert "no_change=" in message
+
+    # The failure carries the native coverage so a caller can disclose the skip
+    # with per-model detail instead of reporting an unexplained blank.
+    coverage = excinfo.value.coverage
+    assert set(coverage["model"]) == set(BENCHMARK_MODELS)
+    assert coverage["native_count"].max() > 0
+    assert coverage["common_origin_n"].eq(0).all()
+
+    with pytest.raises(EmptyCommonOriginPanelError):
+        benchmark_comparison_tables(
+            frame,
+            horizon=12,
+            ar_min_observations=24,
+            bucket_min_observations=8,
+        )
+
+
+def test_sample_with_no_forecasts_returns_empty_instead_of_failing() -> None:
+    """Nothing to score is not the same failure as an empty common panel."""
+
+    # A horizon longer than the sample leaves no origin with a realized outcome,
+    # so no model produces a forecast row and there is simply nothing to score.
+    frame = _feature_frame(20)
+    native = build_native_benchmark_forecasts(
+        frame,
+        horizon=25,
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+    assert native.empty
+
+    forecasts = build_benchmark_forecasts(
+        frame,
+        horizon=25,
+        ar_min_observations=8,
+        bucket_min_observations=1,
+    )
+    assert forecasts.empty
+
+
+def test_common_panel_scoring_can_reorder_models_versus_native_samples() -> None:
+    """H2 regression: native-sample ranks are not the common-origin ranks."""
+
+    frame = _feature_frame(150)
+    native = build_native_benchmark_forecasts(
+        frame,
+        horizon=6,
+        ar_min_observations=24,
+        bucket_min_observations=8,
+    )
+    common = restrict_to_common_origins(native, horizon=6)
+
+    def mae_by_model(forecasts: pd.DataFrame) -> pd.Series:
+        errors = forecasts.assign(
+            abs_error=(forecasts["forecast_cpi_yoy"] - forecasts["actual_cpi_yoy"]).abs()
+        )
+        return errors.groupby("model")["abs_error"].mean()
+
+    native_mae = mae_by_model(native)
+    common_mae = mae_by_model(common)
+
+    # The narrowest model already scores on the panel, so only its rivals move.
+    narrowest = native.groupby("model")["date"].nunique().idxmin()
+    assert native_mae[narrowest] == pytest.approx(common_mae[narrowest])
+    moved = [
+        model
+        for model in BENCHMARK_MODELS
+        if model != narrowest and native_mae[model] != pytest.approx(common_mae[model])
+    ]
+    assert moved, "restricting to common origins must change the rivals' scores"
+
+    # The shipped summary reports the common-origin numbers, not the native ones.
+    metrics = benchmark_metric_summary(common).set_index("model")
+    for model in BENCHMARK_MODELS:
+        assert float(metrics.loc[model, "mae"]) == pytest.approx(float(common_mae[model]))
+
+
+def test_benchmark_tables_carry_no_win_or_beat_claim_columns() -> None:
+    """Point-estimate language only; significance is H10's scope, not H2's."""
+
+    frame = _feature_frame(120)
+    tables = benchmark_comparison_tables(
+        frame,
+        horizon=3,
+        ar_min_observations=24,
+        bucket_min_observations=8,
+    )
+    offending = [
+        column
+        for table in tables
+        for column in table.columns
+        if "beats" in str(column).lower() or "win" in str(column).lower()
+    ]
+    assert not offending

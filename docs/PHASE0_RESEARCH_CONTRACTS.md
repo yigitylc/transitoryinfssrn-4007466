@@ -301,6 +301,32 @@ metrics, ranks, robustness verdicts, cards, and report claims use the universal 
 Pairwise comparisons may use larger pairwise intersections, but must report their own count, date
 range, and missing-forecast reasons. Pairwise results cannot determine universal ranks or headlines.
 
+Implemented rules (H2):
+
+1. Benchmark forecast output is restricted to the universal panel before any public metric,
+   rank, robustness, card, or report summary consumes it. One restriction equalizes all three
+   metric families, because a model without a forecast has neither a directional change nor a
+   predicted classification label.
+2. The panel is computed per horizon. Thresholds change classification labels only, never a
+   forecast or a panel, so the panel does not vary across the threshold dimension.
+3. Restriction is a strict subset of the already observed-only-gated native frame. It only
+   removes origins and never re-admits one, so observed-only trust, missing-CPI separation, and
+   the frozen origin-baseline classification anchors are preserved unchanged.
+4. When models produce forecasts but share no origin, scoring fails explicitly rather than
+   reporting nothing or reporting unequal samples. A sample in which no model can forecast at
+   all is a different case and yields an empty result with a disclosed reason.
+5. Native per-model samples remain available strictly as a labelled coverage diagnostic:
+   native count, native start/end, origins outside the panel, and the structural reason that
+   model's warm-up differs. Native-sample errors are never comparable across models and may not
+   be ranked, because the excluded origins are systematically the hardest in the sample.
+6. Every scored surface publishes its panel identity: `common_origin_n`,
+   `common_origin_start`, `common_origin_end`. Grid cells that produced no scored row are
+   disclosed with their reason instead of being dropped silently.
+7. Until the section 7 uncertainty treatment exists, comparisons use neutral point-estimate
+   language only: `lower_mae_than_<model>`, `tinf_lowest_mae`, `<metric>_differential_<...>_pp`,
+   and "lower point estimate" prose. `beats`, `wins`, and win-rate naming are prohibited in
+   columns, chart labels, cards, and report sentences.
+
 ## 7. Evidence-strength contract
 
 Every statistic reports its own denominator. Binary rates also report their numerator. Required
@@ -338,7 +364,10 @@ The first implementation-facing interfaces are frozen as follows:
   `ex_post_continuity`. The `low`, `base`, and `high` values are scenario identifiers within the
   ex-post current-monitoring policy, not additional imputation policies.
 - Benchmark forecast output is prefiltered to universal common origins before public metric,
-  robustness, or report summaries consume it.
+  robustness, or report summaries consume it. Implemented: `build_benchmark_forecasts` returns
+  the restricted panel, `build_native_benchmark_forecasts` exposes the unrestricted frame as a
+  diagnostic, `benchmark_origin_coverage` publishes per-model coverage, and
+  `EmptyCommonOriginPanelError` makes an empty panel fatal rather than silent.
 - Validation summaries retain the generic complete-future-row `count`, but each rate adds
   `<rate>_numerator`, `<rate>_n_applicable`, `<rate>_evidence_strength`, and
   `<rate>_weak_evidence`. Horizon summaries also add `overlapping_outcomes`,
