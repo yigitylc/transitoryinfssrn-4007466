@@ -240,13 +240,42 @@ def _require_observed_only_authority(frame: pd.DataFrame, *, label: str) -> None
 
     Individual ineligible rows remain in calendar order so lag and horizon
     construction cannot collapse time. Every historical consumer applies the
-    same row mask before membership or scoring.
+    same row mask before membership or scoring. This is a defensive contract
+    check for frames a caller supplies directly (for example an explicit
+    ``robustness_sample_frames`` override); it is not applied to the normal
+    Report-tab ``raw``/``featured`` inputs, which can reach zero eligible rows
+    through ordinary routing (see ``_historical_evidence_gap``) and must
+    disclose that rather than raise.
     """
 
     if frame is None or frame.empty:
         return
     if not observed_only_historical_eligibility(frame).any():
         raise ValueError(f"{label} has no observed-only eligible rows")
+
+
+def _historical_evidence_gap(frame: pd.DataFrame, *, label: str) -> str | None:
+    """Return a disclosure reason when a normal-routing frame has zero eligible rows.
+
+    An unbounded baseline such as ``full_sample`` has no local window: its
+    value at every row depends on the whole loaded column, so one
+    missing/estimated CPI month anywhere in the sample (for example the
+    permanent 2025-10 gap) marks every row's baseline, epsilon, and TINF
+    lineage as depending on that month, and the entire frame can legitimately
+    fail the observed-only gate. That is a reachable outcome of the
+    fail-closed methodology under normal Report-tab routing, not a
+    programming error, so it must be disclosed on the returned report instead
+    of raised — an uncaught raise here would abort the whole Streamlit script
+    at this point, silently skipping every tab whose source block runs later
+    (Paper Framework, Decay/Convergence, Robustness), even though those tabs
+    render earlier in the visual tab bar.
+    """
+
+    if frame is None or frame.empty:
+        return None
+    if observed_only_historical_eligibility(frame).any():
+        return None
+    return f"{label} has no observed-only eligible rows"
 
 
 def _complete_observed_signal_endpoint(featured: pd.DataFrame) -> pd.Timestamp | None:
@@ -1056,11 +1085,31 @@ def build_macro_research_report(
 ) -> MacroResearchReport:
     """Build the report with separate current-monitoring and research authorities."""
 
-    _require_observed_only_authority(raw, label="Macro report research inputs")
-    _require_observed_only_authority(
-        featured,
-        label="Macro report historical evidence",
-    )
+    historical_evidence_gap = _historical_evidence_gap(
+        raw, label="Macro report research inputs"
+    ) or _historical_evidence_gap(featured, label="Macro report historical evidence")
+    if historical_evidence_gap:
+        evidence_end = None
+        for candidate in (featured, raw):
+            if candidate is not None and not candidate.empty and "date" in candidate.columns:
+                evidence_end = pd.Timestamp(pd.to_datetime(candidate["date"]).max())
+                break
+        evidence_end_label = date_label(evidence_end) if evidence_end is not None else "unknown"
+        return MacroResearchReport(
+            available=False,
+            reason=(
+                f"{historical_evidence_gap}. Benchmarks, robustness, and historical analogs "
+                f"cannot be computed for baseline '{baseline_method}' under sample "
+                f"'{sample_mode}'. This can happen when an unbounded ex-post baseline such as "
+                "full_sample spans a sample containing a missing or estimated CPI month: "
+                "because that baseline depends on every row, the missing month's lineage marks "
+                "the whole historical population ineligible. Switch to a row-lookahead-safe "
+                "baseline (for example rolling_36_shifted) to restore historical evidence, or "
+                "use the Current Macro Signal tab for a current-only reading."
+            ),
+            as_of=evidence_end_label,
+            reference_month=evidence_end_label,
+        )
 
     current_raw = raw if current_raw is None else current_raw
     current_featured = featured if current_featured is None else current_featured

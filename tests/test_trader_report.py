@@ -667,6 +667,97 @@ def test_unavailable_report_preserves_two_series_lineage_without_classification(
     assert all(set(row["series_lineage"]) == {"headline_cpi", "core_cpi"} for row in table_payload)
 
 
+def test_full_sample_baseline_discloses_when_missing_cpi_zeroes_historical_evidence() -> None:
+    """Post-H2 audit: full_sample's whole-column lineage must disclose, not raise.
+
+    ``full_sample``'s baseline value depends on every row, so the permanent
+    2025-10 CPI gap marks the *entire* historical population ineligible under
+    that baseline (unlike windowed baselines, which only lose eligibility near
+    the gap). Zero eligible historical evidence must still leave the report
+    unavailable, but ``build_macro_research_report`` must disclose that
+    cleanly instead of raising: an uncaught raise here would abort the whole
+    Streamlit script and silently skip every tab whose source block runs
+    later than the Report tab (Paper Framework, Decay/Convergence,
+    Robustness), even though those tabs render earlier in the visual tab bar.
+    """
+
+    dates = pd.date_range("1981-01-31", "2026-06-30", freq="ME")
+    gap = dates == pd.Timestamp("2025-10-31")
+    headline = 100.0 * (1.002 ** np.arange(len(dates), dtype=float))
+    core = 95.0 * (1.0018 ** np.arange(len(dates), dtype=float))
+    headline[gap] = np.nan
+    core[gap] = np.nan
+    warmup = build_base_frame(
+        pd.DataFrame({"date": dates, "CPIAUCSL": headline, "CPILFESL": core, "TB3MS": 3.0}),
+        imputation_policy="observed_only",
+    )
+
+    for sample_mode, start in (("live_dashboard", "1982-01-31"), ("max_history", "1981-01-31")):
+        observed = warmup.loc[warmup["date"].ge(pd.Timestamp(start))].reset_index(drop=True)
+        views = build_dashboard_data_views(
+            observed,
+            baseline_method="full_sample",
+            warmup_raw=warmup,
+            sample_mode=sample_mode,
+        )
+        assert not report_mod.observed_only_historical_eligibility(views.research_featured).any(), (
+            "fixture must reproduce the whole-sample eligibility wipeout"
+        )
+
+        report = build_macro_research_report(
+            views.research_raw,
+            views.research_featured,
+            baseline_method="full_sample",
+            sample_mode=sample_mode,
+            current_monitoring=views.current_monitoring,
+            benchmark_horizons=(3,),
+            market_horizons=(3,),
+            robustness_baselines=("full_sample",),
+        )
+
+        assert not report.available
+        assert report.reason is not None
+        assert "no observed-only eligible rows" in report.reason
+        assert "full_sample" in report.reason
+        assert "rolling_36_shifted" in report.reason
+        assert report.as_of == "2026-06-30"
+
+
+def test_windowed_baseline_keeps_historical_evidence_despite_missing_cpi_month() -> None:
+    """Scope check: the disclosure path must not relax windowed baselines too."""
+
+    dates = pd.date_range("1981-01-31", "2026-06-30", freq="ME")
+    gap = dates == pd.Timestamp("2025-10-31")
+    headline = 100.0 * (1.002 ** np.arange(len(dates), dtype=float))
+    core = 95.0 * (1.0018 ** np.arange(len(dates), dtype=float))
+    headline[gap] = np.nan
+    core[gap] = np.nan
+    warmup = build_base_frame(
+        pd.DataFrame({"date": dates, "CPIAUCSL": headline, "CPILFESL": core, "TB3MS": 3.0}),
+        imputation_policy="observed_only",
+    )
+    observed = warmup.loc[warmup["date"].ge(pd.Timestamp("1982-01-31"))].reset_index(drop=True)
+    views = build_dashboard_data_views(
+        observed,
+        baseline_method="rolling_36_shifted",
+        warmup_raw=warmup,
+        sample_mode="live_dashboard",
+    )
+    assert report_mod.observed_only_historical_eligibility(views.research_featured).any()
+
+    report = build_macro_research_report(
+        views.research_raw,
+        views.research_featured,
+        baseline_method="rolling_36_shifted",
+        sample_mode="live_dashboard",
+        current_monitoring=views.current_monitoring,
+        benchmark_horizons=(3,),
+        market_horizons=(3,),
+        robustness_baselines=("rolling_36_shifted",),
+    )
+    assert report.available
+
+
 def test_historical_analog_population_rejects_uses_estimated_input_only() -> None:
     raw = _raw_frame(months=120)
     featured = add_transitory_inflation_features(raw, baseline_method="fed_target")

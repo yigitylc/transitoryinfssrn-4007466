@@ -21,6 +21,10 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: exercises the full Streamlit app via AppTest across many sidebar combinations (run explicitly with `pytest -m slow`)",
+]
 
 [tool.ruff.format]
 quote-style = "double"
