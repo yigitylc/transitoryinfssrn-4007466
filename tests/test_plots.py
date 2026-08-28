@@ -147,18 +147,22 @@ def _demo_improvements() -> pd.DataFrame:
             "model": [
                 "tinf_regime_bucket",
                 "tinf_regime_bucket",
+                "tinf_regime_bucket",
+                "no_change",
                 "no_change",
                 "no_change",
             ],
             "comparison_baseline": [
                 "no_change",
                 "mean_reversion",
+                "unconditional_drift",
                 "no_change",
                 "mean_reversion",
+                "unconditional_drift",
             ],
-            # TINF wins vs no-change (positive), trails mean-reversion (negative).
-            "mae_improvement_pct": [12.0, -5.0, 0.0, -8.0],
-            "rmse_improvement_pct": [9.0, -3.0, 0.0, -6.0],
+            # TINF is lower vs no-change/drift, higher vs mean-reversion.
+            "mae_improvement_pct": [12.0, -5.0, 4.0, 0.0, -8.0, -2.0],
+            "rmse_improvement_pct": [9.0, -3.0, 2.0, 0.0, -6.0, -1.0],
         }
     )
 
@@ -326,9 +330,9 @@ def test_improvement_diverging_figure_returns_figure() -> None:
     # A single horizontal diverging bar trace (MAE + RMSE per comparison baseline).
     assert len(fig.data) == 1
     assert fig.data[0].orientation == "h"
-    # Two comparison baselines x two metrics = four bars.
-    assert len(fig.data[0].x) == 4
-    # Sign-based color: TINF wins vs no-change (cold), trails mean-reversion (hot).
+    # Three comparison baselines x two metrics = six bars.
+    assert len(fig.data[0].x) == 6
+    # Sign-based color: TINF is lower vs no-change/drift, higher vs mean-reversion.
     assert set(fig.data[0].marker.color) == {"#2471a3", "#c0392b"}
 
 

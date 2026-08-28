@@ -589,6 +589,7 @@ _IMPROVEMENT_BASELINE_LABELS: dict[str, str] = {
     "no_change": "No-change",
     "mean_reversion": "Mean-reversion",
     "ar1": "AR(1)",
+    "unconditional_drift": "Pooled unconditional drift",
 }
 
 

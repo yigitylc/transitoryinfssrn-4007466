@@ -25,6 +25,13 @@ DEFAULT_ROBUSTNESS_BASELINES: tuple[str, ...] = (
 )
 DEFAULT_ROBUSTNESS_INFLATION_MEASURES: tuple[str, ...] = (HEADLINE_INFLATION_MEASURE,)
 
+TINF_VERDICT_BENCHMARKS: tuple[str, ...] = (
+    "no_change",
+    "mean_reversion",
+    "ar1",
+    "unconditional_drift",
+)
+
 
 def _baseline_label(baseline_method: str) -> str:
     if baseline_method == "full_sample":
@@ -400,9 +407,15 @@ def tinf_regime_verdict(scorecard: pd.DataFrame) -> pd.DataFrame:
                 "rmse_improvement_vs_mean_reversion_pct": float(
                     tinf_row["rmse_improvement_vs_mean_reversion_pct"]
                 ),
+                "mae_improvement_vs_unconditional_drift_pct": float(
+                    tinf_row["mae_improvement_vs_unconditional_drift_pct"]
+                ),
+                "rmse_improvement_vs_unconditional_drift_pct": float(
+                    tinf_row["rmse_improvement_vs_unconditional_drift_pct"]
+                ),
             }
         )
-        for benchmark in ("no_change", "mean_reversion", "ar1"):
+        for benchmark in TINF_VERDICT_BENCHMARKS:
             other = group.loc[group["model"] == benchmark]
             if other.empty:
                 row[f"lower_mae_than_{benchmark}"] = pd.NA
@@ -454,6 +467,8 @@ def robustness_lower_loss_rate_summary(verdict: pd.DataFrame) -> pd.DataFrame:
         "lower_rmse_than_mean_reversion",
         "lower_mae_than_ar1",
         "lower_rmse_than_ar1",
+        "lower_mae_than_unconditional_drift",
+        "lower_rmse_than_unconditional_drift",
     ]
     rows: list[dict[str, object]] = []
     for keys, group in verdict.groupby(group_cols, dropna=False, sort=False):

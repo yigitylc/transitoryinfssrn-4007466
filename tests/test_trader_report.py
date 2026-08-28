@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from transitory_inflation import report as report_mod
+from transitory_inflation.benchmarks import BENCHMARK_MODELS
 from transitory_inflation.dashboard import (
     CURRENT_SIGNAL_IMPUTATION_NOTICE,
     build_dashboard_data_views,
@@ -156,8 +157,11 @@ def test_macro_research_report_builds_required_phase_five_sections() -> None:
         "data_source_used",
         "current_regime",
     }.issubset(report.current_regime_table.columns)
-    assert {"ar1", "cpi_persistence"} <= set(report.benchmark_comparisons["comparison_model"])
+    assert {"ar1", "cpi_persistence", "unconditional_drift"} <= set(
+        report.benchmark_comparisons["comparison_model"]
+    )
     assert any("AR(1)" in line for line in report.signal_confidence_lines)
+    assert any("pooled unconditional drift" in line for line in report.signal_confidence_lines)
     assert any("point-forecast" in line for line in report.caveats)
     assert any("not a trading signal" in line for line in report.caveats)
     assert any("conservative month-end t+1" in line for line in report.market_linkage_lines)
@@ -967,6 +971,7 @@ def test_macro_report_uses_common_origin_panels_and_neutral_loss_language() -> N
 
     comparisons = report.benchmark_comparisons
     assert not comparisons.empty
+    assert set(comparisons["comparison_model"]) == set(BENCHMARK_MODELS) - {"tinf_regime_bucket"}
     assert {
         "common_origin_n",
         "common_origin_start",

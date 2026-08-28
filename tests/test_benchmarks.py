@@ -6,6 +6,9 @@ import pytest
 
 from transitory_inflation.benchmarks import (
     BENCHMARK_MODELS,
+    TINF_FALLBACK_SOURCE,
+    TINF_REGIME_SOURCE,
+    UNCONDITIONAL_DRIFT_SOURCE,
     EmptyCommonOriginPanelError,
     benchmark_comparison_tables,
     benchmark_confusion_summary,
@@ -13,8 +16,17 @@ from transitory_inflation.benchmarks import (
     build_benchmark_forecasts,
     build_native_benchmark_forecasts,
     restrict_to_common_origins,
+    universal_common_origins,
 )
 from transitory_inflation.features import add_transitory_inflation_features
+
+LEGACY_BENCHMARK_MODELS: tuple[str, ...] = (
+    "no_change",
+    "cpi_persistence",
+    "mean_reversion",
+    "ar1",
+    "tinf_regime_bucket",
+)
 
 
 def _feature_frame(periods: int = 90) -> pd.DataFrame:
@@ -46,6 +58,20 @@ def _classification_frame(periods: int = 50) -> pd.DataFrame:
     )
 
 
+def _hand_calculated_drift_frame() -> pd.DataFrame:
+    inflation = np.array([1.0, 2.0, 4.0, 7.0, 11.0, 16.0, 22.0, 29.0, 37.0])
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2020-01-31", periods=len(inflation), freq="ME"),
+            "inflation_yoy": inflation,
+            "baseline": 2.0,
+            "epsilon": inflation - 2.0,
+            "tinf_4m": 1.0,
+            "fixture_regime": ["A", "A", "A", "B", "B", "B", "B", "B", "B"],
+        }
+    )
+
+
 def test_benchmark_outputs_include_required_models_and_tables() -> None:
     df = _feature_frame()
 
@@ -59,15 +85,128 @@ def test_benchmark_outputs_include_required_models_and_tables() -> None:
     assert set(forecasts["model"]) == set(BENCHMARK_MODELS)
     assert set(metrics["model"]) == set(BENCHMARK_MODELS)
     assert set(confusion["model"]) == set(BENCHMARK_MODELS)
-    assert set(improvements["comparison_baseline"]) == {"no_change", "mean_reversion"}
+    assert set(improvements["comparison_baseline"]) == {
+        "no_change",
+        "mean_reversion",
+        "unconditional_drift",
+    }
     assert {"mae", "rmse", "directional_accuracy", "hit_rate"}.issubset(metrics.columns)
     assert {
         "false_positive_rate",
         "false_negative_rate",
         "mae_improvement_vs_no_change_pct",
         "rmse_improvement_vs_mean_reversion_pct",
+        "mae_improvement_vs_unconditional_drift_pct",
+        "rmse_improvement_vs_unconditional_drift_pct",
     }.issubset(metrics.columns)
     assert set(coverage["model"]) == set(BENCHMARK_MODELS)
+
+
+def test_unconditional_drift_and_tinf_sources_match_hand_calculated_histories() -> None:
+    """The pooled benchmark is the literal estimator used by the TINF fallback."""
+
+    native = build_native_benchmark_forecasts(
+        _hand_calculated_drift_frame(),
+        horizon=1,
+        regime_col="fixture_regime",
+        ar_min_observations=3,
+        bucket_min_observations=3,
+    )
+    drift = native.loc[native["model"] == "unconditional_drift"].reset_index(drop=True)
+    tinf = native.loc[native["model"] == "tinf_regime_bucket"].reset_index(drop=True)
+
+    # At origins 3..7, only changes ending by t are known. Those pooled histories
+    # contain 3..7 observations. TINF falls back while B has 0, 1, then 2 prior
+    # observations and switches exactly when the B bucket reaches the minimum 3.
+    assert drift["forecast_cpi_yoy"].tolist() == pytest.approx([9.0, 13.5, 19.0, 25.5, 33.0])
+    assert drift["forecast_cpi_yoy_change"].tolist() == pytest.approx([2.0, 2.5, 3.0, 3.5, 4.0])
+    assert drift["forecast_source"].tolist() == [UNCONDITIONAL_DRIFT_SOURCE] * 5
+    assert drift["forecast_observation_count"].tolist() == [3, 4, 5, 6, 7]
+    assert drift["forecast_pooled_observation_count"].tolist() == [3, 4, 5, 6, 7]
+    assert drift["forecast_same_regime_observation_count"].isna().all()
+
+    assert tinf["forecast_cpi_yoy"].tolist() == pytest.approx([9.0, 13.5, 19.0, 27.0, 34.5])
+    assert tinf["forecast_source"].tolist() == [
+        TINF_FALLBACK_SOURCE,
+        TINF_FALLBACK_SOURCE,
+        TINF_FALLBACK_SOURCE,
+        TINF_REGIME_SOURCE,
+        TINF_REGIME_SOURCE,
+    ]
+    assert tinf["forecast_pooled_observation_count"].tolist() == [3, 4, 5, 6, 7]
+    assert tinf["forecast_same_regime_observation_count"].tolist() == [0, 1, 2, 3, 4]
+    assert tinf["forecast_observation_count"].tolist() == [3, 4, 5, 3, 4]
+
+    fallback = tinf.loc[tinf["forecast_source"] == TINF_FALLBACK_SOURCE]
+    paired = fallback.merge(
+        drift,
+        on=["date", "horizon_months"],
+        suffixes=("_tinf", "_drift"),
+        validate="one_to_one",
+    )
+    assert paired["forecast_cpi_yoy_tinf"].tolist() == pytest.approx(
+        paired["forecast_cpi_yoy_drift"].tolist()
+    )
+    assert (
+        paired["forecast_observation_count_tinf"].tolist()
+        == paired["forecast_observation_count_drift"].tolist()
+    )
+
+
+def test_unconditional_drift_does_not_change_the_legacy_common_origin_panel() -> None:
+    """Drift availability contains TINF, so the sixth model cannot narrow H2."""
+
+    native = build_native_benchmark_forecasts(
+        _feature_frame(120),
+        horizon=3,
+        ar_min_observations=24,
+        bucket_min_observations=8,
+    )
+    legacy_panel = universal_common_origins(native, models=LEGACY_BENCHMARK_MODELS)
+    registered_panel = universal_common_origins(native)
+    pd.testing.assert_frame_equal(registered_panel, legacy_panel)
+    assert len(registered_panel) == 78
+    assert registered_panel["date"].min() == pd.Timestamp("2018-04-30")
+    assert registered_panel["date"].max() == pd.Timestamp("2024-09-30")
+
+    drift_origins = set(native.loc[native["model"] == "unconditional_drift", "date"])
+    tinf_origins = set(native.loc[native["model"] == "tinf_regime_bucket", "date"])
+    assert tinf_origins <= drift_origins
+    assert len(drift_origins) == 107
+    assert len(tinf_origins) == 78
+    assert native.loc[native["model"] == "unconditional_drift", "historical_regime"].isna().any()
+
+    legacy_common = restrict_to_common_origins(
+        native,
+        horizon=3,
+        models=LEGACY_BENCHMARK_MODELS,
+    )
+    registered_common = restrict_to_common_origins(native, horizon=3)
+    legacy_rows = legacy_common.loc[
+        legacy_common["model"].isin(LEGACY_BENCHMARK_MODELS)
+    ].reset_index(drop=True)
+    registered_legacy_rows = registered_common.loc[
+        registered_common["model"].isin(LEGACY_BENCHMARK_MODELS)
+    ].reset_index(drop=True)
+    pd.testing.assert_frame_equal(registered_legacy_rows, legacy_rows)
+
+    registered_counts = registered_common.groupby("model")["date"].nunique()
+    assert set(registered_counts.index) == set(BENCHMARK_MODELS)
+    assert registered_counts.eq(len(registered_panel)).all()
+
+    metrics = benchmark_metric_summary(registered_common).set_index("model")
+    expected_legacy_losses = {
+        "no_change": (0.173276, 0.196435),
+        "cpi_persistence": (0.121385, 0.135110),
+        "mean_reversion": (0.832043, 0.914889),
+        "ar1": (0.181786, 0.204928),
+        "tinf_regime_bucket": (0.142952, 0.172789),
+    }
+    for model, (mae, rmse) in expected_legacy_losses.items():
+        assert float(metrics.loc[model, "mae"]) == pytest.approx(mae, abs=5e-7)
+        assert float(metrics.loc[model, "rmse"]) == pytest.approx(rmse, abs=5e-7)
+    assert float(metrics.loc["unconditional_drift", "mae"]) == pytest.approx(0.17899832733910875)
+    assert float(metrics.loc["unconditional_drift", "rmse"]) == pytest.approx(0.20175999910971165)
 
 
 def test_benchmark_metrics_are_calculated_correctly() -> None:
@@ -210,6 +349,24 @@ def test_forecasts_do_not_change_when_future_rows_after_t_are_perturbed() -> Non
     assert set(base_forecasts.index) == set(BENCHMARK_MODELS)
     assert changed_forecasts.index.tolist() == base_forecasts.index.tolist()
     assert changed_forecasts.to_numpy() == pytest.approx(base_forecasts.to_numpy())
+
+    audit_columns = [
+        "forecast_cpi_yoy",
+        "forecast_source",
+        "forecast_observation_count",
+        "forecast_pooled_observation_count",
+        "forecast_same_regime_observation_count",
+    ]
+    base_audit = (
+        base.loc[base["date"] == target_date].set_index("model").loc[:, audit_columns].sort_index()
+    )
+    changed_audit = (
+        changed.loc[changed["date"] == target_date]
+        .set_index("model")
+        .loc[:, audit_columns]
+        .sort_index()
+    )
+    pd.testing.assert_frame_equal(changed_audit, base_audit)
 
 
 def test_alternative_measure_forecasts_do_not_use_future_outcomes() -> None:

@@ -287,6 +287,7 @@ _LOWER_LOSS_BENCHMARKS = (
     ("no_change", "Lower loss than no-change", plots_mod.COLD),
     ("mean_reversion", "Lower loss than mean-reversion", "#8e44ad"),
     ("ar1", "Lower loss than AR(1)", plots_mod.NEUTRAL),
+    ("unconditional_drift", "Lower loss than pooled drift", "#d68910"),
 )
 LOWER_LOSS_SPECS_MAE = tuple(
     (f"lower_mae_than_{key}_rate", label, color) for key, label, color in _LOWER_LOSS_BENCHMARKS
@@ -1570,10 +1571,14 @@ with tab_benchmarks:
                 tinf_row["mae_improvement_vs_mean_reversion_pct"] > 0
                 or tinf_row["rmse_improvement_vs_mean_reversion_pct"] > 0
             )
+            lower_loss_vs_unconditional_drift = (
+                tinf_row["mae_improvement_vs_unconditional_drift_pct"] > 0
+                or tinf_row["rmse_improvement_vs_unconditional_drift_pct"] > 0
+            )
             panel_n = int(tinf_row.get("common_origin_n", tinf_row["count"]))
             panel_start = macro_data.date_label(tinf_row.get("common_origin_start"))
             panel_end = macro_data.date_label(tinf_row.get("common_origin_end"))
-            verdict_col1, verdict_col2 = st.columns(2)
+            verdict_col1, verdict_col2, verdict_col3 = st.columns(3)
             verdict_col1.metric(
                 "vs no-change",
                 "🔵 Lower MAE or RMSE" if lower_loss_vs_no_change else "🔴 Neither lower",
@@ -1582,6 +1587,15 @@ with tab_benchmarks:
             verdict_col2.metric(
                 "vs mean-reversion",
                 "🔵 Lower MAE or RMSE" if lower_loss_vs_mean_reversion else "🔴 Neither lower",
+                delta_color="off",
+            )
+            verdict_col3.metric(
+                "vs pooled drift",
+                (
+                    "🔵 Lower MAE or RMSE"
+                    if lower_loss_vs_unconditional_drift
+                    else "🔴 Neither lower"
+                ),
                 delta_color="off",
             )
             st.caption(
@@ -1663,6 +1677,10 @@ with tab_benchmarks:
                 "historical_regime",
                 "current_cpi_yoy",
                 "forecast_cpi_yoy",
+                "forecast_source",
+                "forecast_observation_count",
+                "forecast_pooled_observation_count",
+                "forecast_same_regime_observation_count",
                 "actual_cpi_yoy",
                 "forecast_error",
                 "forecast_persistent_high_inflation",
@@ -2178,6 +2196,8 @@ with tab_robustness:
                     "rmse_improvement_vs_no_change_pct",
                     "mae_improvement_vs_mean_reversion_pct",
                     "rmse_improvement_vs_mean_reversion_pct",
+                    "mae_improvement_vs_unconditional_drift_pct",
+                    "rmse_improvement_vs_unconditional_drift_pct",
                     "rank_by_mae",
                     "rank_by_rmse",
                 ]
@@ -2211,12 +2231,16 @@ with tab_robustness:
                     "rmse_differential_vs_mean_reversion_pp",
                     "mae_differential_vs_ar1_pp",
                     "rmse_differential_vs_ar1_pp",
+                    "mae_differential_vs_unconditional_drift_pp",
+                    "rmse_differential_vs_unconditional_drift_pp",
                     "lower_mae_than_no_change",
                     "lower_rmse_than_no_change",
                     "lower_mae_than_mean_reversion",
                     "lower_rmse_than_mean_reversion",
                     "lower_mae_than_ar1",
                     "lower_rmse_than_ar1",
+                    "lower_mae_than_unconditional_drift",
+                    "lower_rmse_than_unconditional_drift",
                 ]
                 st.caption(
                     "`tinf_lowest_*` and `lower_*_than_*` order point estimates on that setting's "

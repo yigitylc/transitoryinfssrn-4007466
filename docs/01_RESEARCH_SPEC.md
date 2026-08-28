@@ -141,6 +141,15 @@ outcome uncertainty treatment exists, benchmark results are stated as point esti
 higher point loss, and loss differentials — never as one model beating another. See
 `docs/PHASE0_RESEARCH_CONTRACTS.md` section 6.
 
+The registered universe also includes `unconditional_drift`. At origin `t` and horizon `h`, it
+forecasts current CPI YoY plus the expanding mean of every non-null completed change
+`y_(s+h) - y_s` with `s + h <= t`. It uses the same minimum pooled-history gate as the TINF/regime
+bucket. This is exactly the pooled estimator used when TINF lacks enough prior observations in its
+current regime; TINF's fallback rule is unchanged. Forecast output records whether TINF used its
+same-regime mean or the pooled fallback, together with the selected-history, pooled-history, and
+same-regime counts. The explicit drift model does not require a regime label, so its native origin
+set contains the TINF model's origin set and does not narrow the existing universal panel.
+
 Default row-lookahead-safe settings:
 
 - `sample_mode = live_dashboard`

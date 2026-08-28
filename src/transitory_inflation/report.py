@@ -40,8 +40,13 @@ MODEL_LABELS: dict[str, str] = {
     "cpi_persistence": "CPI persistence",
     "mean_reversion": "mean reversion to baseline",
     "ar1": "AR(1)",
+    "unconditional_drift": "pooled unconditional drift",
     "tinf_regime_bucket": "TINF/regime bucket",
 }
+
+REPORT_BENCHMARK_COMPARATORS: tuple[str, ...] = tuple(
+    model for model in benchmark_mod.BENCHMARK_MODELS if model != "tinf_regime_bucket"
+)
 
 # Stylized macro-trader regime priors. Descriptive interpretation only: these
 # are not validated inside this project yet and must never be rendered as
@@ -341,7 +346,7 @@ def _benchmark_tables(
         if "tinf_regime_bucket" not in by_model.index:
             continue
         tinf = by_model.loc["tinf_regime_bucket"]
-        for model in ("no_change", "cpi_persistence", "mean_reversion", "ar1"):
+        for model in REPORT_BENCHMARK_COMPARATORS:
             if model not in by_model.index:
                 continue
             other = by_model.loc[model]
@@ -400,7 +405,7 @@ def _benchmark_lines(
         f"All benchmark comparisons below are point estimates on one common-origin panel "
         f"per horizon ({panel_label}); every model is scored on identical origins."
     )
-    for model in ("no_change", "cpi_persistence", "mean_reversion", "ar1"):
+    for model in REPORT_BENCHMARK_COMPARATORS:
         group = comparisons.loc[comparisons["comparison_model"] == model]
         if group.empty:
             continue
@@ -481,6 +486,12 @@ def _robustness_lines(
     lowest_rmse = float(verdict["tinf_lowest_rmse"].dropna().astype(float).mean())
     lower_mae_ar1 = float(verdict["lower_mae_than_ar1"].dropna().astype(float).mean())
     lower_rmse_ar1 = float(verdict["lower_rmse_than_ar1"].dropna().astype(float).mean())
+    lower_mae_drift = float(
+        verdict["lower_mae_than_unconditional_drift"].dropna().astype(float).mean()
+    )
+    lower_rmse_drift = float(
+        verdict["lower_rmse_than_unconditional_drift"].dropna().astype(float).mean()
+    )
     lines.append(
         f"Across {settings_count} robustness settings — each scored on its own common-origin "
         f"panel — TINF/regime holds the lowest MAE point estimate in {lowest_mae:.0%} of "
@@ -491,6 +502,12 @@ def _robustness_lines(
         f"{lower_mae_ar1:.0%} of settings and the lower RMSE point estimate in "
         f"{lower_rmse_ar1:.0%}. These are orderings of point estimates, not significance "
         "results."
+    )
+    lines.append(
+        f"Against pooled unconditional drift, TINF/regime posts the lower MAE point estimate "
+        f"in {lower_mae_drift:.0%} of settings and the lower RMSE point estimate in "
+        f"{lower_rmse_drift:.0%}. This isolates the point-estimate contribution of regime "
+        "conditioning from the fallback estimator it already uses."
     )
 
     measures = ", ".join(

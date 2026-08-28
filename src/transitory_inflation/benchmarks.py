@@ -14,7 +14,25 @@ BENCHMARK_MODELS: tuple[str, ...] = (
     "cpi_persistence",
     "mean_reversion",
     "ar1",
+    "unconditional_drift",
     "tinf_regime_bucket",
+)
+
+UNCONDITIONAL_DRIFT_SOURCE = "pooled_expanding_drift"
+TINF_REGIME_SOURCE = "same_regime_mean"
+TINF_FALLBACK_SOURCE = "pooled_expanding_drift_fallback"
+
+FORECAST_PROVENANCE_COLUMNS: tuple[str, ...] = (
+    "forecast_source",
+    "forecast_observation_count",
+    "forecast_pooled_observation_count",
+    "forecast_same_regime_observation_count",
+)
+
+RELATIVE_IMPROVEMENT_BASELINES: tuple[str, ...] = (
+    "no_change",
+    "mean_reversion",
+    "unconditional_drift",
 )
 
 #: Keys identifying one forecast origin within a single-horizon benchmark frame.
@@ -28,6 +46,10 @@ NATIVE_EXCLUSION_REASONS: dict[str, str] = {
     "cpi_persistence": "Requires CPI YoY at t-h, so the first h origins have no forecast.",
     "mean_reversion": "Requires a computed baseline, so baseline warm-up origins have no forecast.",
     "ar1": "Requires the expanding AR(1) minimum prior-observation count.",
+    "unconditional_drift": (
+        "Requires the minimum count of prior completed horizon-specific CPI YoY changes; "
+        "it does not require a historical regime."
+    ),
     "tinf_regime_bucket": (
         "Requires a walk-forward historical regime (expanding percentile warm-up), an origin at "
         "least h months into the sample, and a prior same-regime or unconditional bucket that "
@@ -145,14 +167,110 @@ def _walk_forward_regime_bucket_forecast(
     inflation_col: str,
     regime_col: str,
 ) -> pd.Series:
-    """Forecast with prior completed same-regime CPI YoY changes only."""
+    """Return the legacy TINF series while details retain source/count lineage."""
+
+    return _walk_forward_regime_bucket_details(
+        df,
+        horizon=horizon,
+        min_bucket_observations=min_bucket_observations,
+        inflation_col=inflation_col,
+        regime_col=regime_col,
+    )["forecast_cpi_yoy"]
+
+
+def _completed_change_history(
+    df: pd.DataFrame,
+    *,
+    position: int,
+    horizon: int,
+    change_col: str,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Return changes whose horizon outcomes are known at one forecast origin."""
+
+    latest_known_origin = position - horizon
+    if latest_known_origin < 0:
+        empty = df.iloc[:0]
+        return empty, empty[change_col].dropna()
+    prior = df.iloc[: latest_known_origin + 1]
+    return prior, prior[change_col].dropna()
+
+
+def _empty_forecast_details(index: pd.Index) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "forecast_cpi_yoy": pd.Series(np.nan, index=index, dtype=float),
+            "forecast_source": pd.Series(pd.NA, index=index, dtype="string"),
+            "forecast_observation_count": pd.Series(pd.NA, index=index, dtype="Int64"),
+            "forecast_pooled_observation_count": pd.Series(pd.NA, index=index, dtype="Int64"),
+            "forecast_same_regime_observation_count": pd.Series(pd.NA, index=index, dtype="Int64"),
+        },
+        index=index,
+    )
+
+
+def _walk_forward_unconditional_drift_details(
+    df: pd.DataFrame,
+    horizon: int,
+    min_observations: int,
+    inflation_col: str,
+) -> pd.DataFrame:
+    """Forecast current CPI plus the mean of all prior completed h-step changes."""
+
+    horizon = _horizon(horizon)
+    suffix = _suffix(horizon)
+    change_col = f"cpi_yoy_change_{suffix}"
+    _require_columns(df, [inflation_col, change_col])
+
+    details = _empty_forecast_details(df.index)
+    forecast_col = details.columns.get_loc("forecast_cpi_yoy")
+    source_col = details.columns.get_loc("forecast_source")
+    observation_count_col = details.columns.get_loc("forecast_observation_count")
+    pooled_count_col = details.columns.get_loc("forecast_pooled_observation_count")
+
+    for pos in range(len(df)):
+        current_inflation = df[inflation_col].iloc[pos]
+        if pd.isna(current_inflation):
+            continue
+
+        _, prior_changes = _completed_change_history(
+            df,
+            position=pos,
+            horizon=horizon,
+            change_col=change_col,
+        )
+        pooled_count = len(prior_changes)
+        details.iat[pos, pooled_count_col] = pooled_count
+        if pooled_count < min_observations:
+            continue
+
+        details.iat[pos, forecast_col] = float(current_inflation + prior_changes.mean())
+        details.iat[pos, source_col] = UNCONDITIONAL_DRIFT_SOURCE
+        details.iat[pos, observation_count_col] = pooled_count
+
+    return details
+
+
+def _walk_forward_regime_bucket_details(
+    df: pd.DataFrame,
+    horizon: int,
+    min_bucket_observations: int,
+    inflation_col: str,
+    regime_col: str,
+) -> pd.DataFrame:
+    """Forecast from a same-regime mean, falling back to the pooled drift mean."""
 
     horizon = _horizon(horizon)
     suffix = _suffix(horizon)
     change_col = f"cpi_yoy_change_{suffix}"
     _require_columns(df, [inflation_col, regime_col, change_col])
 
-    forecasts = pd.Series(np.nan, index=df.index, dtype=float)
+    details = _empty_forecast_details(df.index)
+    forecast_col = details.columns.get_loc("forecast_cpi_yoy")
+    source_col = details.columns.get_loc("forecast_source")
+    observation_count_col = details.columns.get_loc("forecast_observation_count")
+    pooled_count_col = details.columns.get_loc("forecast_pooled_observation_count")
+    same_regime_count_col = details.columns.get_loc("forecast_same_regime_observation_count")
+
     for pos in range(len(df)):
         current_inflation = df[inflation_col].iloc[pos]
         current_regime = df[regime_col].iloc[pos]
@@ -160,25 +278,36 @@ def _walk_forward_regime_bucket_forecast(
             continue
 
         # At month t, only rows ending no later than t have known t+h outcomes.
-        latest_known_origin = pos - horizon
-        if latest_known_origin < 0:
-            continue
-        prior = df.iloc[: latest_known_origin + 1]
-        prior_changes = prior[change_col].dropna()
+        prior, prior_changes = _completed_change_history(
+            df,
+            position=pos,
+            horizon=horizon,
+            change_col=change_col,
+        )
+        pooled_count = len(prior_changes)
+        details.iat[pos, pooled_count_col] = pooled_count
         if prior_changes.empty:
             continue
 
         same_regime = prior.loc[prior[regime_col] == current_regime, change_col].dropna()
+        same_regime_count = len(same_regime)
+        details.iat[pos, same_regime_count_col] = same_regime_count
         if len(same_regime) >= min_bucket_observations:
             expected_change = float(same_regime.mean())
+            source = TINF_REGIME_SOURCE
+            observation_count = same_regime_count
         elif len(prior_changes) >= min_bucket_observations:
             expected_change = float(prior_changes.mean())
+            source = TINF_FALLBACK_SOURCE
+            observation_count = pooled_count
         else:
             continue
 
-        forecasts.iloc[pos] = float(current_inflation + expected_change)
+        details.iat[pos, forecast_col] = float(current_inflation + expected_change)
+        details.iat[pos, source_col] = source
+        details.iat[pos, observation_count_col] = observation_count
 
-    return forecasts
+    return details
 
 
 def build_native_benchmark_forecasts(
@@ -233,6 +362,19 @@ def build_native_benchmark_forecasts(
     )
 
     current = validation_df[inflation_col]
+    unconditional_drift = _walk_forward_unconditional_drift_details(
+        validation_df,
+        horizon=horizon,
+        min_observations=bucket_min_observations,
+        inflation_col=inflation_col,
+    )
+    tinf_regime_bucket = _walk_forward_regime_bucket_details(
+        validation_df,
+        horizon=horizon,
+        min_bucket_observations=bucket_min_observations,
+        inflation_col=inflation_col,
+        regime_col=regime_col,
+    )
     forecasts_by_model = {
         "no_change": current,
         "cpi_persistence": current + (current - current.shift(horizon)),
@@ -242,13 +384,18 @@ def build_native_benchmark_forecasts(
             horizon=horizon,
             min_observations=ar_min_observations,
         ),
-        "tinf_regime_bucket": _walk_forward_regime_bucket_forecast(
-            validation_df,
-            horizon=horizon,
-            min_bucket_observations=bucket_min_observations,
-            inflation_col=inflation_col,
-            regime_col=regime_col,
-        ),
+        "unconditional_drift": unconditional_drift["forecast_cpi_yoy"],
+        "tinf_regime_bucket": tinf_regime_bucket["forecast_cpi_yoy"],
+    }
+    details_by_model = {
+        "unconditional_drift": unconditional_drift,
+        "tinf_regime_bucket": tinf_regime_bucket,
+    }
+    static_sources = {
+        "no_change": "current_cpi_yoy",
+        "cpi_persistence": "horizon_momentum",
+        "mean_reversion": "origin_baseline",
+        "ar1": "expanding_ar1",
     }
 
     rows: list[pd.DataFrame] = []
@@ -272,6 +419,14 @@ def build_native_benchmark_forecasts(
         model_frame = base.copy()
         model_frame["model"] = model
         model_frame["forecast_cpi_yoy"] = forecast
+        details = details_by_model.get(model)
+        if details is None:
+            model_frame["forecast_source"] = static_sources[model]
+            for column in FORECAST_PROVENANCE_COLUMNS[1:]:
+                model_frame[column] = pd.Series(pd.NA, index=model_frame.index, dtype="Int64")
+        else:
+            for column in FORECAST_PROVENANCE_COLUMNS:
+                model_frame[column] = details[column]
         model_frame["forecast_cpi_yoy_change"] = forecast - current
         model_frame["forecast_error"] = forecast - validation_df[actual_col]
         forecast_gap = forecast - validation_df[baseline_col]
@@ -300,6 +455,7 @@ def build_native_benchmark_forecasts(
         "eligible_positive_shock",
         "historical_regime",
         "forecast_cpi_yoy",
+        *FORECAST_PROVENANCE_COLUMNS,
         "actual_cpi_yoy",
         "forecast_error",
         "forecast_cpi_yoy_change",
@@ -659,7 +815,7 @@ def _add_relative_improvement_columns(
     forecasts: pd.DataFrame,
 ) -> pd.DataFrame:
     out = summary.copy()
-    for baseline_model in ("no_change", "mean_reversion"):
+    for baseline_model in RELATIVE_IMPROVEMENT_BASELINES:
         improvements = [
             _paired_loss_differential(forecasts, str(model), baseline_model)
             for model in out["model"]
@@ -684,7 +840,7 @@ def benchmark_relative_improvement(summary: pd.DataFrame) -> pd.DataFrame:
 
     rows: list[dict[str, object]] = []
     for _, row in summary.iterrows():
-        for baseline_model in ("no_change", "mean_reversion"):
+        for baseline_model in RELATIVE_IMPROVEMENT_BASELINES:
             rows.append(
                 {
                     "model": row["model"],

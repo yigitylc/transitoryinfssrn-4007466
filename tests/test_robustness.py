@@ -49,9 +49,13 @@ def test_robustness_scorecard_contains_expected_horizons_thresholds_and_models()
 
     assert set(scorecard["horizon_months"]) == set(DEFAULT_ROBUSTNESS_HORIZONS)
     assert set(scorecard["threshold_pp"]) == set(DEFAULT_ROBUSTNESS_THRESHOLDS)
-    assert {"no_change", "mean_reversion", "ar1", "tinf_regime_bucket"}.issubset(
-        set(scorecard["model"])
-    )
+    assert {
+        "no_change",
+        "mean_reversion",
+        "ar1",
+        "unconditional_drift",
+        "tinf_regime_bucket",
+    }.issubset(set(scorecard["model"]))
     assert {"rank_by_mae", "rank_by_rmse"}.issubset(scorecard.columns)
     assert set(scorecard["inflation_measure"]) == set(DEFAULT_ROBUSTNESS_INFLATION_MEASURES)
 
@@ -139,12 +143,16 @@ def test_tinf_regime_verdict_has_lower_loss_flags_and_differentials() -> None:
         "lower_rmse_than_mean_reversion",
         "lower_mae_than_ar1",
         "lower_rmse_than_ar1",
+        "lower_mae_than_unconditional_drift",
+        "lower_rmse_than_unconditional_drift",
         "mae_differential_vs_no_change_pp",
         "rmse_differential_vs_no_change_pp",
         "mae_differential_vs_mean_reversion_pp",
         "rmse_differential_vs_mean_reversion_pp",
         "mae_differential_vs_ar1_pp",
         "rmse_differential_vs_ar1_pp",
+        "mae_differential_vs_unconditional_drift_pp",
+        "rmse_differential_vs_unconditional_drift_pp",
     }.issubset(verdict.columns)
     # Neutral point-estimate language only: no "beats"/"wins" claim columns.
     assert not [column for column in verdict.columns if "beats" in column or "win" in column]
@@ -192,6 +200,8 @@ def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
         "rmse_improvement_vs_no_change_pct",
         "mae_improvement_vs_mean_reversion_pct",
         "rmse_improvement_vs_mean_reversion_pct",
+        "mae_improvement_vs_unconditional_drift_pct",
+        "rmse_improvement_vs_unconditional_drift_pct",
         "rank_by_mae",
         "rank_by_rmse",
     }
@@ -221,18 +231,24 @@ def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
         "rmse_improvement_vs_no_change_pct",
         "mae_improvement_vs_mean_reversion_pct",
         "rmse_improvement_vs_mean_reversion_pct",
+        "mae_improvement_vs_unconditional_drift_pct",
+        "rmse_improvement_vs_unconditional_drift_pct",
         "lower_mae_than_no_change",
         "lower_rmse_than_no_change",
         "lower_mae_than_mean_reversion",
         "lower_rmse_than_mean_reversion",
         "lower_mae_than_ar1",
         "lower_rmse_than_ar1",
+        "lower_mae_than_unconditional_drift",
+        "lower_rmse_than_unconditional_drift",
         "mae_differential_vs_no_change_pp",
         "rmse_differential_vs_no_change_pp",
         "mae_differential_vs_mean_reversion_pp",
         "rmse_differential_vs_mean_reversion_pp",
         "mae_differential_vs_ar1_pp",
         "rmse_differential_vs_ar1_pp",
+        "mae_differential_vs_unconditional_drift_pp",
+        "rmse_differential_vs_unconditional_drift_pp",
     }
     expected_lower_loss_rate_columns = {
         "sample_mode",
@@ -252,6 +268,8 @@ def test_robustness_tables_do_not_introduce_phase_four_market_columns() -> None:
         "lower_rmse_than_mean_reversion_rate",
         "lower_mae_than_ar1_rate",
         "lower_rmse_than_ar1_rate",
+        "lower_mae_than_unconditional_drift_rate",
+        "lower_rmse_than_unconditional_drift_rate",
     }
 
     assert set(scorecard.columns) <= expected_scorecard_columns

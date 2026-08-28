@@ -83,7 +83,7 @@ All layers -> nine-tab Streamlit dashboard
 | TINF | 4M/8M/12M average deviations | One shared trailing-current rolling implementation for every mode. |
 | Current regime | Current descriptive state | Full-loaded-sample TINF percentile plus prior-complete-row direction; pressure from 4M/8M/12M ordering. |
 | Historical validation | Test future inflation behavior without feeding outcomes into signals | Walk-forward regimes, forward CPI/epsilon outcomes, mechanical positive-shock and convergence labels, transitions, examples. |
-| Benchmarks | Compare TINF/regime to simple alternatives | No-change, horizon momentum labeled CPI persistence, mean reversion, expanding AR(1), and historical-regime bucket mean. |
+| Benchmarks | Compare TINF/regime to simple alternatives | No-change, horizon momentum labeled CPI persistence, mean reversion, expanding AR(1), pooled unconditional drift, and historical-regime bucket mean with explicit source/count lineage. |
 | Robustness | Vary samples, measures, baselines, horizons, thresholds | Grid over those dimensions, but no paper-lagged TINF variant and point-error rows are duplicated across thresholds. |
 | Market Linkage | Descriptive rates-only history | Six approved FRED nominal, breakeven, and real-yield series; forward bp distributions, rankings, channels, correlations. |
 | Trader Research | Current-state-conditioned rates history | Walk-forward current regime; optional pressure conditioning; distributions and analog months; no PnL or recommendations. |
@@ -291,6 +291,10 @@ Severity means:
 - **Why it matters:** some attributed TINF/regime performance does not use regime information at all.
 - **Type:** bug / misleading model attribution.
 - **Recommended fix:** add forecast provenance and bucket `n`; score pure-bucket and fallback rows separately; or implement explicit hierarchical shrinkage and name it accordingly.
+- **2026-08-27 status:** partially remediated. The pooled fallback is now an explicit
+  `unconditional_drift` benchmark, and every TINF/drift forecast exposes its source and selected,
+  pooled, and same-regime counts. TINF intentionally retains its existing fallback, so pure-bucket
+  scoring remains a separate, unimplemented option rather than being implied by this change.
 - **Owner:** Codex.
 - **Priority:** P1.
 
@@ -726,7 +730,7 @@ Minimum honest labels before replication is repaired:
 | Walk-forward historical regimes | Pass on complete, ordered data | Thresholds use prior observations only. Direction after a gap is mishandled. |
 | Forward validation outcomes | Pass as target construction | `shift(-h)` outcomes are appended after signal construction and used for scoring only. |
 | Benchmark AR(1) | Pass on direct future access | Expanding fit uses history through t; dropping gaps creates calendar-adjacency risk. |
-| Regime-bucket forecast | Pass on outcome availability | Only completed past outcomes are used; fallback attribution remains misleading. |
+| Regime-bucket forecast | Pass on outcome availability | Only completed past outcomes are used; the retained pooled fallback now has explicit source and count lineage. |
 | CPI interpolation | **Fail for strict historical no-lookahead** | Imputed t depends on t+1; affected origins/windows are not excluded or tagged. |
 | Latest-revised FRED | Limitation | No ALFRED vintage; historical values may include later revisions. This is disclosed but not solved. |
 | CPI reference month as date | **Fail for decision-date semantics** | CPI month t is treated as known at month-end t, although published in t+1. |
@@ -815,7 +819,8 @@ It cannot yet support:
 - Replace binary OR-based cards with MAE/RMSE-specific `win / mixed / trail / indistinguishable` states.
 - Put AR(1) in the headline, not only the detail table.
 - Rename `cpi_persistence` to `horizon momentum` or show its exact formula.
-- Disclose regime-bucket fallback share and bucket `n`.
+- Keep regime-bucket source, fallback share, selected `n`, pooled `n`, and same-regime `n` visible;
+  add pure-bucket-only scoring only as a separately named future model.
 - Show sample start/end and common `n` on the chart.
 
 #### Market Linkage
@@ -876,7 +881,8 @@ It cannot yet support:
 6. Universal common-sample benchmark rank/report/verdict tests, including AR(1).
 7. Forecast/actual persistence anchor-consistency test.
 8. Per-metric validation denominator, weak-evidence, and interval tests.
-9. Regime-bucket fallback provenance and pure-bucket scoring tests.
+9. Pure-bucket-only scoring tests if that separately named model is added; fallback provenance and
+   count regression tests are implemented.
 10. Threshold-grid test proving point-error settings are not duplicated.
 11. Sorted, duplicate, missing-month, and irregular-calendar contract tests.
 12. Pressure-conditioned channel roll-up test.

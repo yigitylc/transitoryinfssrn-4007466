@@ -24,8 +24,8 @@ The app computes:
 * Rolling AR(1) persistence
 * Paper-style decay/convergence estimates
 * Historical forward-outcome validation of the regime signal
-* Benchmark comparison against no-change, CPI persistence, mean reversion, and AR(1),
-  scored on one common set of forecast origins shared by every model
+* Benchmark comparison against no-change, CPI persistence, mean reversion, AR(1), and pooled
+  unconditional drift, scored on one common set of forecast origins shared by every model
 * Robustness views across baselines, sample windows, inflation measures, horizons, and thresholds
 * Descriptive market linkage to Treasury yields, breakevens, and real yields
 * A synthesized macro research report
@@ -121,10 +121,13 @@ or buy/sell recommender.
 * **Current Macro Signal** — latest live regime snapshot under the selected mode and baseline.
 * **Historical Signal Validation** (Phase 1) — forward-outcome tables by regime and short-term pressure, threshold sensitivity, and worked examples.
 * **Benchmark Comparison** (Phase 2) — TINF/regime vs no-change, CPI persistence, mean
-  reversion, and AR(1) on MAE/RMSE/directional/hit-rate metrics. Every model is scored on one
-  universal common-origin panel per horizon, so all denominators match; each model's own native
-  sample is shown separately as a coverage diagnostic. Results are point estimates with no
-  significance test, so the tab reports lower/higher point loss rather than wins.
+  reversion, AR(1), and pooled unconditional drift on MAE/RMSE/directional/hit-rate metrics. The
+  drift benchmark adds the expanding mean of prior completed horizon-specific CPI changes to
+  current CPI; it is the same estimator used by the TINF fallback. Forecast rows disclose their
+  source and the selected, pooled, and same-regime observation counts. Every model is scored on
+  one universal common-origin panel per horizon, so all denominators match; each model's own
+  native sample is shown separately as a coverage diagnostic. Results are point estimates with
+  no significance test, so the tab reports lower/higher point loss rather than wins.
 * **Market Linkage** (Phase 4) — descriptive history of how Treasury yields, breakevens, and real yields moved after past TINF/regime states.
 * **Trader Research** — descriptive, rates-only reading conditioned on today's live-safe regime bucket: the forward rate-change distribution (median, p25–p75, hit rates) and the analog months behind it. No forecasts, no PnL.
 * **Paper Framework** — paper-style descriptive moments, correlations, and robust OLS regressions.

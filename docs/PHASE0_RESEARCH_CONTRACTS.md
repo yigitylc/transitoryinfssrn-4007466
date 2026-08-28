@@ -326,6 +326,14 @@ Implemented rules (H2):
    language only: `lower_mae_than_<model>`, `tinf_lowest_mae`, `<metric>_differential_<...>_pp`,
    and "lower point estimate" prose. `beats`, `wins`, and win-rate naming are prohibited in
    columns, chart labels, cards, and report sentences.
+8. `unconditional_drift` is a registered benchmark defined at origin `t`, horizon `h`, as current
+   CPI YoY plus the mean of all non-null `h`-step CPI YoY changes whose outcomes are complete by
+   `t` (`s + h <= t`). It shares the TINF fallback's minimum-history gate and pooled estimator but
+   does not require a regime. TINF keeps its existing rule: use the prior same-regime mean when its
+   count meets the gate; otherwise use this pooled estimator when its count meets the gate.
+   `forecast_source`, selected-history count, pooled-history count, and same-regime count make that
+   branch observable. Because every available TINF origin also has an available drift forecast,
+   registering drift must not narrow the legacy five-model universal panel.
 
 ## 7. Evidence-strength contract
 
